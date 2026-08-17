@@ -77,29 +77,29 @@ for event in longpoll.listen():
                     transaction_data = json.loads(reply_text)
                     
                     # Отправляем пользователю сообщение, что начали обработку
-                    send_vk_message(user_id, f"? Записываю: {transaction_data['item']} на {transaction_data['amount']} руб...")
+                    send_vk_message(user_id, f"Записываю: {transaction_data['item']} на {transaction_data['amount']} руб...")
                     
                     # Отправляем в Google Таблицу
                     gs_response = send_to_google_sheets(transaction_data)
                     
                     # Обрабатываем ответ от таблицы
                     if gs_response.get("status") == "SUCCESS":
-                        send_vk_message(user_id, "? Успешно записано в таблицу!")
+                        send_vk_message(user_id, "Успешно записано в таблицу!")
                     elif gs_response.get("status") == "SUCCESS_AUTO_ADDED":
-                        send_vk_message(user_id, f"? Записано! Автоматически определил категорию: {gs_response.get('recognized_cat')} -> {gs_response.get('recognized_sub')}")
+                        send_vk_message(user_id, f"Записано! Автоматически определил категорию: {gs_response.get('recognized_cat')} -> {gs_response.get('recognized_sub')}")
                     elif gs_response.get("status") == "UNKNOWN_ITEM":
                         # Если таблица не знает слово, отправляем меню пользователю
-                        send_vk_message(user_id, "?? Я не знаю эту статью. Куда ее отнести? Напиши категорию.")
+                        send_vk_message(user_id, "Я не знаю эту статью. Скажи в двух словах хотя бы примерно что это.")
                         # В будущем здесь можно добавить логику кнопок (Inline Keyboards) ВК
                     else:
-                        send_vk_message(user_id, f"? Ошибка таблицы: {gs_response.get('message')}")
+                        send_vk_message(user_id, f"Ошибка таблицы: {gs_response.get('message')}")
                         
                 except json.JSONDecodeError:
-                    send_vk_message(user_id, "? Ошибка: ИИ вернул неправильный формат данных.")
+                    send_vk_message(user_id, "Ошибка: ИИ вернул неправильный формат данных.")
             else:
                 # Если ИИ вернул обычный текст (просто общение)
                 send_vk_message(user_id, reply_text)
                 
         except Exception as e:
-            send_vk_message(user_id, "? Ошибка связи с ИИ.")
+            send_vk_message(user_id, "Ошибка связи с ИИ.")
             print(f"Ошибка: {e}")
