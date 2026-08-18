@@ -40,24 +40,21 @@ PROMPT_EXTRACT = """
 ПРАВИЛО: НИКОГДА не добавляй поля "category" или "subcategory".
 """
 
-# ЖЕСТКИЙ ПРОМПТ ДЛЯ КЛАССИФИКАТОРА
 PROMPT_CATEGORIZE = """
-Ты — безэмоциональный робот-классификатор. Тебе дано название операции и СТРОГОЕ меню.
-Твоя задача — найти 100% логичное совпадение в меню.
-ПРАВИЛО 1: Если ты сомневаешься хотя бы на 1%, СРАЗУ возвращай "UNKNOWN".
-ПРАВИЛО 2: НЕ ПЫТАЙСЯ УГАДАТЬ. Если это имя человека, непонятный набор букв или сленг — возвращай "UNKNOWN".
+Ты — умный классификатор. Тебе дано название операции (и иногда пояснение от пользователя), а также СТРОГОЕ меню категорий.
+Твоя задача — найти логичное совпадение в меню.
+ПРАВИЛО 1: Если сомневаешься — возвращай "UNKNOWN".
+ПРАВИЛО 2: Если это имя человека или сленг без пояснения — возвращай "UNKNOWN".
 Формат ответа (только JSON):
 {
   "category": "Выбранная категория",
   "subcategory": "Выбранная подкатегория"
 }
-Или если не уверен:
-{
-  "category": "UNKNOWN",
-  "subcategory": "UNKNOWN"
-}
 """
 
+# ==========================================
+# 3. ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
+# ==========================================
 def send_vk_message(user_id, text):
     vk.messages.send(user_id=user_id, message=text, random_id=0)
 
@@ -68,20 +65,115 @@ def send_to_google_sheets(payload):
     except Exception as e:
         return {"status": "ERROR", "message": str(e)}
 
+def categorize_with_ai(item, menu_str, context=""):
+    """Функция, которая просит ИИ выбрать категорию (с контекстом или без)"""
+    prompt = f"Операция: {item}\n"
+    if context:
+        prompt += f"Пояснение пользователя: {context}\n"
+    prompt += f"\nМеню:\n{menu_str}"
+    
+    try:
+        response = ai_client.chat.completions.create(
+            model="gpt-3.5-turbo",
+            temperature=0.0, # Отключаем фантазию
+            messages=[
+                {"role": "system", "content": PROMPT_CATEGORIZE},
+                {"role": "user", "content": prompt}
+            ]
+        )
+        text = response.choices[0].message.content.strip()
+        if text.startswith("{") and text.endswith("}"):
+            data = json.loads(text)
+            return data.get("category", "UNKNOWN"), data.get("subcategory", "UNKNOWN")
+    except Exception as e:
+        print("Ошибка ИИ классификации:", e)
+    return "UNKNOWN", "UNKNOWN"
+
 print("Бот успешно запущен и слушает сообщения ВКонтакте...")
 
+# Память бота (состояния пользователей)
 user_states = {}
 
+# ==========================================
+# 4. ГЛАВНЫЙ ЦИКЛ БОТА
+# ==========================================
 for event in longpoll.listen():
     if event.type == VkEventType.MESSAGE_NEW and event.to_me:
         user_id = event.user_id
-        user_text = event.text
+        user_text = event.text.strip()
+        user_text_lower = user_text.lower()
         
-        # --- РЕЖИМ РУЧНОГО ОБУЧЕНИЯ ---
-        if user_id in user_states and user_states[user_id]["state"] == "waiting_for_category":
-            if user_text.lower() == "отмена":
+        # ---------------------------------------------------------
+        # СОСТОЯНИЕ 1: ЖДЕМ ПОДТВЕРЖДЕНИЯ ОТ ПОЛЬЗОВАТЕЛЯ (ДА/НЕТ)
+        # ---------------------------------------------------------
+        if user_id in user_states and user_states[user_id]["state"] == "confirm_category":
+            if user_text_lower == "отмена":
                 del user_states[user_id]
-                send_vk_message(user_id, "❌ Добавление отменено.")
+                send_vk_message(user_id, "❌ Операция отменена.")
+                continue
+                
+            if user_text_lower in ["да", "верно", "ага", "давай", "ок", "yes"]:
+                # Пользователь согласен! Записываем в таблицу
+                payload = user_states[user_id]["payload"]
+                payload["category"] = user_states[user_id]["ai_cat"]
+                payload["subcategory"] = user_states[user_id]["ai_sub"]
+                
+                send_vk_message(user_id, "⏳ Записываю...")
+                gs_response = send_to_google_sheets(payload)
+                if gs_response.get("status") == "SUCCESS":
+                    send_vk_message(user_id, f"✅ Успешно записано и выучено!")
+                else:
+                    send_vk_message(user_id, f"❌ Ошибка таблицы: {gs_response.get('message')}")
+                del user_states[user_id]
+                
+            elif user_text_lower in ["нет", "неверно", "не", "no"]:
+                # ИИ ошибся. Просим пояснить своими словами
+                user_states[user_id]["state"] = "provide_context"
+                send_vk_message(user_id, "Понял, ошибся 😔\nПодскажи буквально в двух словах, что это за трата/доход?")
+            else:
+                send_vk_message(user_id, "Пожалуйста, ответь 'Да' или 'Нет' (или 'Отмена').")
+            continue
+
+        # ---------------------------------------------------------
+        # СОСТОЯНИЕ 2: ЖДЕМ ПОЯСНЕНИЯ СВОИМИ СЛОВАМИ (КОНТЕКСТ)
+        # ---------------------------------------------------------
+        if user_id in user_states and user_states[user_id]["state"] == "provide_context":
+            if user_text_lower == "отмена":
+                del user_states[user_id]
+                send_vk_message(user_id, "❌ Операция отменена.")
+                continue
+                
+            send_vk_message(user_id, "🧠 Думаю...")
+            payload = user_states[user_id]["payload"]
+            menu = user_states[user_id]["menu"]
+            menu_str = user_states[user_id]["menu_str"]
+            
+            # Снова просим ИИ угадать, но теперь даем ему подсказку пользователя
+            ai_cat, ai_sub = categorize_with_ai(payload["item"], menu_str, context=user_text)
+            
+            if ai_cat in menu and ai_sub in menu[ai_cat]:
+                # ИИ понял! Снова просим подтвердить
+                user_states[user_id]["state"] = "confirm_category"
+                user_states[user_id]["ai_cat"] = ai_cat
+                user_states[user_id]["ai_sub"] = ai_sub
+                send_vk_message(user_id, f"Ага! С учетом подсказки, думаю это:\n📂 {ai_cat} -> {ai_sub}\n\nВсё верно? (Да/Нет)")
+            else:
+                # ИИ СНОВА НЕ ПОНЯЛ. Сдаемся и просим выбрать вручную.
+                cats_list = "\n".join([f"• {k}" for k in menu.keys()])
+                user_states[user_id]["state"] = "manual_category"
+                msg = "🤷‍♂️ Всё равно не могу сообразить, извини.\n\n"
+                msg += "Напиши, пожалуйста, точную категорию из списка через дефис (Категория - Подкатегория):\n\n"
+                msg += f"Доступные категории:\n{cats_list}"
+                send_vk_message(user_id, msg)
+            continue
+
+        # ---------------------------------------------------------
+        # СОСТОЯНИЕ 3: ЖДЕМ РУЧНОГО ВВОДА КАТЕГОРИИ (КРАЙНИЙ СЛУЧАЙ)
+        # ---------------------------------------------------------
+        if user_id in user_states and user_states[user_id]["state"] == "manual_category":
+            if user_text_lower == "отмена":
+                del user_states[user_id]
+                send_vk_message(user_id, "❌ Операция отменена.")
                 continue
 
             parts = user_text.split("-")
@@ -100,15 +192,15 @@ for event in longpoll.listen():
                     send_vk_message(user_id, f"✅ Успешно! Я запомнил, что '{payload['item']}' — это {cat} -> {sub}.")
                 else:
                     send_vk_message(user_id, f"❌ Ошибка: {gs_response.get('message')}")
-                
                 del user_states[user_id]
             else:
-                send_vk_message(user_id, "⚠️ Пожалуйста, напиши через дефис. Пример: Транспорт - Такси\nИли напиши 'Отмена'.")
+                send_vk_message(user_id, "⚠️ Напиши через дефис. Пример: Транспорт - Такси\nИли напиши 'Отмена'.")
             continue
 
-        # --- ОБЫЧНЫЙ РЕЖИМ ---
+        # ---------------------------------------------------------
+        # ОБЫЧНЫЙ РЕЖИМ: ПОЛЬЗОВАТЕЛЬ ПРИСЛАЛ НОВУЮ ТРАТУ
+        # ---------------------------------------------------------
         try:
-            # ДОБАВЛЕН temperature=0.0 (Отключает фантазию ИИ)
             ai_extract = ai_client.chat.completions.create(
                 model="gpt-3.5-turbo", 
                 temperature=0.0,
@@ -139,47 +231,29 @@ for event in longpoll.listen():
                         for c, subs in menu.items():
                             menu_str += f"{c}: {', '.join(subs)}\n"
                             
-                        send_vk_message(user_id, "🧠 Слово новое. Думаю, куда его отнести...")
+                        # Просим ИИ угадать категорию без подсказок
+                        ai_cat, ai_sub = categorize_with_ai(transaction_data['item'], menu_str)
                         
-                        # ДОБАВЛЕН temperature=0.0 (Отключает фантазию классификатора)
-                        ai_cat_response = ai_client.chat.completions.create(
-                            model="gpt-3.5-turbo",
-                            temperature=0.0,
-                            messages=[
-                                {"role": "system", "content": PROMPT_CATEGORIZE},
-                                {"role": "user", "content": f"Операция: {transaction_data['item']}\n\nМеню:\n{menu_str}"}
-                            ]
-                        )
-                        
-                        ai_cat_text = ai_cat_response.choices[0].message.content.strip()
-                        ai_success = False
-                        
-                        if ai_cat_text.startswith("{") and ai_cat_text.endswith("}"):
-                            cat_json = json.loads(ai_cat_text)
-                            ai_cat = cat_json.get("category", "UNKNOWN")
-                            ai_sub = cat_json.get("subcategory", "UNKNOWN")
-                            
-                            if ai_cat in menu and ai_sub in menu[ai_cat]:
-                                transaction_data["category"] = ai_cat
-                                transaction_data["subcategory"] = ai_sub
-                                
-                                gs_res_2 = send_to_google_sheets(transaction_data)
-                                if gs_res_2.get("status") == "SUCCESS":
-                                    send_vk_message(user_id, f"🤖 ИИ автоматически отнес '{transaction_data['item']}' к '{ai_cat} -> {ai_sub}'.\nЗаписано и выучено!")
-                                    ai_success = True
-                        
-                        if not ai_success:
-                            cats_list = "\n".join([f"• {k}" for k in menu.keys()])
+                        if ai_cat in menu and ai_sub in menu[ai_cat]:
+                            # ИИ угадал! Спрашиваем у человека, прав ли ИИ
                             user_states[user_id] = {
-                                "state": "waiting_for_category",
-                                "payload": transaction_data
+                                "state": "confirm_category",
+                                "payload": transaction_data,
+                                "menu": menu,
+                                "menu_str": menu_str,
+                                "ai_cat": ai_cat,
+                                "ai_sub": ai_sub
                             }
-                            
-                            msg = f"🤷‍♂️ Я и ИИ не уверены, куда отнести '{transaction_data['item']}'.\n\n"
-                            msg += "Помоги мне! Напиши ответ в формате:\nКатегория - Подкатегория\n\n"
-                            msg += f"Доступные категории:\n{cats_list}"
-                            
-                            send_vk_message(user_id, msg)
+                            send_vk_message(user_id, f"🤖 Думаю, '{transaction_data['item']}' относится к:\n📂 {ai_cat} -> {ai_sub}\n\nВсё верно? (Да/Нет)")
+                        else:
+                            # ИИ не смог угадать сразу. Просим контекст.
+                            user_states[user_id] = {
+                                "state": "provide_context",
+                                "payload": transaction_data,
+                                "menu": menu,
+                                "menu_str": menu_str
+                            }
+                            send_vk_message(user_id, f"🤔 Я пока не знаю статью '{transaction_data['item']}'.\nПодскажи буквально в двух словах, что это за трата/доход?")
                     else:
                         send_vk_message(user_id, f"❌ Ошибка таблицы: {gs_response.get('message')}")
                         
