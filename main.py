@@ -11,9 +11,9 @@ import json
 # ====================================================================
 # 1. НАСТРОЙКИ (КЛЮЧИ ДОСТУПА)
 # ====================================================================
-VK_TOKEN = "ВСТАВЬТЕ_СЮДА_ВАШ_ТОКЕН_ВК"
-AI_TUNNEL_KEY = "ВСТАВЬТЕ_СЮДА_ВАШ_КЛЮЧ_AITUNNEL"
-GOOGLE_SHEETS_URL = "ВСТАВЬТЕ_СЮДА_ССЫЛКУ_НА_РАЗВЕРТЫВАНИЕ_GOOGLE_ТАБЛИЦЫ"
+VK_TOKEN = "vk1.a.Mvn90TUedTR7oGAliJvvGbsUvaxnmfjz8SRM7lvuJLbvfsfHK7kMfOB5YPIPSnEzNBqimGJhEyg1ap078WsZ75jXc4Uc1Bj3J1AnGHq_Ot0ZpeznNiYE2N5HUxNbv_5GjXrSZBzPc1GJ0cgj4PAyl6QlqHxjDzsPpAJZVNCsLQjLLaJTRtJmp-eg-t5zx_A0NFiWnQu-styq0N7A8api_w"
+AI_TUNNEL_KEY = "Вsk-aitunnel-uR0sN0BlJhJNKC1IyNGLVFMvRw5Pv1Xw"
+GOOGLE_SHEETS_URL = "https://script.google.com/macros/s/AKfycbyeFzUu2-u1N0bJBg9sL4olZOQnoUOciceXxEB9jGzfcrfZD07IYo-LyIP03nx-yAtV/exec"
 AI_BASE_URL = "https://api.aitunnel.ru/v1/"
 
 vk_session = vk_api.VkApi(token=VK_TOKEN)
