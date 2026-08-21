@@ -25,8 +25,6 @@ ai_client = OpenAI(api_key=AI_TUNNEL_KEY, base_url=AI_BASE_URL)
 # ПРОМПТЫ ДЛЯ НЕЙРОСЕТИ
 # ====================================================================
 
-# PROMPT_EXTRACT: Инструкция для первичного разбора сообщения.
-# Вытаскивает название, сумму и тип (Доход/Расход) без придумывания категорий.
 PROMPT_EXTRACT = """
 Ты — строгий финансовый робот. Пользователь пишет траты (расходы) или поступления (доходы/приходы). 
 Извлеки данные и верни СТРОГО в формате JSON.
@@ -39,8 +37,6 @@ PROMPT_EXTRACT = """
 ПРАВИЛО: НИКОГДА не добавляй поля "category" или "subcategory".
 """
 
-# PROMPT_CATEGORIZE: Инструкция для классификатора.
-# Используется, когда таблица не знает слово. ИИ должен выбрать категорию СТРОГО из предложенного меню.
 PROMPT_CATEGORIZE = """
 Ты — умный финансовый классификатор. Тебе дано название операции и ПОДСКАЗКА от пользователя (синоним, объяснение или известное слово).
 Твоя задача — опираясь на подсказку, найти наиболее подходящую категорию и подкатегорию ИСКЛЮЧИТЕЛЬНО из предоставленного меню.
@@ -58,21 +54,10 @@ PROMPT_CATEGORIZE = """
 }
 """
 
-# ====================================================================
-# ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
-# ====================================================================
-
 def send_vk_message(user_id, text):
-    """
-    Отправляет текстовое сообщение пользователю ВКонтакте.
-    """
     vk.messages.send(user_id=user_id, message=text, random_id=0)
 
 def send_to_google_sheets(payload):
-    """
-    Отправляет JSON-пакет (payload) в Google Таблицу через HTTP POST запрос.
-    Возвращает ответ от таблицы в виде словаря Python.
-    """
     try:
         response = requests.post(GOOGLE_SHEETS_URL, json=payload)
         try:
@@ -84,10 +69,6 @@ def send_to_google_sheets(payload):
         return {"status": "ERROR", "message": str(e)}
 
 def categorize_with_ai(item, menu_str, context=""):
-    """
-    Обращается к ChatGPT с просьбой выбрать категорию из меню (menu_str).
-    Если есть context (подсказка от пользователя), передает и её.
-    """
     prompt = f"Операция: {item}\n"
     if context:
         prompt += f"Подсказка пользователя: {context}\n"
@@ -96,7 +77,7 @@ def categorize_with_ai(item, menu_str, context=""):
     try:
         response = ai_client.chat.completions.create(
             model="gpt-3.5-turbo",
-            temperature=0.0, # 0.0 делает ответы строгими, без фантазий
+            temperature=0.0,
             messages=[
                 {"role": "system", "content": PROMPT_CATEGORIZE},
                 {"role": "user", "content": prompt}
@@ -112,13 +93,9 @@ def categorize_with_ai(item, menu_str, context=""):
 
 print("Бот успешно запущен и слушает сообщения ВКонтакте...")
 
-# user_states хранит "память" диалога для каждого пользователя (на каком этапе общения он находится)
 user_states = {}
-MAX_ATTEMPTS = 5 # Количество попыток для подсказок
+MAX_ATTEMPTS = 5
 
-# ====================================================================
-# ГЛАВНЫЙ ЦИКЛ БОТА (Слушает входящие сообщения)
-# ====================================================================
 for event in longpoll.listen():
     if event.type == VkEventType.MESSAGE_NEW and event.to_me:
         user_id = event.user_id
@@ -135,7 +112,6 @@ for event in longpoll.listen():
                 continue
                 
             if user_text_lower in ["да", "верно", "ага", "давай", "ок", "yes", "+"]:
-                # Пользователь согласился с выбором ИИ. Добавляем категорию в пакет и шлем в Таблицу.
                 payload = user_states[user_id]["payload"]
                 payload["category"] = user_states[user_id]["ai_cat"]
                 payload["subcategory"] = user_states[user_id]["ai_sub"]
@@ -151,12 +127,10 @@ for event in longpoll.listen():
                 continue
                 
             elif user_text_lower in ["нет", "неверно", "не", "no", "-"]:
-                # ИИ ошибся. Переводим пользователя в состояние 2 (просим подсказку).
                 if user_states[user_id]["attempts"] < MAX_ATTEMPTS:
                     user_states[user_id]["state"] = "provide_context"
                     send_vk_message(user_id, f"Понял, ошибся 😔 (Попытка {user_states[user_id]['attempts']} из {MAX_ATTEMPTS})\nПодскажи другими словами, что это за операция?")
                 else:
-                    # Попытки кончились, переводим в ручной ввод
                     user_states[user_id]["state"] = "manual_category"
                     menu = user_states[user_id]["menu"]
                     cats_list = "\n".join([f"• {k}" for k in menu.keys()])
@@ -183,8 +157,6 @@ for event in longpoll.listen():
             menu = user_states[user_id]["menu"]
             menu_str = user_states[user_id]["menu_str"]
             
-            # ШАГ 1: Сначала проверяем, знает ли таблица само слово-подсказку!
-            # Это решает проблему, когда пользователь подсказывает слово, которое уже есть в базе.
             check_payload = {
                 "action": "check_item",
                 "item": user_text,
@@ -193,7 +165,6 @@ for event in longpoll.listen():
             check_res = send_to_google_sheets(check_payload)
             
             if check_res.get("status") == "FOUND":
-                # Таблица знает это слово! Переводим в состояние подтверждения (Да/Нет)
                 ai_cat = check_res.get("cat")
                 ai_sub = check_res.get("sub")
                 user_states[user_id]["state"] = "confirm_category"
@@ -202,18 +173,15 @@ for event in longpoll.listen():
                 send_vk_message(user_id, f"Ага! Слово '{user_text}' мне знакомо. Значит исходная операция относится к:\n📂 {ai_cat} -> {ai_sub}\n\nВсё верно? (Да/Нет)")
                 continue
 
-            # ШАГ 2: Если таблица не знает слово, просим ИИ догадаться по меню
             ai_cat, ai_sub = categorize_with_ai(payload["item"], menu_str, context=user_text)
             
             if ai_cat in menu and ai_sub in menu[ai_cat]:
-                # ИИ догадался. Спрашиваем Да/Нет
                 user_states[user_id]["state"] = "confirm_category"
                 user_states[user_id]["ai_cat"] = ai_cat
                 user_states[user_id]["ai_sub"] = ai_sub
                 send_vk_message(user_id, f"Ага! С учетом подсказки, думаю это:\n📂 {ai_cat} -> {ai_sub}\n\nВсё верно? (Да/Нет)")
                 continue
             else:
-                # ИИ не догадался. Тратим попытку.
                 if user_states[user_id]["attempts"] < MAX_ATTEMPTS:
                     send_vk_message(user_id, f"Всё равно не могу сообразить 🤔 (Попытка {user_states[user_id]['attempts']} из {MAX_ATTEMPTS})\nПопробуй объяснить чуть подробнее или другими словами?")
                 else:
@@ -234,7 +202,6 @@ for event in longpoll.listen():
                 
             parts = user_text.split("-")
             if len(parts) >= 2:
-                # Пользователь ввел категорию вручную. Записываем в таблицу.
                 cat = parts[0].strip()
                 sub = parts[1].strip()
                 payload = user_states[user_id]["payload"]
@@ -258,7 +225,6 @@ for event in longpoll.listen():
         # ОБЫЧНЫЙ РЕЖИМ: ПОЛЬЗОВАТЕЛЬ ПРИСЛАЛ НОВУЮ ТРАТУ/ДОХОД
         # ---------------------------------------------------------
         try:
-            # 1. Просим ИИ извлечь Название, Сумму и Тип
             ai_extract = ai_client.chat.completions.create(
                 model="gpt-3.5-turbo",
                 temperature=0.0,
@@ -272,13 +238,11 @@ for event in longpoll.listen():
             if reply_text.startswith("{") and reply_text.endswith("}"):
                 try:
                     transaction_data = json.loads(reply_text)
-                    # БРОНЯ: принудительно удаляем категории, если ИИ их выдумал
                     transaction_data.pop("category", None)
                     transaction_data.pop("subcategory", None)
                     
                     send_vk_message(user_id, f"⏳ Ищу '{transaction_data['item']}' в базах...")
                     
-                    # 2. Отправляем в Google Таблицу на поиск
                     gs_response = send_to_google_sheets(transaction_data)
                     
                     if gs_response.get("status") == "SUCCESS":
@@ -286,7 +250,6 @@ for event in longpoll.listen():
                     elif gs_response.get("status") == "SUCCESS_AUTO_ADDED":
                         send_vk_message(user_id, f"✅ Записано!\nНашел в Глобальной базе: {gs_response.get('recognized_cat')} -> {gs_response.get('recognized_sub')}")
                     elif gs_response.get("status") == "UNKNOWN_ITEM":
-                        # Таблица не знает слово. Получаем от нее меню и отдаем ИИ на анализ.
                         menu = gs_response.get("available_menu", {})
                         menu_str = ""
                         for c, subs in menu.items():
@@ -295,7 +258,6 @@ for event in longpoll.listen():
                         ai_cat, ai_sub = categorize_with_ai(transaction_data['item'], menu_str)
                         
                         if ai_cat in menu and ai_sub in menu[ai_cat]:
-                            # ИИ догадался без подсказок. Спрашиваем Да/Нет.
                             user_states[user_id] = {
                                 "state": "confirm_category",
                                 "payload": transaction_data,
@@ -307,7 +269,6 @@ for event in longpoll.listen():
                             }
                             send_vk_message(user_id, f"🤖 Думаю, '{transaction_data['item']}' относится к:\n📂 {ai_cat} -> {ai_sub}\n\nВсё верно? (Да/Нет)")
                         else:
-                            # ИИ не догадался. Переводим в режим запроса подсказки.
                             user_states[user_id] = {
                                 "state": "provide_context",
                                 "payload": transaction_data,
@@ -321,7 +282,6 @@ for event in longpoll.listen():
                 except json.JSONDecodeError:
                     send_vk_message(user_id, "❌ Ошибка: ИИ вернул неправильный формат.")
             else:
-                # Если ИИ вернул не JSON, значит это обычное общение (не финансы)
                 send_vk_message(user_id, reply_text)
                 
         except Exception as e:
