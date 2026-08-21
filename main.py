@@ -286,4 +286,4 @@ for event in longpoll.listen():
                 
         except Exception as e:
             send_vk_message(user_id, "❌ Ошибка связи с ИИ.")
-            print(f"Ошибка: {e}") 
+            print(f"Ошибка: {e}")
