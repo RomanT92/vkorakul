@@ -1,3 +1,26 @@
+# -*- coding: utf-8 -*-
+# ====================================================================
+# ИМПОРТ БИБЛИОТЕК
+# ====================================================================
+import vk_api
+from vk_api.longpoll import VkLongPoll, VkEventType
+from openai import OpenAI
+import requests
+import json
+
+# ====================================================================
+# 1. НАСТРОЙКИ (КЛЮЧИ ДОСТУПА)
+# ====================================================================
+VK_TOKEN = "vk1.a.Mvn90TUedTR7oGAliJvvGbsUvaxnmfjz8SRM7lvuJLbvfsfHK7kMfOB5YPIPSnEzNBqimGJhEyg1ap078WsZ75jXc4Uc1Bj3J1AnGHq_Ot0ZpeznNiYE2N5HUxNbv_5GjXrSZBzPc1GJ0cgj4PAyl6QlqHxjDzsPpAJZVNCsLQjLLaJTRtJmp-eg-t5zx_A0NFiWnQu-styq0N7A8api_w"
+AI_TUNNEL_KEY = "sk-aitunnel-uR0sN0BlJhJNKC1IyNGLVFMvRw5Pv1Xw"
+GOOGLE_SHEETS_URL = "https://script.google.com/macros/s/AKfycbyeFzUu2-u1N0bJBg9sL4olZOQnoUOciceXxEB9jGzfcrfZD07IYo-LyIP03nx-yAtV/exec"
+AI_BASE_URL = "https://api.aitunnel.ru/v1/"
+
+vk_session = vk_api.VkApi(token=VK_TOKEN)
+longpoll = VkLongPoll(vk_session)
+vk = vk_session.get_api()
+ai_client = OpenAI(api_key=AI_TUNNEL_KEY, base_url=AI_BASE_URL)
+
 # ====================================================================
 # ПРОМПТЫ ДЛЯ НЕЙРОСЕТИ
 # ====================================================================
