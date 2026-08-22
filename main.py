@@ -16,7 +16,8 @@ AI_TUNNEL_KEY = "sk-aitunnel-uR0sN0BlJhJNKC1IyNGLVFMvRw5Pv1Xw"
 GOOGLE_SHEETS_URL = "https://script.google.com/macros/s/AKfycbyeFzUu2-u1N0bJBg9sL4olZOQnoUOciceXxEB9jGzfcrfZD07IYo-LyIP03nx-yAtV/exec"
 AI_BASE_URL = "https://api.aitunnel.ru/v1/"
 
-vk_session = vk_api.VkApi(token=VK_TOKEN)
+# ИЗМЕНЕНИЕ: Жестко фиксируем версию API ВК для поддержки кнопок
+vk_session = vk_api.VkApi(token=VK_TOKEN, api_version='5.131')
 longpoll = VkLongPoll(vk_session)
 vk = vk_session.get_api()
 ai_client = OpenAI(api_key=AI_TUNNEL_KEY, base_url=AI_BASE_URL)
@@ -66,7 +67,6 @@ PROMPT_CATEGORIZE = """
 # 3. ГЕНЕРАТОРЫ КЛАВИАТУР (КНОПОК)
 # ====================================================================
 def get_main_keyboard():
-    """Главное меню (по умолчанию)"""
     keyboard = VkKeyboard(one_time=False)
     keyboard.add_button('Разобрать завалы', color=VkKeyboardColor.PRIMARY)
     keyboard.add_line()
@@ -75,7 +75,6 @@ def get_main_keyboard():
     return keyboard
 
 def get_yes_no_keyboard():
-    """Меню подтверждения"""
     keyboard = VkKeyboard(one_time=False)
     keyboard.add_button('Да', color=VkKeyboardColor.POSITIVE)
     keyboard.add_button('Нет', color=VkKeyboardColor.NEGATIVE)
@@ -84,7 +83,6 @@ def get_yes_no_keyboard():
     return keyboard
 
 def type_keyboard():
-    """Меню выбора типа операции"""
     keyboard = VkKeyboard(one_time=False)
     keyboard.add_button('Расход', color=VkKeyboardColor.NEGATIVE)
     keyboard.add_button('Доход', color=VkKeyboardColor.POSITIVE)
@@ -93,7 +91,6 @@ def type_keyboard():
     return keyboard
 
 def get_cancel_keyboard():
-    """Меню с одной кнопкой отмены (для текстового ввода)"""
     keyboard = VkKeyboard(one_time=False)
     keyboard.add_button('Отмена', color=VkKeyboardColor.NEGATIVE)
     return keyboard
@@ -102,11 +99,22 @@ def get_cancel_keyboard():
 # 4. ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
 # ====================================================================
 def send_vk_message(user_id, text, keyboard=None):
-    """Отправляет сообщение в ВК. Если передана клавиатура — прикрепляет её."""
-    post = {'user_id': user_id, 'message': text, 'random_id': 0}
-    if keyboard is not None:
-        post['keyboard'] = keyboard.get_keyboard()
-    vk.messages.send(**post)
+    """
+    ИЗМЕНЕНИЕ: Бронебойная отправка сообщений. 
+    Если ВК запрещает клавиатуру, бот не падает, а отправляет текст без неё.
+    """
+    try:
+        post = {'user_id': user_id, 'message': text, 'random_id': 0}
+        if keyboard is not None:
+            post['keyboard'] = keyboard.get_keyboard()
+        vk.messages.send(**post)
+    except Exception as e:
+        print(f"Ошибка отправки сообщения (возможно из-за кнопок): {e}")
+        try:
+            # Пробуем отправить просто текст, если клавиатура вызвала ошибку
+            vk.messages.send(user_id=user_id, message=text, random_id=0)
+        except Exception as e2:
+            print(f"Критическая ошибка отправки: {e2}")
 
 def send_to_google_sheets(payload):
     try:
@@ -179,8 +187,7 @@ for event in longpoll.listen():
         user_text = event.text.strip()
         user_text_lower = user_text.lower()
 
-        # Базовая команда "Помощь"
-        if user_text_lower == "помощь":
+        if user_text_lower in ["помощь", "начать", "start"]:
             help_text = "🤖 Привет! Я твой финансовый Оракул.\n\n" \
                         "Просто напиши мне трату или доход, например:\n" \
                         "👉 Такси 500\n" \
