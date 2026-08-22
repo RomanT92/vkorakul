@@ -22,9 +22,11 @@ vk = vk_session.get_api()
 ai_client = OpenAI(api_key=AI_TUNNEL_KEY, base_url=AI_BASE_URL)
 
 # ====================================================================
-# ПРОМПТЫ ДЛЯ НЕЙРОСЕТИ
+# 2. ПРОМПТЫ (ИНСТРУКЦИИ ДЛЯ НЕЙРОСЕТИ)
 # ====================================================================
 
+# Промпт 1: Первичный разбор сообщения. 
+# Цель: вытащить суть (название, сумму, тип), не придумывая категорий.
 PROMPT_EXTRACT = """
 Ты — строгий финансовый робот. Пользователь пишет траты (расходы) или поступления (доходы/приходы). 
 Извлеки данные и верни СТРОГО в формате JSON.
@@ -40,12 +42,14 @@ PROMPT_EXTRACT = """
 2. НО если в тексте есть слова: зарплата, аванс, премия, кэшбек, возврат, подарили, доход, приход, поступление, перевод мне, от (кого-то) — СТАВЬ "Доход"!
 
 ПРАВИЛА ДЛЯ ПОЛЯ "item":
-1. Уважай реальные слова и ИМЕНА! Если слово существует в языке или это имя (например: "Кате", "Маше", "такси"), оставляй его ТОЧНО так. НЕ исправляй "Кате" на "Кафе"!
-2. Исправляй ТОЛЬКО абсолютно очевидные опечатки (например, "квфе" -> "кафе").
-3. НЕ пиши слова 'приход', 'расход' или 'доход' в название!
+1. Уважай реальные слова и ИМЕНА! Если слово существует в языке или это имя (например: "Кате", "Маше", "такси", "Петру"), оставляй его ТОЧНО так. НЕ исправляй "Кате" на "Кафе"!
+2. Исправляй ТОЛЬКО абсолютно очевидные опечатки несуществующих слов (например, "квфе" -> "кафе", "малако" -> "молоко").
+3. НЕ пиши слова 'приход', 'расход' или 'доход' в название! Оставь поле пустым (""), если кроме суммы и слова "доход" ничего нет.
 4. НИКОГДА не добавляй поля "category" или "subcategory".
 """
 
+# Промпт 2: Классификатор.
+# Цель: заставить ИИ выбрать категорию СТРОГО из предложенного меню, учитывая подсказку пользователя.
 PROMPT_CATEGORIZE = """
 Ты — умный финансовый классификатор. Тебе дано название операции и ПОДСКАЗКА от пользователя (синоним, объяснение или известное слово).
 Твоя задача — опираясь на подсказку, найти наиболее подходящую категорию и подкатегорию ИСКЛЮЧИТЕЛЬНО из предоставленного меню.
@@ -63,10 +67,16 @@ PROMPT_CATEGORIZE = """
 }
 """
 
+# ====================================================================
+# 3. ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
+# ====================================================================
+
 def send_vk_message(user_id, text):
+    """Отправляет текстовое сообщение пользователю в ВК."""
     vk.messages.send(user_id=user_id, message=text, random_id=0)
 
 def send_to_google_sheets(payload):
+    """Отправляет JSON-данные в Google Таблицу и возвращает её ответ."""
     try:
         response = requests.post(GOOGLE_SHEETS_URL, json=payload)
         try:
@@ -78,6 +88,7 @@ def send_to_google_sheets(payload):
         return {"status": "ERROR", "message": str(e)}
 
 def categorize_with_ai(item, menu_str, context=""):
+    """Просит нейросеть выбрать категорию из меню, используя подсказку (context)."""
     prompt = f"Операция: {item}\n"
     if context:
         prompt += f"Подсказка пользователя: {context}\n"
@@ -100,8 +111,12 @@ def categorize_with_ai(item, menu_str, context=""):
         print("Ошибка ИИ классификации:", e)
     return "UNKNOWN", "UNKNOWN"
 
-# Функция для вытягивания следующей операции из очереди "Требует проверки"
 def process_next_in_queue(user_id):
+    """
+    Функция для режима ИМПОРТА.
+    Берет первую нераспознанную операцию из очереди, просит ИИ угадать её категорию
+    и отправляет пользователю вопрос (Да/Нет).
+    """
     state_data = user_states[user_id]
     queue = state_data["queue"]
     
@@ -130,9 +145,13 @@ def process_next_in_queue(user_id):
 
 print("Бот успешно запущен и слушает сообщения ВКонтакте...")
 
+# Словарь для хранения состояний пользователей (память диалога)
 user_states = {}
 MAX_ATTEMPTS = 5
 
+# ====================================================================
+# 4. ГЛАВНЫЙ ЦИКЛ БОТА
+# ====================================================================
 for event in longpoll.listen():
     if event.type == VkEventType.MESSAGE_NEW and event.to_me:
         user_id = event.user_id
@@ -143,7 +162,7 @@ for event in longpoll.listen():
         # БЛОК Г: РАЗБОР ИМПОРТА (ЗАВАЛОВ)
         # =========================================================
         
-        # Перехватчик команды "Разобрать"
+        # 1. Перехватчик команды "Разобрать"
         if user_text_lower in ["разобрать", "разобрать импорт", "разобрать завалы"]:
             send_vk_message(user_id, "⏳ Запрашиваю список нераспознанных операций из Таблицы...")
             res = send_to_google_sheets({"action": "get_unverified"})
@@ -158,12 +177,12 @@ for event in longpoll.listen():
                         "queue": unverified,
                         "menu": res.get("available_menu", {})
                     }
-                    process_next_in_queue(user_id)
+                    process_next_in_queue(user_id) # Запускаем конвейер
             else:
                 send_vk_message(user_id, f"❌ Ошибка: {res.get('message')}")
             continue
 
-        # Состояние очереди: Подтверждение выбора ИИ
+        # 2. Состояние очереди: Подтверждение выбора ИИ (Да/Нет)
         if user_id in user_states and user_states[user_id].get("state") == "queue_confirm":
             if user_text_lower == "отмена":
                 del user_states[user_id]
@@ -196,7 +215,7 @@ for event in longpoll.listen():
                 send_vk_message(user_id, "Пожалуйста, ответь 'Да' или 'Нет' (или 'Отмена').")
                 continue
 
-        # Состояние очереди: Пользователь дает подсказку
+        # 3. Состояние очереди: Пользователь дает подсказку
         if user_id in user_states and user_states[user_id].get("state") == "queue_hint":
             if user_text_lower == "отмена":
                 del user_states[user_id]
@@ -234,7 +253,7 @@ for event in longpoll.listen():
                 send_vk_message(user_id, "🤷‍♂️ Я сдаюсь. Напиши точную категорию из списка через дефис:\n\n" + cats_list)
                 continue
 
-        # Состояние очереди: Ручной ввод
+        # 4. Состояние очереди: Ручной ввод категории через дефис
         if user_id in user_states and user_states[user_id].get("state") == "queue_manual":
             if user_text_lower == "отмена":
                 del user_states[user_id]
@@ -265,6 +284,8 @@ for event in longpoll.listen():
         # =========================================================
         # БЛОК А: ИНТЕРАКТИВНОЕ СОЗДАНИЕ НОВОЙ КАТЕГОРИИ
         # =========================================================
+        
+        # Шаг 1: Ждем название
         if user_id in user_states and user_states[user_id].get("state") == "create_cat_name":
             if user_text_lower == "отмена":
                 del user_states[user_id]
@@ -283,6 +304,7 @@ for event in longpoll.listen():
                 send_vk_message(user_id, "⚠️ Обязательно используй дефис. Пример: Хобби - Рыбалка\nИли напиши 'Отмена'.")
             continue
 
+        # Шаг 2: Ждем тип (Доход/Расход)
         if user_id in user_states and user_states[user_id].get("state") == "create_cat_type":
             if user_text_lower == "отмена":
                 del user_states[user_id]
@@ -309,6 +331,7 @@ for event in longpoll.listen():
             del user_states[user_id]
             continue
 
+        # Перехватчик команды создания
         if user_text_lower.startswith("создать категорию") or user_text_lower.startswith("новая категория"):
             clean_text = user_text_lower.replace("создать категорию", "").replace("новая категория", "").strip()
             
@@ -335,6 +358,8 @@ for event in longpoll.listen():
         # =========================================================
         # БЛОК Б: ОБУЧЕНИЕ И ПОДСКАЗКИ (ОДИНОЧНЫЕ ОПЕРАЦИИ)
         # =========================================================
+        
+        # Состояние: Подтверждение выбора ИИ (Да/Нет)
         if user_id in user_states and user_states[user_id].get("state") == "confirm_category":
             if user_text_lower == "отмена":
                 del user_states[user_id]
@@ -371,6 +396,7 @@ for event in longpoll.listen():
                 send_vk_message(user_id, "Пожалуйста, ответь 'Да' или 'Нет' (или 'Отмена').")
                 continue
 
+        # Состояние: Ожидание подсказки
         if user_id in user_states and user_states[user_id].get("state") == "provide_context":
             if user_text_lower == "отмена":
                 del user_states[user_id]
@@ -417,6 +443,7 @@ for event in longpoll.listen():
                     send_vk_message(user_id, msg)
                 continue
 
+        # Состояние: Ручной ввод
         if user_id in user_states and user_states[user_id].get("state") == "manual_category":
             if user_text_lower == "отмена":
                 del user_states[user_id]
@@ -445,9 +472,10 @@ for event in longpoll.listen():
                 continue
 
         # =========================================================
-        # БЛОК В: ОБЫЧНЫЙ РЕЖИМ (Одиночная операция)
+        # БЛОК В: ОБЫЧНЫЙ РЕЖИМ (Обработка новой одиночной операции)
         # =========================================================
         try:
+            # 1. Извлекаем данные с помощью ИИ
             ai_extract = ai_client.chat.completions.create(
                 model="gpt-3.5-turbo",
                 temperature=0.0,
@@ -461,11 +489,22 @@ for event in longpoll.listen():
             if reply_text.startswith("{") and reply_text.endswith("}"):
                 try:
                     transaction_data = json.loads(reply_text)
-                    transaction_data.pop("category", None)
+                    transaction_data.pop("category", None) # Защита от выдуманных категорий
                     transaction_data.pop("subcategory", None)
+                    
+                    # -------------------------------------------------------------
+                    # ИЗМЕНЕНИЕ: Если ИИ вернул пустое название (например, написали "Доход 15000"),
+                    # мы сами подставляем слово-заглушку прямо здесь!
+                    # -------------------------------------------------------------
+                    if not transaction_data.get("item", "").strip():
+                        if transaction_data.get("type") in ["Доход", "Приход"]:
+                            transaction_data["item"] = "Поступление"
+                        else:
+                            transaction_data["item"] = "Трата"
                     
                     send_vk_message(user_id, f"⏳ Ищу '{transaction_data['item']}' в базах...")
                     
+                    # 2. Отправляем в Google Таблицу на поиск и запись
                     gs_response = send_to_google_sheets(transaction_data)
                     
                     if gs_response.get("status") == "SUCCESS":
@@ -473,6 +512,7 @@ for event in longpoll.listen():
                     elif gs_response.get("status") == "SUCCESS_AUTO_ADDED":
                         send_vk_message(user_id, f"✅ Записано!\nНашел в Глобальной базе: {gs_response.get('recognized_cat')} -> {gs_response.get('recognized_sub')}")
                     elif gs_response.get("status") == "UNKNOWN_ITEM":
+                        # Таблица не знает слово. Запускаем классификатор.
                         menu = gs_response.get("available_menu", {})
                         menu_str = ""
                         for c, subs in menu.items():
@@ -505,8 +545,9 @@ for event in longpoll.listen():
                 except json.JSONDecodeError:
                     send_vk_message(user_id, "❌ Ошибка: ИИ вернул неправильный формат.")
             else:
+                # Если ИИ вернул не JSON, значит это просто общение
                 send_vk_message(user_id, reply_text)
                 
         except Exception as e:
             send_vk_message(user_id, "❌ Ошибка связи с ИИ.")
-            print(f"Ошибка: {e}")
+            print(f"Ошибка: {e}") 
