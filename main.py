@@ -24,9 +24,6 @@ ai_client = OpenAI(api_key=AI_TUNNEL_KEY, base_url=AI_BASE_URL)
 # ====================================================================
 # 2. ПРОМПТЫ (ИНСТРУКЦИИ ДЛЯ НЕЙРОСЕТИ)
 # ====================================================================
-
-# Промпт 1: Первичный разбор сообщения. 
-# Цель: вытащить суть (название, сумму, тип), не придумывая категорий.
 PROMPT_EXTRACT = """
 Ты — строгий финансовый робот. Пользователь пишет траты (расходы) или поступления (доходы/приходы). 
 Извлеки данные и верни СТРОГО в формате JSON.
@@ -48,8 +45,6 @@ PROMPT_EXTRACT = """
 4. НИКОГДА не добавляй поля "category" или "subcategory".
 """
 
-# Промпт 2: Классификатор.
-# Цель: заставить ИИ выбрать категорию СТРОГО из предложенного меню, учитывая подсказку пользователя.
 PROMPT_CATEGORIZE = """
 Ты — умный финансовый классификатор. Тебе дано название операции и ПОДСКАЗКА от пользователя (синоним, объяснение или известное слово).
 Твоя задача — опираясь на подсказку, найти наиболее подходящую категорию и подкатегорию ИСКЛЮЧИТЕЛЬНО из предоставленного меню.
@@ -68,15 +63,52 @@ PROMPT_CATEGORIZE = """
 """
 
 # ====================================================================
-# 3. ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
+# 3. ГЕНЕРАТОРЫ КЛАВИАТУР (КНОПОК)
 # ====================================================================
+def get_main_keyboard():
+    """Главное меню (по умолчанию)"""
+    keyboard = VkKeyboard(one_time=False)
+    keyboard.add_button('Разобрать завалы', color=VkKeyboardColor.PRIMARY)
+    keyboard.add_line()
+    keyboard.add_button('Создать категорию', color=VkKeyboardColor.SECONDARY)
+    keyboard.add_button('Помощь', color=VkKeyboardColor.SECONDARY)
+    return keyboard
 
-def send_vk_message(user_id, text):
-    """Отправляет текстовое сообщение пользователю в ВК."""
-    vk.messages.send(user_id=user_id, message=text, random_id=0)
+def get_yes_no_keyboard():
+    """Меню подтверждения"""
+    keyboard = VkKeyboard(one_time=False)
+    keyboard.add_button('Да', color=VkKeyboardColor.POSITIVE)
+    keyboard.add_button('Нет', color=VkKeyboardColor.NEGATIVE)
+    keyboard.add_line()
+    keyboard.add_button('Отмена', color=VkKeyboardColor.SECONDARY)
+    return keyboard
+
+def type_keyboard():
+    """Меню выбора типа операции"""
+    keyboard = VkKeyboard(one_time=False)
+    keyboard.add_button('Расход', color=VkKeyboardColor.NEGATIVE)
+    keyboard.add_button('Доход', color=VkKeyboardColor.POSITIVE)
+    keyboard.add_line()
+    keyboard.add_button('Отмена', color=VkKeyboardColor.SECONDARY)
+    return keyboard
+
+def get_cancel_keyboard():
+    """Меню с одной кнопкой отмены (для текстового ввода)"""
+    keyboard = VkKeyboard(one_time=False)
+    keyboard.add_button('Отмена', color=VkKeyboardColor.NEGATIVE)
+    return keyboard
+
+# ====================================================================
+# 4. ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
+# ====================================================================
+def send_vk_message(user_id, text, keyboard=None):
+    """Отправляет сообщение в ВК. Если передана клавиатура — прикрепляет её."""
+    post = {'user_id': user_id, 'message': text, 'random_id': 0}
+    if keyboard is not None:
+        post['keyboard'] = keyboard.get_keyboard()
+    vk.messages.send(**post)
 
 def send_to_google_sheets(payload):
-    """Отправляет JSON-данные в Google Таблицу и возвращает её ответ."""
     try:
         response = requests.post(GOOGLE_SHEETS_URL, json=payload)
         try:
@@ -88,12 +120,10 @@ def send_to_google_sheets(payload):
         return {"status": "ERROR", "message": str(e)}
 
 def categorize_with_ai(item, menu_str, context=""):
-    """Просит нейросеть выбрать категорию из меню, используя подсказку (context)."""
     prompt = f"Операция: {item}\n"
     if context:
         prompt += f"Подсказка пользователя: {context}\n"
     prompt += f"\nМеню:\n{menu_str}"
-    
     try:
         response = ai_client.chat.completions.create(
             model="gpt-3.5-turbo",
@@ -112,26 +142,19 @@ def categorize_with_ai(item, menu_str, context=""):
     return "UNKNOWN", "UNKNOWN"
 
 def process_next_in_queue(user_id):
-    """
-    Функция для режима ИМПОРТА.
-    Берет первую нераспознанную операцию из очереди, просит ИИ угадать её категорию
-    и отправляет пользователю вопрос (Да/Нет).
-    """
     state_data = user_states[user_id]
     queue = state_data["queue"]
     
     if not queue:
-        send_vk_message(user_id, "🎉 Ура! Все завалы разобраны! Журнал чист.")
+        send_vk_message(user_id, "🎉 Ура! Все завалы разобраны! Журнал чист.", get_main_keyboard())
         del user_states[user_id]
         return
         
-    current = queue[0] # Берем первую операцию
+    current = queue[0]
     menu = state_data["menu"]
     menu_str = "\n".join([f"{c}: {', '.join(subs)}" for c, subs in menu.items()])
     
     send_vk_message(user_id, f"Осталось разобрать: {len(queue)} шт.\n🧠 Анализирую: '{current['original_item']}'...")
-    
-    # Просим ИИ угадать категорию для банковской выписки
     ai_cat, ai_sub = categorize_with_ai(current['original_item'], menu_str)
     
     state_data["state"] = "queue_confirm"
@@ -139,18 +162,16 @@ def process_next_in_queue(user_id):
     state_data["ai_sub"] = ai_sub
     state_data["attempts"] = 0
     
-    msg = f"📅 Дата: {current['date'][:10]}\n💰 Сумма: {current['amount']}\n🛒 Операция: {current['original_item']}\n\n🤖 ИИ думает, это:\n📂 {ai_cat} -> {ai_sub}\n\nВерно? (Да/Нет/Отмена)"
-    send_vk_message(user_id, msg)
-
+    msg = f"📅 Дата: {current['date'][:10]}\n💰 Сумма: {current['amount']}\n🛒 Операция: {current['original_item']}\n\n🤖 ИИ думает, это:\n📂 {ai_cat} -> {ai_sub}\n\nВерно?"
+    send_vk_message(user_id, msg, get_yes_no_keyboard())
 
 print("Бот успешно запущен и слушает сообщения ВКонтакте...")
 
-# Словарь для хранения состояний пользователей (память диалога)
 user_states = {}
 MAX_ATTEMPTS = 5
 
 # ====================================================================
-# 4. ГЛАВНЫЙ ЦИКЛ БОТА
+# 5. ГЛАВНЫЙ ЦИКЛ БОТА
 # ====================================================================
 for event in longpoll.listen():
     if event.type == VkEventType.MESSAGE_NEW and event.to_me:
@@ -158,11 +179,20 @@ for event in longpoll.listen():
         user_text = event.text.strip()
         user_text_lower = user_text.lower()
 
+        # Базовая команда "Помощь"
+        if user_text_lower == "помощь":
+            help_text = "🤖 Привет! Я твой финансовый Оракул.\n\n" \
+                        "Просто напиши мне трату или доход, например:\n" \
+                        "👉 Такси 500\n" \
+                        "👉 Зарплата 50000\n" \
+                        "👉 Продукты 1500 Пятерочка\n\n" \
+                        "Используй кнопки ниже для удобства!"
+            send_vk_message(user_id, help_text, get_main_keyboard())
+            continue
+
         # =========================================================
         # БЛОК Г: РАЗБОР ИМПОРТА (ЗАВАЛОВ)
         # =========================================================
-        
-        # 1. Перехватчик команды "Разобрать"
         if user_text_lower in ["разобрать", "разобрать импорт", "разобрать завалы"]:
             send_vk_message(user_id, "⏳ Запрашиваю список нераспознанных операций из Таблицы...")
             res = send_to_google_sheets({"action": "get_unverified"})
@@ -170,23 +200,18 @@ for event in longpoll.listen():
             if res.get("status") == "SUCCESS":
                 unverified = res.get("data", [])
                 if not unverified:
-                    send_vk_message(user_id, "🎉 Всё чисто! Нераспознанных операций нет.")
+                    send_vk_message(user_id, "🎉 Всё чисто! Нераспознанных операций нет.", get_main_keyboard())
                 else:
-                    user_states[user_id] = {
-                        "state": "queue_process",
-                        "queue": unverified,
-                        "menu": res.get("available_menu", {})
-                    }
-                    process_next_in_queue(user_id) # Запускаем конвейер
+                    user_states[user_id] = {"state": "queue_process", "queue": unverified, "menu": res.get("available_menu", {})}
+                    process_next_in_queue(user_id)
             else:
-                send_vk_message(user_id, f"❌ Ошибка: {res.get('message')}")
+                send_vk_message(user_id, f"❌ Ошибка: {res.get('message')}", get_main_keyboard())
             continue
 
-        # 2. Состояние очереди: Подтверждение выбора ИИ (Да/Нет)
         if user_id in user_states and user_states[user_id].get("state") == "queue_confirm":
             if user_text_lower == "отмена":
                 del user_states[user_id]
-                send_vk_message(user_id, "❌ Разбор завалов остановлен.")
+                send_vk_message(user_id, "❌ Разбор завалов остановлен.", get_main_keyboard())
                 continue
                 
             if user_text_lower in ["да", "верно", "ага", "давай", "ок", "yes", "+"]:
@@ -201,25 +226,21 @@ for event in longpoll.listen():
                 }
                 send_vk_message(user_id, "⏳ Записываю и обучаюсь...")
                 send_to_google_sheets(payload)
-                
-                # Удаляем обработанную операцию из очереди и идем к следующей
                 user_states[user_id]["queue"].pop(0)
                 process_next_in_queue(user_id)
                 continue
-                
             elif user_text_lower in ["нет", "неверно", "не", "no", "-"]:
                 user_states[user_id]["state"] = "queue_hint"
-                send_vk_message(user_id, "Понял, ошибся. Подскажи другими словами, что это за операция?")
+                send_vk_message(user_id, "Понял, ошибся. Подскажи другими словами, что это за операция?", get_cancel_keyboard())
                 continue
             else:
-                send_vk_message(user_id, "Пожалуйста, ответь 'Да' или 'Нет' (или 'Отмена').")
+                send_vk_message(user_id, "Пожалуйста, ответь 'Да' или 'Нет' (или 'Отмена').", get_yes_no_keyboard())
                 continue
 
-        # 3. Состояние очереди: Пользователь дает подсказку
         if user_id in user_states and user_states[user_id].get("state") == "queue_hint":
             if user_text_lower == "отмена":
                 del user_states[user_id]
-                send_vk_message(user_id, "❌ Разбор завалов остановлен.")
+                send_vk_message(user_id, "❌ Разбор завалов остановлен.", get_main_keyboard())
                 continue
                 
             send_vk_message(user_id, "🧠 Думаю...")
@@ -227,7 +248,6 @@ for event in longpoll.listen():
             menu = user_states[user_id]["menu"]
             menu_str = "\n".join([f"{c}: {', '.join(subs)}" for c, subs in menu.items()])
             
-            # Спрашиваем саму таблицу
             check_payload = {"action": "check_item", "item": user_text, "type": current.get("type", "Расход")}
             check_res = send_to_google_sheets(check_payload)
             
@@ -235,29 +255,26 @@ for event in longpoll.listen():
                 user_states[user_id]["state"] = "queue_confirm"
                 user_states[user_id]["ai_cat"] = check_res.get("cat")
                 user_states[user_id]["ai_sub"] = check_res.get("sub")
-                send_vk_message(user_id, f"Ага! Слово '{user_text}' мне знакомо.\n📂 {check_res.get('cat')} -> {check_res.get('sub')}\n\nВсё верно? (Да/Нет)")
+                send_vk_message(user_id, f"Ага! Слово '{user_text}' мне знакомо.\n📂 {check_res.get('cat')} -> {check_res.get('sub')}\n\nВсё верно?", get_yes_no_keyboard())
                 continue
 
-            # Спрашиваем ИИ
             ai_cat, ai_sub = categorize_with_ai(current["original_item"], menu_str, context=user_text)
-            
             if ai_cat in menu and ai_sub in menu[ai_cat]:
                 user_states[user_id]["state"] = "queue_confirm"
                 user_states[user_id]["ai_cat"] = ai_cat
                 user_states[user_id]["ai_sub"] = ai_sub
-                send_vk_message(user_id, f"Ага! С учетом подсказки, думаю это:\n📂 {ai_cat} -> {ai_sub}\n\nВсё верно? (Да/Нет)")
+                send_vk_message(user_id, f"Ага! С учетом подсказки, думаю это:\n📂 {ai_cat} -> {ai_sub}\n\nВсё верно?", get_yes_no_keyboard())
                 continue
             else:
                 user_states[user_id]["state"] = "queue_manual"
                 cats_list = "\n".join([f"• {k}" for k in menu.keys()])
-                send_vk_message(user_id, "🤷‍♂️ Я сдаюсь. Напиши точную категорию из списка через дефис:\n\n" + cats_list)
+                send_vk_message(user_id, "🤷‍♂️ Я сдаюсь. Напиши точную категорию из списка через дефис:\n\n" + cats_list, get_cancel_keyboard())
                 continue
 
-        # 4. Состояние очереди: Ручной ввод категории через дефис
         if user_id in user_states and user_states[user_id].get("state") == "queue_manual":
             if user_text_lower == "отмена":
                 del user_states[user_id]
-                send_vk_message(user_id, "❌ Разбор завалов остановлен.")
+                send_vk_message(user_id, "❌ Разбор завалов остановлен.", get_main_keyboard())
                 continue
                 
             parts = user_text.split("-")
@@ -277,19 +294,17 @@ for event in longpoll.listen():
                 process_next_in_queue(user_id)
                 continue
             else:
-                send_vk_message(user_id, "⚠️ Напиши через дефис. Пример: Транспорт - Такси\nИли напиши 'Отмена'.")
+                send_vk_message(user_id, "⚠️ Напиши через дефис. Пример: Транспорт - Такси", get_cancel_keyboard())
                 continue
 
 
         # =========================================================
         # БЛОК А: ИНТЕРАКТИВНОЕ СОЗДАНИЕ НОВОЙ КАТЕГОРИИ
         # =========================================================
-        
-        # Шаг 1: Ждем название
         if user_id in user_states and user_states[user_id].get("state") == "create_cat_name":
             if user_text_lower == "отмена":
                 del user_states[user_id]
-                send_vk_message(user_id, "❌ Создание категории отменено.")
+                send_vk_message(user_id, "❌ Создание категории отменено.", get_main_keyboard())
                 continue
                 
             parts = user_text.split("-")
@@ -299,16 +314,15 @@ for event in longpoll.listen():
                 user_states[user_id]["new_cat"] = cat
                 user_states[user_id]["new_sub"] = sub
                 user_states[user_id]["state"] = "create_cat_type"
-                send_vk_message(user_id, f"Отлично: 📂 {cat} -> {sub}.\n\nЭто будет категория для Расходов или Доходов? (Напиши 'Расход' или 'Доход')")
+                send_vk_message(user_id, f"Отлично: 📂 {cat} -> {sub}.\n\nЭто будет категория для Расходов или Доходов?", type_keyboard())
             else:
-                send_vk_message(user_id, "⚠️ Обязательно используй дефис. Пример: Хобби - Рыбалка\nИли напиши 'Отмена'.")
+                send_vk_message(user_id, "⚠️ Обязательно используй дефис. Пример: Хобби - Рыбалка", get_cancel_keyboard())
             continue
 
-        # Шаг 2: Ждем тип (Доход/Расход)
         if user_id in user_states and user_states[user_id].get("state") == "create_cat_type":
             if user_text_lower == "отмена":
                 del user_states[user_id]
-                send_vk_message(user_id, "❌ Создание категории отменено.")
+                send_vk_message(user_id, "❌ Создание категории отменено.", get_main_keyboard())
                 continue
                 
             cat_type = "Доход" if "доход" in user_text_lower or "приход" in user_text_lower else "Расход"
@@ -324,14 +338,13 @@ for event in longpoll.listen():
             gs_response = send_to_google_sheets(payload)
             
             if gs_response.get("status") == "SUCCESS":
-                send_vk_message(user_id, f"✅ Успешно! Категория '{payload['category']} -> {payload['subcategory']}' ({cat_type}) создана.\nТеперь можешь записывать в неё операции.")
+                send_vk_message(user_id, f"✅ Успешно! Категория '{payload['category']} -> {payload['subcategory']}' ({cat_type}) создана.\nТеперь можешь записывать в неё операции.", get_main_keyboard())
             else:
-                send_vk_message(user_id, f"❌ Ошибка таблицы: {gs_response.get('message')}")
+                send_vk_message(user_id, f"❌ Ошибка таблицы: {gs_response.get('message')}", get_main_keyboard())
                 
             del user_states[user_id]
             continue
 
-        # Перехватчик команды создания
         if user_text_lower.startswith("создать категорию") or user_text_lower.startswith("новая категория"):
             clean_text = user_text_lower.replace("создать категорию", "").replace("новая категория", "").strip()
             
@@ -347,23 +360,21 @@ for event in longpoll.listen():
                     "new_cat": cat,
                     "new_sub": sub
                 }
-                send_vk_message(user_id, f"Отлично: 📂 {cat} -> {sub}.\n\nЭто будет категория для Расходов или Доходов? (Напиши 'Расход' или 'Доход')")
+                send_vk_message(user_id, f"Отлично: 📂 {cat} -> {sub}.\n\nЭто будет категория для Расходов или Доходов?", type_keyboard())
                 continue
             
             user_states[user_id] = {"state": "create_cat_name"}
-            send_vk_message(user_id, "Создаем новую категорию! 📂\n\nНапиши название Категории и Подкатегории через дефис.\nПример: Хобби - Рыбалка\n\n(Для отмены напиши 'Отмена')")
+            send_vk_message(user_id, "Создаем новую категорию! 📂\n\nНапиши название Категории и Подкатегории через дефис.\nПример: Хобби - Рыбалка", get_cancel_keyboard())
             continue
 
 
         # =========================================================
         # БЛОК Б: ОБУЧЕНИЕ И ПОДСКАЗКИ (ОДИНОЧНЫЕ ОПЕРАЦИИ)
         # =========================================================
-        
-        # Состояние: Подтверждение выбора ИИ (Да/Нет)
         if user_id in user_states and user_states[user_id].get("state") == "confirm_category":
             if user_text_lower == "отмена":
                 del user_states[user_id]
-                send_vk_message(user_id, "❌ Операция отменена.")
+                send_vk_message(user_id, "❌ Операция отменена.", get_main_keyboard())
                 continue
                 
             if user_text_lower in ["да", "верно", "ага", "давай", "ок", "yes", "+"]:
@@ -375,45 +386,40 @@ for event in longpoll.listen():
                 gs_response = send_to_google_sheets(payload)
                 
                 if gs_response.get("status") == "SUCCESS":
-                    send_vk_message(user_id, f"✅ Успешно записано и выучено!")
+                    send_vk_message(user_id, f"✅ Успешно записано и выучено!", get_main_keyboard())
                 else:
-                    send_vk_message(user_id, f"❌ Ошибка таблицы: {gs_response.get('message')}")
+                    send_vk_message(user_id, f"❌ Ошибка таблицы: {gs_response.get('message')}", get_main_keyboard())
                 del user_states[user_id]
                 continue
                 
             elif user_text_lower in ["нет", "неверно", "не", "no", "-"]:
                 if user_states[user_id]["attempts"] < MAX_ATTEMPTS:
                     user_states[user_id]["state"] = "provide_context"
-                    send_vk_message(user_id, f"Понял, ошибся 😔 (Попытка {user_states[user_id]['attempts']} из {MAX_ATTEMPTS})\nПодскажи другими словами, что это за операция?")
+                    send_vk_message(user_id, f"Понял, ошибся 😔 (Попытка {user_states[user_id]['attempts']} из {MAX_ATTEMPTS})\nПодскажи другими словами, что это за операция?", get_cancel_keyboard())
                 else:
                     user_states[user_id]["state"] = "manual_category"
                     menu = user_states[user_id]["menu"]
                     cats_list = "\n".join([f"• {k}" for k in menu.keys()])
-                    msg = "🤷‍♂️ Я сдаюсь. Использованы все 5 попыток.\n\nНапиши, пожалуйста, точную категорию из списка через дефис (Категория - Подкатегория):\n\n" + cats_list
-                    send_vk_message(user_id, msg)
+                    msg = "🤷‍♂️ Я сдаюсь. Использованы все 5 попыток.\n\nНапиши, пожалуйста, точную категорию из списка через дефис:\n\n" + cats_list
+                    send_vk_message(user_id, msg, get_cancel_keyboard())
                 continue
             else:
-                send_vk_message(user_id, "Пожалуйста, ответь 'Да' или 'Нет' (или 'Отмена').")
+                send_vk_message(user_id, "Пожалуйста, используй кнопки 'Да', 'Нет' или 'Отмена'.", get_yes_no_keyboard())
                 continue
 
-        # Состояние: Ожидание подсказки
         if user_id in user_states and user_states[user_id].get("state") == "provide_context":
             if user_text_lower == "отмена":
                 del user_states[user_id]
-                send_vk_message(user_id, "❌ Операция отменена.")
+                send_vk_message(user_id, "❌ Операция отменена.", get_main_keyboard())
                 continue
                 
             send_vk_message(user_id, "🧠 Думаю...")
             user_states[user_id]["attempts"] += 1
             payload = user_states[user_id]["payload"]
             menu = user_states[user_id]["menu"]
-            menu_str = user_states[user_id]["menu_str"]
+            menu_str = "\n".join([f"{c}: {', '.join(subs)}" for c, subs in menu.items()])
             
-            check_payload = {
-                "action": "check_item",
-                "item": user_text,
-                "type": payload.get("type", "Расход")
-            }
+            check_payload = {"action": "check_item", "item": user_text, "type": payload.get("type", "Расход")}
             check_res = send_to_google_sheets(check_payload)
             
             if check_res.get("status") == "FOUND":
@@ -422,7 +428,7 @@ for event in longpoll.listen():
                 user_states[user_id]["state"] = "confirm_category"
                 user_states[user_id]["ai_cat"] = ai_cat
                 user_states[user_id]["ai_sub"] = ai_sub
-                send_vk_message(user_id, f"Ага! Слово '{user_text}' мне знакомо. Значит исходная операция относится к:\n📂 {ai_cat} -> {ai_sub}\n\nВсё верно? (Да/Нет)")
+                send_vk_message(user_id, f"Ага! Слово '{user_text}' мне знакомо. Значит исходная операция относится к:\n📂 {ai_cat} -> {ai_sub}\n\nВсё верно?", get_yes_no_keyboard())
                 continue
 
             ai_cat, ai_sub = categorize_with_ai(payload["item"], menu_str, context=user_text)
@@ -431,23 +437,21 @@ for event in longpoll.listen():
                 user_states[user_id]["state"] = "confirm_category"
                 user_states[user_id]["ai_cat"] = ai_cat
                 user_states[user_id]["ai_sub"] = ai_sub
-                send_vk_message(user_id, f"Ага! С учетом подсказки, думаю это:\n📂 {ai_cat} -> {ai_sub}\n\nВсё верно? (Да/Нет)")
+                send_vk_message(user_id, f"Ага! С учетом подсказки, думаю это:\n📂 {ai_cat} -> {ai_sub}\n\nВсё верно?", get_yes_no_keyboard())
                 continue
             else:
                 if user_states[user_id]["attempts"] < MAX_ATTEMPTS:
-                    send_vk_message(user_id, f"Всё равно не могу сообразить 🤔 (Попытка {user_states[user_id]['attempts']} из {MAX_ATTEMPTS})\nПопробуй объяснить чуть подробнее или другими словами?")
+                    send_vk_message(user_id, f"Всё равно не могу сообразить 🤔 (Попытка {user_states[user_id]['attempts']} из {MAX_ATTEMPTS})\nПопробуй объяснить чуть подробнее или другими словами?", get_cancel_keyboard())
                 else:
                     user_states[user_id]["state"] = "manual_category"
                     cats_list = "\n".join([f"• {k}" for k in menu.keys()])
-                    msg = "🤷‍♂️ Я сдаюсь. Использованы все 5 попыток.\n\nНапиши точную категорию из списка через дефис:\n\n" + cats_list
-                    send_vk_message(user_id, msg)
+                    send_vk_message(user_id, "🤷‍♂️ Я сдаюсь. Напиши точную категорию из списка через дефис:\n\n" + cats_list, get_cancel_keyboard())
                 continue
 
-        # Состояние: Ручной ввод
         if user_id in user_states and user_states[user_id].get("state") == "manual_category":
             if user_text_lower == "отмена":
                 del user_states[user_id]
-                send_vk_message(user_id, "❌ Операция отменена.")
+                send_vk_message(user_id, "❌ Операция отменена.", get_main_keyboard())
                 continue
                 
             parts = user_text.split("-")
@@ -462,20 +466,19 @@ for event in longpoll.listen():
                 gs_response = send_to_google_sheets(payload)
                 
                 if gs_response.get("status") == "SUCCESS":
-                    send_vk_message(user_id, f"✅ Успешно! Я запомнил, что '{payload['item']}' — это {cat} -> {sub}.")
+                    send_vk_message(user_id, f"✅ Успешно! Я запомнил, что '{payload['item']}' — это {cat} -> {sub}.", get_main_keyboard())
                 else:
-                    send_vk_message(user_id, f"❌ Ошибка: {gs_response.get('message')}")
+                    send_vk_message(user_id, f"❌ Ошибка: {gs_response.get('message')}", get_main_keyboard())
                 del user_states[user_id]
                 continue
             else:
-                send_vk_message(user_id, "⚠️ Напиши через дефис. Пример: Транспорт - Такси\nИли напиши 'Отмена'.")
+                send_vk_message(user_id, "⚠️ Напиши через дефис. Пример: Транспорт - Такси", get_cancel_keyboard())
                 continue
 
         # =========================================================
         # БЛОК В: ОБЫЧНЫЙ РЕЖИМ (Обработка новой одиночной операции)
         # =========================================================
         try:
-            # 1. Извлекаем данные с помощью ИИ
             ai_extract = ai_client.chat.completions.create(
                 model="gpt-3.5-turbo",
                 temperature=0.0,
@@ -489,13 +492,9 @@ for event in longpoll.listen():
             if reply_text.startswith("{") and reply_text.endswith("}"):
                 try:
                     transaction_data = json.loads(reply_text)
-                    transaction_data.pop("category", None) # Защита от выдуманных категорий
+                    transaction_data.pop("category", None)
                     transaction_data.pop("subcategory", None)
                     
-                    # -------------------------------------------------------------
-                    # ИЗМЕНЕНИЕ: Если ИИ вернул пустое название (например, написали "Доход 15000"),
-                    # мы сами подставляем слово-заглушку прямо здесь!
-                    # -------------------------------------------------------------
                     if not transaction_data.get("item", "").strip():
                         if transaction_data.get("type") in ["Доход", "Приход"]:
                             transaction_data["item"] = "Поступление"
@@ -504,15 +503,13 @@ for event in longpoll.listen():
                     
                     send_vk_message(user_id, f"⏳ Ищу '{transaction_data['item']}' в базах...")
                     
-                    # 2. Отправляем в Google Таблицу на поиск и запись
                     gs_response = send_to_google_sheets(transaction_data)
                     
                     if gs_response.get("status") == "SUCCESS":
-                        send_vk_message(user_id, "✅ Успешно записано!")
+                        send_vk_message(user_id, "✅ Успешно записано!", get_main_keyboard())
                     elif gs_response.get("status") == "SUCCESS_AUTO_ADDED":
-                        send_vk_message(user_id, f"✅ Записано!\nНашел в Глобальной базе: {gs_response.get('recognized_cat')} -> {gs_response.get('recognized_sub')}")
+                        send_vk_message(user_id, f"✅ Записано!\nНашел в Глобальной базе: {gs_response.get('recognized_cat')} -> {gs_response.get('recognized_sub')}", get_main_keyboard())
                     elif gs_response.get("status") == "UNKNOWN_ITEM":
-                        # Таблица не знает слово. Запускаем классификатор.
                         menu = gs_response.get("available_menu", {})
                         menu_str = ""
                         for c, subs in menu.items():
@@ -530,7 +527,7 @@ for event in longpoll.listen():
                                 "ai_sub": ai_sub,
                                 "attempts": 1
                             }
-                            send_vk_message(user_id, f"🤖 Думаю, '{transaction_data['item']}' относится к:\n📂 {ai_cat} -> {ai_sub}\n\nВсё верно? (Да/Нет)")
+                            send_vk_message(user_id, f"🤖 Думаю, '{transaction_data['item']}' относится к:\n📂 {ai_cat} -> {ai_sub}\n\nВсё верно?", get_yes_no_keyboard())
                         else:
                             user_states[user_id] = {
                                 "state": "provide_context",
@@ -539,15 +536,15 @@ for event in longpoll.listen():
                                 "menu_str": menu_str,
                                 "attempts": 1
                             }
-                            send_vk_message(user_id, f"🤔 Я пока не знаю статью '{transaction_data['item']}'.\nПодскажи буквально в двух словах, что это за трата/доход?")
+                            send_vk_message(user_id, f"🤔 Я пока не знаю статью '{transaction_data['item']}'.\nПодскажи буквально в двух словах, что это за трата/доход?", get_cancel_keyboard())
                     else:
-                        send_vk_message(user_id, f"❌ Ошибка таблицы: {gs_response.get('message')}")
+                        send_vk_message(user_id, f"❌ Ошибка таблицы: {gs_response.get('message')}", get_main_keyboard())
                 except json.JSONDecodeError:
-                    send_vk_message(user_id, "❌ Ошибка: ИИ вернул неправильный формат.")
+                    send_vk_message(user_id, "❌ Ошибка: ИИ вернул неправильный формат.", get_main_keyboard())
             else:
-                # Если ИИ вернул не JSON, значит это просто общение
-                send_vk_message(user_id, reply_text)
+                # Обычное текстовое общение - просто выводим базовую клавиатуру
+                send_vk_message(user_id, reply_text, get_main_keyboard())
                 
         except Exception as e:
-            send_vk_message(user_id, "❌ Ошибка связи с ИИ.")
-            print(f"Ошибка: {e}") 
+            send_vk_message(user_id, "❌ Ошибка связи с ИИ.", get_main_keyboard())
+            print(f"Ошибка: {e}")
