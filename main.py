@@ -102,10 +102,88 @@ for event in longpoll.listen():
         user_text = event.text.strip()
         user_text_lower = user_text.lower()
 
+        # =========================================================
+        # ИНТЕРАКТИВ: СОЗДАНИЕ НОВОЙ КАТЕГОРИИ (ШАГ 1 - Название)
+        # =========================================================
+        if user_id in user_states and user_states[user_id].get("state") == "create_cat_name":
+            if user_text_lower == "отмена":
+                del user_states[user_id]
+                send_vk_message(user_id, "❌ Создание категории отменено.")
+                continue
+                
+            parts = user_text.split("-")
+            if len(parts) >= 2:
+                cat = parts[0].strip()
+                sub = parts[1].strip()
+                user_states[user_id]["new_cat"] = cat
+                user_states[user_id]["new_sub"] = sub
+                user_states[user_id]["state"] = "create_cat_type"
+                send_vk_message(user_id, f"Отлично: 📂 {cat} -> {sub}.\n\nЭто будет категория для Расходов или Доходов? (Напиши 'Расход' или 'Доход')")
+            else:
+                send_vk_message(user_id, "⚠️ Обязательно используй дефис. Пример: Хобби - Рыбалка\nИли напиши 'Отмена'.")
+            continue
+
+        # =========================================================
+        # ИНТЕРАКТИВ: СОЗДАНИЕ НОВОЙ КАТЕГОРИИ (ШАГ 2 - Тип)
+        # =========================================================
+        if user_id in user_states and user_states[user_id].get("state") == "create_cat_type":
+            if user_text_lower == "отмена":
+                del user_states[user_id]
+                send_vk_message(user_id, "❌ Создание категории отменено.")
+                continue
+                
+            cat_type = "Доход" if "доход" in user_text_lower or "приход" in user_text_lower else "Расход"
+                
+            payload = {
+                "action": "add_subcategory",
+                "category": user_states[user_id]["new_cat"],
+                "subcategory": user_states[user_id]["new_sub"],
+                "type": cat_type
+            }
+            
+            send_vk_message(user_id, "⏳ Создаю структуру...")
+            gs_response = send_to_google_sheets(payload)
+            
+            if gs_response.get("status") == "SUCCESS":
+                send_vk_message(user_id, f"✅ Успешно! Категория '{payload['category']} -> {payload['subcategory']}' ({cat_type}) создана.\nТеперь можешь записывать в неё операции.")
+            else:
+                send_vk_message(user_id, f"❌ Ошибка таблицы: {gs_response.get('message')}")
+                
+            del user_states[user_id]
+            continue
+
+        # =========================================================
+        # ПЕРЕХВАТЧИК КОМАНДЫ "СОЗДАТЬ КАТЕГОРИЮ"
+        # =========================================================
+        if user_text_lower.startswith("создать категорию") or user_text_lower.startswith("новая категория"):
+            clean_text = user_text_lower.replace("создать категорию", "").replace("новая категория", "").strip()
+            
+            # Если пользователь сразу написал "Создать категорию Хобби - Марки"
+            if clean_text and "-" in clean_text:
+                prefix_len = len("создать категорию") if user_text_lower.startswith("создать категорию") else len("новая категория")
+                content = user_text[prefix_len:].strip()
+                parts = content.split("-")
+                
+                cat = parts[0].strip()
+                sub = parts[1].strip()
+                user_states[user_id] = {
+                    "state": "create_cat_type",
+                    "new_cat": cat,
+                    "new_sub": sub
+                }
+                send_vk_message(user_id, f"Отлично: 📂 {cat} -> {sub}.\n\nЭто будет категория для Расходов или Доходов? (Напиши 'Расход' или 'Доход')")
+                continue
+            
+            # Если пользователь просто написал "Создать категорию"
+            user_states[user_id] = {"state": "create_cat_name"}
+            send_vk_message(user_id, "Создаем новую категорию! 📂\n\nНапиши название Категории и Подкатегории через дефис.\nПример: Хобби - Рыбалка\n\n(Для отмены напиши 'Отмена')")
+            continue
+
+
         # ---------------------------------------------------------
         # СОСТОЯНИЕ 1: ЖДЕМ ПОДТВЕРЖДЕНИЯ (ИИ угадал, спрашивает Да/Нет)
         # ---------------------------------------------------------
-        if user_id in user_states and user_states[user_id]["state"] == "confirm_category":
+        if user_id in user_states and user_states[user_id].get("state") == "confirm_category":
             if user_text_lower == "отмена":
                 del user_states[user_id]
                 send_vk_message(user_id, "❌ Операция отменена.")
@@ -145,7 +223,7 @@ for event in longpoll.listen():
         # ---------------------------------------------------------
         # СОСТОЯНИЕ 2: ЖДЕМ ПОДСКАЗКУ (Пользователь объясняет контекст)
         # ---------------------------------------------------------
-        if user_id in user_states and user_states[user_id]["state"] == "provide_context":
+        if user_id in user_states and user_states[user_id].get("state") == "provide_context":
             if user_text_lower == "отмена":
                 del user_states[user_id]
                 send_vk_message(user_id, "❌ Операция отменена.")
@@ -194,7 +272,7 @@ for event in longpoll.listen():
         # ---------------------------------------------------------
         # СОСТОЯНИЕ 3: РУЧНОЙ ВВОД (Крайний случай)
         # ---------------------------------------------------------
-        if user_id in user_states and user_states[user_id]["state"] == "manual_category":
+        if user_id in user_states and user_states[user_id].get("state") == "manual_category":
             if user_text_lower == "отмена":
                 del user_states[user_id]
                 send_vk_message(user_id, "❌ Операция отменена.")
