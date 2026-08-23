@@ -62,14 +62,39 @@ PROMPT_CATEGORIZE = """
 """
 
 # ====================================================================
-# 3. ГЕНЕРАТОРЫ КЛАВИАТУР (КНОПОК)
+# 3. ГЕНЕРАТОРЫ КЛАВИАТУР (КНОПОК ВК)
 # ====================================================================
 def get_main_keyboard():
     keyboard = VkKeyboard(one_time=False)
     keyboard.add_button('Разобрать завалы', color=VkKeyboardColor.PRIMARY)
     keyboard.add_line()
-    keyboard.add_button('Создать категорию', color=VkKeyboardColor.SECONDARY)
+    keyboard.add_button('Создать статью', color=VkKeyboardColor.POSITIVE)
+    keyboard.add_button('Категории', color=VkKeyboardColor.SECONDARY)
+    keyboard.add_line()
     keyboard.add_button('Помощь', color=VkKeyboardColor.SECONDARY)
+    return keyboard
+
+def get_categories_menu_keyboard():
+    keyboard = VkKeyboard(one_time=False)
+    keyboard.add_button('Создать категорию', color=VkKeyboardColor.POSITIVE)
+    keyboard.add_button('Переименовать категорию', color=VkKeyboardColor.PRIMARY)
+    keyboard.add_line()
+    keyboard.add_button('Удалить / Перенести', color=VkKeyboardColor.SECONDARY)
+    keyboard.add_line()
+    keyboard.add_button('Отмена', color=VkKeyboardColor.NEGATIVE)
+    return keyboard
+
+def get_numbered_keyboard(count, extra_btn=None):
+    keyboard = VkKeyboard(one_time=False)
+    limit = min(count, 36)
+    for i in range(1, limit + 1):
+        keyboard.add_button(str(i), color=VkKeyboardColor.SECONDARY)
+        if i % 4 == 0 and i != limit:
+            keyboard.add_line()
+    keyboard.add_line()
+    if extra_btn:
+        keyboard.add_button(extra_btn, color=VkKeyboardColor.PRIMARY)
+    keyboard.add_button('Отмена', color=VkKeyboardColor.NEGATIVE)
     return keyboard
 
 def get_yes_no_keyboard():
@@ -97,31 +122,22 @@ def get_cancel_keyboard():
 # 4. ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
 # ====================================================================
 def send_vk_message(user_id, text, keyboard=None):
-    """
-    ИЗМЕНЕНИЕ: Бронебойная отправка сообщений. 
-    Если ВК запрещает клавиатуру, бот не падает, а отправляет текст без неё.
-    """
     try:
         post = {'user_id': user_id, 'message': text, 'random_id': 0}
         if keyboard is not None:
             post['keyboard'] = keyboard.get_keyboard()
         vk.messages.send(**post)
     except Exception as e:
-        print(f"Ошибка отправки сообщения (возможно из-за кнопок): {e}")
+        print(f"Ошибка отправки (клавиатура?): {e}")
         try:
-            # Пробуем отправить просто текст, если клавиатура вызвала ошибку
             vk.messages.send(user_id=user_id, message=text, random_id=0)
-        except Exception as e2:
-            print(f"Критическая ошибка отправки: {e2}")
+        except:
+            pass
 
 def send_to_google_sheets(payload):
     try:
         response = requests.post(GOOGLE_SHEETS_URL, json=payload)
-        try:
-            return response.json()
-        except Exception:
-            error_text = response.text[:300].replace('\n', ' ')
-            return {"status": "ERROR", "message": f"Код {response.status_code}. Текст: {error_text}"}
+        return response.json()
     except Exception as e:
         return {"status": "ERROR", "message": str(e)}
 
@@ -172,7 +188,6 @@ def process_next_in_queue(user_id):
     send_vk_message(user_id, msg, get_yes_no_keyboard())
 
 print("Бот успешно запущен и слушает сообщения ВКонтакте...")
-
 user_states = {}
 MAX_ATTEMPTS = 5
 
@@ -185,17 +200,252 @@ for event in longpoll.listen():
         user_text = event.text.strip()
         user_text_lower = user_text.lower()
 
-        if user_text_lower in ["помощь", "начать", "start"]:
-            help_text = "🤖 Привет! Я твой финансовый Оракул.\n\n" \
-                        "Просто напиши мне трату или доход, например:\n" \
-                        "👉 Такси 500\n" \
-                        "👉 Зарплата 50000\n" \
-                        "👉 Продукты 1500 Пятерочка\n\n" \
-                        "Используй кнопки ниже для удобства!"
-            send_vk_message(user_id, help_text, get_main_keyboard())
+        # ---------------------------------------------------------
+        # БАЗОВЫЕ КОМАНДЫ
+        # ---------------------------------------------------------
+        if user_text_lower in ["помощь", "начать", "start", "отмена"]:
+            if user_id in user_states:
+                del user_states[user_id]
+            send_vk_message(user_id, "Главное меню. Выберите действие или просто напишите трату (например: Такси 500):", get_main_keyboard())
             continue
 
-        # =========================================================
+        # ---------------------------------------------------------
+        # МЕНЮ "КАТЕГОРИИ" И НАВИГАЦИЯ
+        # ---------------------------------------------------------
+        if user_text_lower == "категории":
+            send_vk_message(user_id, "Управление структурой. Что хотите сделать?", get_categories_menu_keyboard())
+            continue
+            
+        if user_text_lower == "удалить / перенести":
+            send_vk_message(user_id, "Этот функционал находится в разработке 🛠\nПока что вы можете сделать это вручную в Google Таблице.", get_main_keyboard())
+            continue
+
+        # ---------------------------------------------------------
+        # ПЕРЕИМЕНОВАТЬ КАТЕГОРИЮ
+        # ---------------------------------------------------------
+        if user_text_lower == "переименовать категорию":
+            send_vk_message(user_id, "⏳ Загружаю список категорий...")
+            res = send_to_google_sheets({"action": "get_full_menu"})
+            if res.get("status") == "SUCCESS":
+                menu = res.get("menu", {})
+                cats = list(set(list(menu.get("Расход", {}).keys()) + list(menu.get("Доход", {}).keys())))
+                cats.sort()
+                
+                if not cats:
+                    send_vk_message(user_id, "Категорий пока нет.", get_main_keyboard())
+                    continue
+                
+                msg = "Какую категорию переименовать?\n\n"
+                for i, c in enumerate(cats):
+                    msg += f"{i+1}. {c}\n"
+                
+                user_states[user_id] = {"state": "rename_cat_select", "cats": cats, "menu": menu}
+                send_vk_message(user_id, msg, get_numbered_keyboard(len(cats), extra_btn='Переименовать подкатегорию'))
+            continue
+
+        if user_id in user_states and user_states[user_id].get("state") == "rename_cat_select":
+            if user_text_lower == "переименовать подкатегорию":
+                pass # Проваливаемся ниже
+            elif user_text.isdigit():
+                idx = int(user_text) - 1
+                cats = user_states[user_id]["cats"]
+                if 0 <= idx < len(cats):
+                    old_cat = cats[idx]
+                    user_states[user_id]["state"] = "rename_cat_type"
+                    user_states[user_id]["old_cat"] = old_cat
+                    send_vk_message(user_id, f"Введите новое название для категории '{old_cat}':", get_cancel_keyboard())
+                    continue
+                else:
+                    send_vk_message(user_id, "Неверный номер. Попробуйте еще раз.")
+                    continue
+
+        if user_id in user_states and user_states[user_id].get("state") == "rename_cat_type":
+            new_cat = user_text
+            old_cat = user_states[user_id]["old_cat"]
+            send_vk_message(user_id, f"⏳ Переименовываю '{old_cat}' в '{new_cat}' во всех базах...")
+            send_to_google_sheets({"action": "rename_category", "old_cat": old_cat, "new_cat": new_cat, "type": "Расход"})
+            send_to_google_sheets({"action": "rename_category", "old_cat": old_cat, "new_cat": new_cat, "type": "Доход"})
+            send_vk_message(user_id, "✅ Категория успешно переименована!", get_main_keyboard())
+            del user_states[user_id]
+            continue
+
+        # ---------------------------------------------------------
+        # ПЕРЕИМЕНОВАТЬ ПОДКАТЕГОРИЮ
+        # ---------------------------------------------------------
+        if user_text_lower == "переименовать подкатегорию":
+            menu = user_states.get(user_id, {}).get("menu")
+            if not menu:
+                res = send_to_google_sheets({"action": "get_full_menu"})
+                menu = res.get("menu", {})
+                
+            cats = list(set(list(menu.get("Расход", {}).keys()) + list(menu.get("Доход", {}).keys())))
+            cats.sort()
+            
+            msg = "В какой категории находится подкатегория?\n\n"
+            for i, c in enumerate(cats):
+                msg += f"{i+1}. {c}\n"
+            
+            user_states[user_id] = {"state": "rename_sub_select_cat", "cats": cats, "menu": menu}
+            send_vk_message(user_id, msg, get_numbered_keyboard(len(cats)))
+            continue
+
+        if user_id in user_states and user_states[user_id].get("state") == "rename_sub_select_cat":
+            if user_text.isdigit():
+                idx = int(user_text) - 1
+                cats = user_states[user_id]["cats"]
+                if 0 <= idx < len(cats):
+                    sel_cat = cats[idx]
+                    menu = user_states[user_id]["menu"]
+                    subs = list(set(menu.get("Расход", {}).get(sel_cat, []) + menu.get("Доход", {}).get(sel_cat, [])))
+                    subs.sort()
+                    
+                    if not subs:
+                        send_vk_message(user_id, f"В категории '{sel_cat}' нет подкатегорий.", get_main_keyboard())
+                        del user_states[user_id]
+                        continue
+                        
+                    msg = f"Какую подкатегорию в '{sel_cat}' переименовать?\n\n"
+                    for i, s in enumerate(subs):
+                        msg += f"{i+1}. {s}\n"
+                        
+                    user_states[user_id]["state"] = "rename_sub_select_sub"
+                    user_states[user_id]["sel_cat"] = sel_cat
+                    user_states[user_id]["subs"] = subs
+                    send_vk_message(user_id, msg, get_numbered_keyboard(len(subs)))
+                    continue
+
+        if user_id in user_states and user_states[user_id].get("state") == "rename_sub_select_sub":
+            if user_text.isdigit():
+                idx = int(user_text) - 1
+                subs = user_states[user_id]["subs"]
+                if 0 <= idx < len(subs):
+                    old_sub = subs[idx]
+                    user_states[user_id]["state"] = "rename_sub_type"
+                    user_states[user_id]["old_sub"] = old_sub
+                    send_vk_message(user_id, f"Введите новое название для '{old_sub}':", get_cancel_keyboard())
+                    continue
+
+        if user_id in user_states and user_states[user_id].get("state") == "rename_sub_type":
+            new_sub = user_text
+            sel_cat = user_states[user_id]["sel_cat"]
+            old_sub = user_states[user_id]["old_sub"]
+            send_vk_message(user_id, f"⏳ Переименовываю '{old_sub}' в '{new_sub}'...")
+            send_to_google_sheets({"action": "rename_subcategory", "cat": sel_cat, "old_sub": old_sub, "new_sub": new_sub, "type": "Расход"})
+            send_to_google_sheets({"action": "rename_subcategory", "cat": sel_cat, "old_sub": old_sub, "new_sub": new_sub, "type": "Доход"})
+            send_vk_message(user_id, "✅ Подкатегория успешно переименована!", get_main_keyboard())
+            del user_states[user_id]
+            continue
+
+        # ---------------------------------------------------------
+        # СОЗДАТЬ СТАТЬЮ (СВЕРХУ ВНИЗ)
+        # ---------------------------------------------------------
+        if user_text_lower == "создать статью":
+            send_vk_message(user_id, "⏳ Загружаю меню...")
+            res = send_to_google_sheets({"action": "get_full_menu"})
+            if res.get("status") == "SUCCESS":
+                user_states[user_id] = {"state": "create_art_type", "menu": res.get("menu", {})}
+                send_vk_message(user_id, "Это будет статья Расходов или Доходов?", type_keyboard())
+            continue
+
+        if user_id in user_states and user_states[user_id].get("state") == "create_art_type":
+            c_type = "Доход" if "доход" in user_text_lower else "Расход"
+            menu = user_states[user_id]["menu"].get(c_type, {})
+            cats = list(menu.keys())
+            cats.sort()
+            
+            msg = f"Выберите категорию ({c_type}):\n\n"
+            for i, c in enumerate(cats):
+                msg += f"{i+1}. {c}\n"
+                
+            user_states[user_id]["state"] = "create_art_cat"
+            user_states[user_id]["c_type"] = c_type
+            user_states[user_id]["cats"] = cats
+            send_vk_message(user_id, msg, get_numbered_keyboard(len(cats), extra_btn='Создать категорию'))
+            continue
+
+        if user_id in user_states and user_states[user_id].get("state") == "create_art_cat":
+            if user_text_lower == "создать категорию":
+                pass 
+            elif user_text.isdigit():
+                idx = int(user_text) - 1
+                cats = user_states[user_id]["cats"]
+                if 0 <= idx < len(cats):
+                    sel_cat = cats[idx]
+                    c_type = user_states[user_id]["c_type"]
+                    subs = user_states[user_id]["menu"][c_type].get(sel_cat, [])
+                    subs.sort()
+                    
+                    msg = f"Выберите подкатегорию в '{sel_cat}':\n\n"
+                    for i, s in enumerate(subs):
+                        msg += f"{i+1}. {s}\n"
+                        
+                    user_states[user_id]["state"] = "create_art_sub"
+                    user_states[user_id]["sel_cat"] = sel_cat
+                    user_states[user_id]["subs"] = subs
+                    send_vk_message(user_id, msg, get_numbered_keyboard(len(subs)))
+                    continue
+
+        if user_id in user_states and user_states[user_id].get("state") == "create_art_sub":
+            if user_text.isdigit():
+                idx = int(user_text) - 1
+                subs = user_states[user_id]["subs"]
+                if 0 <= idx < len(subs):
+                    sel_sub = subs[idx]
+                    user_states[user_id]["state"] = "create_art_name"
+                    user_states[user_id]["sel_sub"] = sel_sub
+                    send_vk_message(user_id, f"Отлично: {user_states[user_id]['sel_cat']} -> {sel_sub}.\nВведите название новой статьи:", get_cancel_keyboard())
+                    continue
+
+        if user_id in user_states and user_states[user_id].get("state") == "create_art_name":
+            art_name = user_text
+            payload = {
+                "action": "add_article",
+                "type": user_states[user_id]["c_type"],
+                "category": user_states[user_id]["sel_cat"],
+                "subcategory": user_states[user_id]["sel_sub"],
+                "item": art_name
+            }
+            send_vk_message(user_id, "⏳ Добавляю статью в базу...")
+            send_to_google_sheets(payload)
+            send_vk_message(user_id, f"✅ Статья '{art_name}' успешно создана!", get_main_keyboard())
+            del user_states[user_id]
+            continue
+
+        # ---------------------------------------------------------
+        # СОЗДАТЬ КАТЕГОРИЮ (УПРОЩЕННЫЙ ВВОД)
+        # ---------------------------------------------------------
+        if user_text_lower == "создать категорию":
+            user_states[user_id] = {"state": "create_cat_name"}
+            send_vk_message(user_id, "Создаем новую категорию! 📂\n\nНапиши название Категории и Подкатегории через дефис.\nПример: Хобби - Рыбалка", get_cancel_keyboard())
+            continue
+
+        if user_id in user_states and user_states[user_id].get("state") == "create_cat_name":
+            parts = user_text.split("-")
+            if len(parts) >= 2:
+                cat = parts[0].strip()
+                sub = parts[1].strip()
+                user_states[user_id]["new_cat"] = cat
+                user_states[user_id]["new_sub"] = sub
+                user_states[user_id]["state"] = "create_cat_type"
+                send_vk_message(user_id, f"Отлично: 📂 {cat} -> {sub}.\n\nЭто будет категория для Расходов или Доходов?", type_keyboard())
+            else:
+                send_vk_message(user_id, "⚠️ Обязательно используй дефис. Пример: Хобби - Рыбалка", get_cancel_keyboard())
+            continue
+
+        if user_id in user_states and user_states[user_id].get("state") == "create_cat_type":
+            cat_type = "Доход" if "доход" in user_text_lower or "приход" in user_text_lower else "Расход"
+            payload = {
+                "action": "add_subcategory",
+                "category": user_states[user_id]["new_cat"],
+                "subcategory": user_states[user_id]["new_sub"],
+                "type": cat_type
+            }
+            send_vk_message(user_id, "⏳ Создаю структуру...")
+            send_to_google_sheets(payload)
+            send_vk_message(user_id, f"✅ Успешно! Категория создана.", get_main_keyboard())
+            del user_states[user_id]
+            continue
+# =========================================================
         # БЛОК Г: РАЗБОР ИМПОРТА (ЗАВАЛОВ)
         # =========================================================
         if user_text_lower in ["разобрать", "разобрать импорт", "разобрать завалы"]:
@@ -302,79 +552,8 @@ for event in longpoll.listen():
                 send_vk_message(user_id, "⚠️ Напиши через дефис. Пример: Транспорт - Такси", get_cancel_keyboard())
                 continue
 
-
         # =========================================================
-        # БЛОК А: ИНТЕРАКТИВНОЕ СОЗДАНИЕ НОВОЙ КАТЕГОРИИ
-        # =========================================================
-        if user_id in user_states and user_states[user_id].get("state") == "create_cat_name":
-            if user_text_lower == "отмена":
-                del user_states[user_id]
-                send_vk_message(user_id, "❌ Создание категории отменено.", get_main_keyboard())
-                continue
-                
-            parts = user_text.split("-")
-            if len(parts) >= 2:
-                cat = parts[0].strip()
-                sub = parts[1].strip()
-                user_states[user_id]["new_cat"] = cat
-                user_states[user_id]["new_sub"] = sub
-                user_states[user_id]["state"] = "create_cat_type"
-                send_vk_message(user_id, f"Отлично: 📂 {cat} -> {sub}.\n\nЭто будет категория для Расходов или Доходов?", type_keyboard())
-            else:
-                send_vk_message(user_id, "⚠️ Обязательно используй дефис. Пример: Хобби - Рыбалка", get_cancel_keyboard())
-            continue
-
-        if user_id in user_states and user_states[user_id].get("state") == "create_cat_type":
-            if user_text_lower == "отмена":
-                del user_states[user_id]
-                send_vk_message(user_id, "❌ Создание категории отменено.", get_main_keyboard())
-                continue
-                
-            cat_type = "Доход" if "доход" in user_text_lower or "приход" in user_text_lower else "Расход"
-                
-            payload = {
-                "action": "add_subcategory",
-                "category": user_states[user_id]["new_cat"],
-                "subcategory": user_states[user_id]["new_sub"],
-                "type": cat_type
-            }
-            
-            send_vk_message(user_id, "⏳ Создаю структуру...")
-            gs_response = send_to_google_sheets(payload)
-            
-            if gs_response.get("status") == "SUCCESS":
-                send_vk_message(user_id, f"✅ Успешно! Категория '{payload['category']} -> {payload['subcategory']}' ({cat_type}) создана.\nТеперь можешь записывать в неё операции.", get_main_keyboard())
-            else:
-                send_vk_message(user_id, f"❌ Ошибка таблицы: {gs_response.get('message')}", get_main_keyboard())
-                
-            del user_states[user_id]
-            continue
-
-        if user_text_lower.startswith("создать категорию") or user_text_lower.startswith("новая категория"):
-            clean_text = user_text_lower.replace("создать категорию", "").replace("новая категория", "").strip()
-            
-            if clean_text and "-" in clean_text:
-                prefix_len = len("создать категорию") if user_text_lower.startswith("создать категорию") else len("новая категория")
-                content = user_text[prefix_len:].strip()
-                parts = content.split("-")
-                
-                cat = parts[0].strip()
-                sub = parts[1].strip()
-                user_states[user_id] = {
-                    "state": "create_cat_type",
-                    "new_cat": cat,
-                    "new_sub": sub
-                }
-                send_vk_message(user_id, f"Отлично: 📂 {cat} -> {sub}.\n\nЭто будет категория для Расходов или Доходов?", type_keyboard())
-                continue
-            
-            user_states[user_id] = {"state": "create_cat_name"}
-            send_vk_message(user_id, "Создаем новую категорию! 📂\n\nНапиши название Категории и Подкатегории через дефис.\nПример: Хобби - Рыбалка", get_cancel_keyboard())
-            continue
-
-
-        # =========================================================
-        # БЛОК Б: ОБУЧЕНИЕ И ПОДСКАЗКИ (ОДИНОЧНЫЕ ОПЕРАЦИИ)
+        # БЛОК Д: ОБУЧЕНИЕ И ПОДСКАЗКИ (ОДИНОЧНЫЕ ОПЕРАЦИИ)
         # =========================================================
         if user_id in user_states and user_states[user_id].get("state") == "confirm_category":
             if user_text_lower == "отмена":
@@ -481,7 +660,7 @@ for event in longpoll.listen():
                 continue
 
         # =========================================================
-        # БЛОК В: ОБЫЧНЫЙ РЕЖИМ (Обработка новой одиночной операции)
+        # БЛОК Е: ОБЫЧНЫЙ РЕЖИМ (Обработка новой одиночной операции)
         # =========================================================
         try:
             ai_extract = ai_client.chat.completions.create(
@@ -550,6 +729,3 @@ for event in longpoll.listen():
                 # Обычное текстовое общение - просто выводим базовую клавиатуру
                 send_vk_message(user_id, reply_text, get_main_keyboard())
                 
-        except Exception as e:
-            send_vk_message(user_id, "❌ Ошибка связи с ИИ.", get_main_keyboard())
-            print(f"Ошибка: {e}")
