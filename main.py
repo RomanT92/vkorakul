@@ -445,7 +445,8 @@ for event in longpoll.listen():
             send_vk_message(user_id, f"✅ Успешно! Категория создана.", get_main_keyboard())
             del user_states[user_id]
             continue
-# =========================================================
+
+        # =========================================================
         # БЛОК Г: РАЗБОР ИМПОРТА (ЗАВАЛОВ)
         # =========================================================
         if user_text_lower in ["разобрать", "разобрать импорт", "разобрать завалы"]:
@@ -726,6 +727,8 @@ for event in longpoll.listen():
                 except json.JSONDecodeError:
                     send_vk_message(user_id, "❌ Ошибка: ИИ вернул неправильный формат.", get_main_keyboard())
             else:
-                # Обычное текстовое общение - просто выводим базовую клавиатуру
                 send_vk_message(user_id, reply_text, get_main_keyboard())
                 
+        except Exception as e:
+            send_vk_message(user_id, "❌ Ошибка связи с ИИ.", get_main_keyboard())
+            print(f"Ошибка: {e}") 
