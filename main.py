@@ -56,7 +56,6 @@ PROMPT_CATEGORIZE = """
 # 3. ГЕНЕРАТОРЫ КЛАВИАТУР (МНОГОУРОВНЕВОЕ МЕНЮ)
 # ====================================================================
 def get_main_keyboard():
-    """Главное меню (Уровень 1)"""
     keyboard = VkKeyboard(one_time=False)
     keyboard.add_button('Разобрать завалы', color=VkKeyboardColor.PRIMARY)
     keyboard.add_line()
@@ -66,7 +65,6 @@ def get_main_keyboard():
     return keyboard
 
 def get_crud_keyboard():
-    """Меню действий со структурой (Уровень 2)"""
     keyboard = VkKeyboard(one_time=False)
     keyboard.add_button('Создать', color=VkKeyboardColor.POSITIVE)
     keyboard.add_button('Переименовать', color=VkKeyboardColor.PRIMARY)
@@ -76,8 +74,15 @@ def get_crud_keyboard():
     keyboard.add_button('Назад', color=VkKeyboardColor.NEGATIVE)
     return keyboard
 
+def get_del_move_keyboard():
+    keyboard = VkKeyboard(one_time=False)
+    keyboard.add_button('Удалить', color=VkKeyboardColor.NEGATIVE)
+    keyboard.add_button('Перенести', color=VkKeyboardColor.PRIMARY)
+    keyboard.add_line()
+    keyboard.add_button('Назад', color=VkKeyboardColor.SECONDARY)
+    return keyboard
+
 def get_entity_keyboard():
-    """Меню выбора объекта (Уровень 3)"""
     keyboard = VkKeyboard(one_time=False)
     keyboard.add_button('Категорию', color=VkKeyboardColor.PRIMARY)
     keyboard.add_button('Подкатегорию', color=VkKeyboardColor.PRIMARY)
@@ -87,10 +92,17 @@ def get_entity_keyboard():
     keyboard.add_button('Назад', color=VkKeyboardColor.NEGATIVE)
     return keyboard
 
-def get_numbered_keyboard(count):
-    """Динамическая клавиатура с цифрами для выбора из списка"""
+def get_move_entity_keyboard():
     keyboard = VkKeyboard(one_time=False)
-    limit = min(count, 36) # ВК разрешает макс 40 кнопок
+    keyboard.add_button('Подкатегорию', color=VkKeyboardColor.PRIMARY)
+    keyboard.add_button('Статью', color=VkKeyboardColor.PRIMARY)
+    keyboard.add_line()
+    keyboard.add_button('Назад', color=VkKeyboardColor.NEGATIVE)
+    return keyboard
+
+def get_numbered_keyboard(count):
+    keyboard = VkKeyboard(one_time=False)
+    limit = min(count, 36)
     for i in range(1, limit + 1):
         keyboard.add_button(str(i), color=VkKeyboardColor.SECONDARY)
         if i % 4 == 0 and i != limit:
@@ -214,7 +226,7 @@ for event in longpoll.listen():
                 continue
                 
             if user_text_lower == "назад":
-                if state in ["wait_entity_create", "wait_entity_rename", "wait_entity_delete"]:
+                if state in ["wait_entity_create", "wait_entity_rename", "wait_del_move_action"]:
                     user_states[user_id] = {"state": "menu_crud"}
                     send_vk_message(user_id, "Управление структурой. Что хотите сделать?", get_crud_keyboard())
                     continue
@@ -249,13 +261,230 @@ for event in longpoll.listen():
                 send_vk_message(user_id, "Что именно вы хотите переименовать?", get_entity_keyboard())
                 continue
             elif user_text_lower == "удалить / перенести":
-                user_states[user_id]["state"] = "wait_entity_delete"
-                send_vk_message(user_id, "Что именно вы хотите удалить или перенести?", get_entity_keyboard())
+                user_states[user_id]["state"] = "wait_del_move_action"
+                send_vk_message(user_id, "Что вы хотите сделать?", get_del_move_keyboard())
                 continue
 
-        # Уровень 3: Выбор объекта
-        
-        # --- ВЕТКА: СОЗДАТЬ ---
+        # ---------------------------------------------------------
+        # ВЕТКА: УДАЛИТЬ ИЛИ ПЕРЕНЕСТИ
+        # ---------------------------------------------------------
+        if state == "wait_del_move_action":
+            if user_text_lower == "удалить":
+                user_states[user_id]["state"] = "delete_select_level"
+                send_vk_message(user_id, "Что именно удалить?", get_entity_keyboard())
+                continue
+            elif user_text_lower == "перенести":
+                user_states[user_id]["state"] = "move_select_level"
+                send_vk_message(user_id, "Что именно перенести?", get_move_entity_keyboard())
+                continue
+
+        # --- УДАЛЕНИЕ ---
+        if state == "delete_select_level":
+            if user_text_lower in ["категорию", "подкатегорию", "статью"]:
+                level_map = {"категорию": "category", "подкатегорию": "subcategory", "статью": "article"}
+                user_states[user_id]["del_level"] = level_map[user_text_lower]
+                user_states[user_id]["state"] = "delete_select_type"
+                send_vk_message(user_id, "В Расходах или Доходах?", type_keyboard())
+            continue
+
+        if state == "delete_select_type":
+            c_type = "Доход" if "доход" in user_text_lower else "Расход"
+            send_vk_message(user_id, "⏳ Загружаю структуру...")
+            res = send_to_google_sheets({"action": "get_full_menu"})
+            if res.get("status") == "SUCCESS":
+                menu = res.get("menu", {}).get(c_type, {})
+                cats = list(menu.keys())
+                cats.sort()
+                user_states[user_id]["menu"] = menu
+                user_states[user_id]["c_type"] = c_type
+                user_states[user_id]["cats"] = cats
+                user_states[user_id]["state"] = "delete_select_cat"
+                msg = f"Выберите категорию ({c_type}):\n\n"
+                for i, c in enumerate(cats): msg += f"{i+1}. {c}\n"
+                send_vk_message(user_id, msg, get_numbered_keyboard(len(cats)))
+            continue
+
+        if state == "delete_select_cat":
+            if user_text.isdigit():
+                idx = int(user_text) - 1
+                cats = user_states[user_id]["cats"]
+                if 0 <= idx < len(cats):
+                    sel_cat = cats[idx]
+                    user_states[user_id]["sel_cat"] = sel_cat
+                    level = user_states[user_id]["del_level"]
+                    
+                    if level == "category":
+                        user_states[user_id]["state"] = "delete_confirm"
+                        send_vk_message(user_id, f"⚠️ Вы уверены, что хотите удалить КАТЕГОРИЮ '{sel_cat}' со всеми подкатегориями и статьями?\n\n(Она удалится из вашей личной таблицы, но останется в Глобальной)", get_yes_no_keyboard())
+                    else:
+                        subs = list(user_states[user_id]["menu"].get(sel_cat, {}).keys())
+                        subs.sort()
+                        user_states[user_id]["subs"] = subs
+                        user_states[user_id]["state"] = "delete_select_sub"
+                        msg = f"Выберите подкатегорию в '{sel_cat}':\n\n"
+                        for i, s in enumerate(subs): msg += f"{i+1}. {s}\n"
+                        send_vk_message(user_id, msg, get_numbered_keyboard(len(subs)))
+            continue
+
+        if state == "delete_select_sub":
+            if user_text.isdigit():
+                idx = int(user_text) - 1
+                subs = user_states[user_id]["subs"]
+                if 0 <= idx < len(subs):
+                    sel_sub = subs[idx]
+                    user_states[user_id]["sel_sub"] = sel_sub
+                    level = user_states[user_id]["del_level"]
+                    
+                    if level == "subcategory":
+                        user_states[user_id]["state"] = "delete_confirm"
+                        send_vk_message(user_id, f"⚠️ Вы уверены, что хотите удалить ПОДКАТЕГОРИЮ '{sel_sub}' со всеми её статьями?", get_yes_no_keyboard())
+                    else:
+                        arts = user_states[user_id]["menu"][user_states[user_id]["sel_cat"]].get(sel_sub, [])
+                        arts.sort()
+                        user_states[user_id]["arts"] = arts
+                        user_states[user_id]["state"] = "delete_select_art"
+                        msg = f"Выберите статью в '{sel_sub}':\n\n"
+                        for i, a in enumerate(arts): msg += f"{i+1}. {a}\n"
+                        send_vk_message(user_id, msg, get_numbered_keyboard(len(arts)))
+            continue
+
+        if state == "delete_select_art":
+            if user_text.isdigit():
+                idx = int(user_text) - 1
+                arts = user_states[user_id]["arts"]
+                if 0 <= idx < len(arts):
+                    sel_art = arts[idx]
+                    user_states[user_id]["sel_art"] = sel_art
+                    user_states[user_id]["state"] = "delete_confirm"
+                    send_vk_message(user_id, f"⚠️ Вы уверены, что хотите удалить СТАТЬЮ '{sel_art}'?", get_yes_no_keyboard())
+            continue
+
+        if state == "delete_confirm":
+            if user_text_lower in ["да", "верно", "ага", "yes", "+"]:
+                payload = {
+                    "action": "delete_entity",
+                    "level": user_states[user_id]["del_level"],
+                    "type": user_states[user_id]["c_type"],
+                    "cat": user_states[user_id].get("sel_cat", ""),
+                    "sub": user_states[user_id].get("sel_sub", ""),
+                    "art": user_states[user_id].get("sel_art", "")
+                }
+                send_vk_message(user_id, "⏳ Удаляю...")
+                send_to_google_sheets(payload)
+                send_vk_message(user_id, "✅ Успешно удалено!", get_main_keyboard())
+                del user_states[user_id]
+            elif user_text_lower in ["нет", "неверно", "не", "no", "-"]:
+                send_vk_message(user_id, "Удаление отменено.", get_main_keyboard())
+                del user_states[user_id]
+            continue
+
+        # --- ПЕРЕНОС ---
+        if state == "move_select_level":
+            if user_text_lower in ["подкатегорию", "статью"]:
+                level_map = {"подкатегорию": "subcategory", "статью": "article"}
+                user_states[user_id]["move_level"] = level_map[user_text_lower]
+                user_states[user_id]["state"] = "move_select_type"
+                send_vk_message(user_id, "В Расходах или Доходах?", type_keyboard())
+            continue
+
+        if state == "move_select_type":
+            c_type = "Доход" if "доход" in user_text_lower else "Расход"
+            send_vk_message(user_id, "⏳ Загружаю структуру...")
+            res = send_to_google_sheets({"action": "get_full_menu"})
+            if res.get("status") == "SUCCESS":
+                menu = res.get("menu", {}).get(c_type, {})
+                cats = list(menu.keys())
+                cats.sort()
+                user_states[user_id]["menu"] = menu
+                user_states[user_id]["c_type"] = c_type
+                user_states[user_id]["cats"] = cats
+                user_states[user_id]["state"] = "move_select_cat"
+                msg = f"Выберите категорию ({c_type}):\n\n"
+                for i, c in enumerate(cats): msg += f"{i+1}. {c}\n"
+                send_vk_message(user_id, msg, get_numbered_keyboard(len(cats)))
+            continue
+
+        if state == "move_select_cat":
+            if user_text.isdigit():
+                idx = int(user_text) - 1
+                cats = user_states[user_id]["cats"]
+                if 0 <= idx < len(cats):
+                    sel_cat = cats[idx]
+                    user_states[user_id]["sel_cat"] = sel_cat
+                    subs = list(user_states[user_id]["menu"].get(sel_cat, {}).keys())
+                    subs.sort()
+                    user_states[user_id]["subs"] = subs
+                    user_states[user_id]["state"] = "move_select_sub"
+                    msg = f"Выберите подкатегорию в '{sel_cat}':\n\n"
+                    for i, s in enumerate(subs): msg += f"{i+1}. {s}\n"
+                    send_vk_message(user_id, msg, get_numbered_keyboard(len(subs)))
+            continue
+
+        if state == "move_select_sub":
+            if user_text.isdigit():
+                idx = int(user_text) - 1
+                subs = user_states[user_id]["subs"]
+                if 0 <= idx < len(subs):
+                    sel_sub = subs[idx]
+                    user_states[user_id]["sel_sub"] = sel_sub
+                    level = user_states[user_id]["move_level"]
+                    
+                    if level == "subcategory":
+                        user_states[user_id]["state"] = "move_target_parent"
+                        cats = user_states[user_id]["cats"]
+                        msg = f"В какую категорию перенести '{sel_sub}'?\n\n"
+                        for i, c in enumerate(cats): msg += f"{i+1}. {c}\n"
+                        send_vk_message(user_id, msg, get_numbered_keyboard(len(cats)))
+                    else:
+                        arts = user_states[user_id]["menu"][user_states[user_id]["sel_cat"]].get(sel_sub, [])
+                        arts.sort()
+                        user_states[user_id]["arts"] = arts
+                        user_states[user_id]["state"] = "move_select_art"
+                        msg = f"Выберите статью в '{sel_sub}':\n\n"
+                        for i, a in enumerate(arts): msg += f"{i+1}. {a}\n"
+                        send_vk_message(user_id, msg, get_numbered_keyboard(len(arts)))
+            continue
+
+        if state == "move_select_art":
+            if user_text.isdigit():
+                idx = int(user_text) - 1
+                arts = user_states[user_id]["arts"]
+                if 0 <= idx < len(arts):
+                    sel_art = arts[idx]
+                    user_states[user_id]["sel_art"] = sel_art
+                    user_states[user_id]["state"] = "move_target_parent"
+                    subs = user_states[user_id]["subs"]
+                    msg = f"В какую подкатегорию перенести статью '{sel_art}'?\n\n"
+                    for i, s in enumerate(subs): msg += f"{i+1}. {s}\n"
+                    send_vk_message(user_id, msg, get_numbered_keyboard(len(subs)))
+            continue
+
+        if state == "move_target_parent":
+            if user_text.isdigit():
+                level = user_states[user_id]["move_level"]
+                targets = user_states[user_id]["cats"] if level == "subcategory" else user_states[user_id]["subs"]
+                idx = int(user_text) - 1
+                if 0 <= idx < len(targets):
+                    new_parent = targets[idx]
+                    payload = {
+                        "action": "move_entity",
+                        "level": level,
+                        "type": user_states[user_id]["c_type"],
+                        "cat": user_states[user_id]["sel_cat"],
+                        "sub": user_states[user_id]["sel_sub"],
+                        "art": user_states[user_id].get("sel_art", ""),
+                        "new_parent": new_parent
+                    }
+                    send_vk_message(user_id, "⏳ Переношу...")
+                    send_to_google_sheets(payload)
+                    send_vk_message(user_id, "✅ Успешно перенесено!", get_main_keyboard())
+                    del user_states[user_id]
+            continue
+
+
+        # ---------------------------------------------------------
+        # ВЕТКА: СОЗДАТЬ
+        # ---------------------------------------------------------
         if state == "wait_entity_create":
             if user_text_lower == "категорию":
                 user_states[user_id] = {"state": "create_cat_type"}
@@ -270,10 +499,6 @@ for event in longpoll.listen():
                 send_vk_message(user_id, "Это будет статья Расходов или Доходов?", type_keyboard())
                 continue
 
-        # ---------------------------------------------------------
-        # ПОШАГОВОЕ СОЗДАНИЕ
-        # ---------------------------------------------------------
-        
         # СОЗДАНИЕ КАТЕГОРИИ
         if state == "create_cat_type":
             c_type = "Доход" if "доход" in user_text_lower else "Расход"
@@ -362,12 +587,9 @@ for event in longpoll.listen():
                 if 0 <= idx < len(cats):
                     sel_cat = cats[idx]
                     c_type = user_states[user_id]["c_type"]
-                    
-                    # ИСПРАВЛЕНИЕ ОШИБКИ: Извлекаем ключи (подкатегории) из словаря
-                    subs_dict = user_states[user_id]["menu"].get(sel_cat, {})
+                    subs_dict = user_states[user_id]["menu"][c_type].get(sel_cat, {})
                     subs = list(subs_dict.keys())
                     subs.sort()
-                    
                     msg = f"Выберите подкатегорию в '{sel_cat}':\n\n"
                     for i, s in enumerate(subs): msg += f"{i+1}. {s}\n"
                     user_states[user_id]["state"] = "create_art_subselect"
@@ -442,8 +664,7 @@ for event in longpoll.listen():
                     user_states[user_id] = {"state": "rename_art_type", "menu": res.get("menu", {})}
                     send_vk_message(user_id, "Статья находится в Расходах или Доходах?", type_keyboard())
                 continue
-                
-        # --- ПЕРЕИМЕНОВАТЬ КАТЕГОРИЮ ---
+
         if state == "rename_cat_select":
             if user_text.isdigit():
                 idx = int(user_text) - 1
@@ -465,7 +686,6 @@ for event in longpoll.listen():
             del user_states[user_id]
             continue
 
-        # --- ПЕРЕИМЕНОВАТЬ ПОДКАТЕГОРИЮ ---
         if state == "rename_sub_select_cat":
             if user_text.isdigit():
                 idx = int(user_text) - 1
@@ -473,12 +693,10 @@ for event in longpoll.listen():
                 if 0 <= idx < len(cats):
                     sel_cat = cats[idx]
                     menu = user_states[user_id]["menu"]
-                    # ИСПРАВЛЕНИЕ: Безопасное извлечение ключей
                     subs_exp = list(menu.get("Расход", {}).get(sel_cat, {}).keys())
                     subs_inc = list(menu.get("Доход", {}).get(sel_cat, {}).keys())
                     subs = list(set(subs_exp + subs_inc))
                     subs.sort()
-                    
                     if not subs:
                         send_vk_message(user_id, f"В категории '{sel_cat}' нет подкатегорий.", get_main_keyboard())
                         del user_states[user_id]
@@ -513,7 +731,6 @@ for event in longpoll.listen():
             del user_states[user_id]
             continue
 
-        # --- НОВОЕ: ПЕРЕИМЕНОВАТЬ СТАТЬЮ ---
         if state == "rename_art_type":
             c_type = "Доход" if "доход" in user_text_lower else "Расход"
             menu = user_states[user_id]["menu"].get(c_type, {})
@@ -593,13 +810,6 @@ for event in longpoll.listen():
             send_vk_message(user_id, "✅ Статья успешно переименована!", get_main_keyboard())
             del user_states[user_id]
             continue
-
-        # --- ВЕТКА: УДАЛИТЬ / ПЕРЕНЕСТИ ---
-        if state == "wait_entity_delete":
-            if user_text_lower in ["категорию", "подкатегорию", "статью"]:
-                send_vk_message(user_id, "Функционал удаления и переноса находится в разработке 🛠\nПока что вы можете сделать это вручную в Google Таблице.", get_main_keyboard())
-                del user_states[user_id]
-                continue
 
         # =========================================================
         # РАЗБОР ИМПОРТА (ЗАВАЛОВ)
@@ -833,4 +1043,4 @@ for event in longpoll.listen():
                 
         except Exception as e:
             send_vk_message(user_id, "❌ Ошибка связи с ИИ.", get_main_keyboard())
-            print(f"Ошибка: {e}")  
+            print(f"Ошибка: {e}") 
