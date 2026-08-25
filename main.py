@@ -445,42 +445,99 @@ for event in longpoll.listen():
                         send_vk_message(user_id, msg, get_numbered_keyboard(len(arts)))
             continue
 
-        if state == "move_select_art":
+        state == "move_select_art":
             if user_text.isdigit():
                 idx = int(user_text) - 1
-                arts = user_states[user_id]["arts"]
+                arts = user_states[user_id].get("arts", [])
                 if 0 <= idx < len(arts):
                     sel_art = arts[idx]
                     user_states[user_id]["sel_art"] = sel_art
-                    user_states[user_id]["state"] = "move_target_parent"
-                    subs = user_states[user_id]["subs"]
-                    msg = f"В какую подкатегорию перенести статью '{sel_art}'?\n\n"
-                    for i, s in enumerate(subs): msg += f"{i+1}. {s}\n"
-                    send_vk_message(user_id, msg, get_numbered_keyboard(len(subs)))
+                    user_states[user_id]["state"] = "move_target_cat"
+                    
+                    cats = user_states[user_id]["cats"]
+                    msg = f"В какую КАТЕГОРИЮ перенести статью '{sel_art}'?\n\n"
+                    for i, c in enumerate(cats):
+                        msg += f"{i+1}. {c}\n"
+                    send_vk_message(user_id, msg, get_numbered_keyboard(len(cats)))
             continue
 
-        if state == "move_target_parent":
+        if state == "move_target_cat":
             if user_text.isdigit():
-                level = user_states[user_id]["move_level"]
-                targets = user_states[user_id]["cats"] if level == "subcategory" else user_states[user_id]["subs"]
                 idx = int(user_text) - 1
-                if 0 <= idx < len(targets):
-                    new_parent = targets[idx]
+                cats = user_states[user_id].get("cats", [])
+                if 0 <= idx < len(cats):
+                    new_cat = cats[idx]
+                    user_states[user_id]["new_cat"] = new_cat
+                    
+                    c_type = user_states[user_id].get("c_type", "Расход")
+                    full_menu = user_states[user_id].get("menu", {})
+                    type_menu = full_menu.get(c_type, {}) if isinstance(full_menu, dict) else {}
+                    subs_dict = type_menu.get(new_cat, {}) if isinstance(type_menu, dict) else {}
+                    
+                    if isinstance(subs_dict, dict):
+                        new_subs = list(subs_dict.keys())
+                    else:
+                        new_subs = []
+                    new_subs.sort()
+                    
+                    if not new_subs:
+                        send_vk_message(user_id, f"В категории '{new_cat}' нет подкатегорий. Выберите другую.", get_main_keyboard())
+                        del user_states[user_id]
+                        continue
+                        
+                    user_states[user_id]["new_subs"] = new_subs
+                    user_states[user_id]["state"] = "move_target_sub"
+                    
+                    msg = f"В какую ПОДКАТЕГОРИЮ перенести статью?\n\n"
+                    for i, s in enumerate(new_subs):
+                        msg += f"{i+1}. {s}\n"
+                    send_vk_message(user_id, msg, get_numbered_keyboard(len(new_subs)))
+            continue
+
+        if state == "move_target_sub":
+            if user_text.isdigit():
+                idx = int(user_text) - 1
+                new_subs = user_states[user_id].get("new_subs", [])
+                if 0 <= idx < len(new_subs):
+                    new_sub = new_subs[idx]
+                    
                     payload = {
                         "action": "move_entity",
-                        "level": level,
+                        "level": "article",
                         "type": user_states[user_id]["c_type"],
                         "cat": user_states[user_id]["sel_cat"],
                         "sub": user_states[user_id]["sel_sub"],
-                        "art": user_states[user_id].get("sel_art", ""),
-                        "new_parent": new_parent
+                        "art": user_states[user_id]["sel_art"],
+                        "new_cat": user_states[user_id]["new_cat"],
+                        "new_parent": new_sub
                     }
                     send_vk_message(user_id, "⏳ Переношу...")
                     send_to_google_sheets(payload)
                     send_vk_message(user_id, "✅ Успешно перенесено!", get_main_keyboard())
                     del user_states[user_id]
             continue
-
+            
+        if state == "move_target_parent":
+            if user_text.isdigit():
+                level = user_states[user_id]["move_level"]
+                if level == "subcategory":
+                    targets = user_states[user_id]["cats"]
+                    idx = int(user_text) - 1
+                    if 0 <= idx < len(targets):
+                        new_parent = targets[idx]
+                        payload = {
+                            "action": "move_entity",
+                            "level": level,
+                            "type": user_states[user_id]["c_type"],
+                            "cat": user_states[user_id]["sel_cat"],
+                            "sub": user_states[user_id]["sel_sub"],
+                            "new_parent": new_parent
+                        }
+                        send_vk_message(user_id, "⏳ Переношу...")
+                        send_to_google_sheets(payload)
+                        send_vk_message(user_id, "✅ Успешно перенесено!", get_main_keyboard())
+                        del user_states[user_id]
+            continue
 
         # ---------------------------------------------------------
         # ВЕТКА: СОЗДАТЬ
