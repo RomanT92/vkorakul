@@ -499,20 +499,19 @@ for event in longpoll.listen():
                 send_vk_message(user_id, "Это будет статья Расходов или Доходов?", type_keyboard())
                 continue
 
-        # СОЗДАНИЕ КАТЕГОРИИ
         if state == "create_cat_type":
             c_type = "Доход" if "доход" in user_text_lower else "Расход"
             user_states[user_id]["c_type"] = c_type
             user_states[user_id]["state"] = "create_cat_name"
             send_vk_message(user_id, f"Выбран тип: {c_type}.\n\nВведите название НОВОЙ КАТЕГОРИИ:", get_cancel_keyboard())
             continue
-            
+
         if state == "create_cat_name":
             user_states[user_id]["new_cat"] = user_text
             user_states[user_id]["state"] = "create_cat_subname"
             send_vk_message(user_id, f"Категория: {user_text}.\n\nТеперь введите название ПЕРВОЙ ПОДКАТЕГОРИИ для неё:", get_cancel_keyboard())
             continue
-            
+
         if state == "create_cat_subname":
             new_sub = user_text
             c_type = user_states[user_id]["c_type"]
@@ -524,7 +523,6 @@ for event in longpoll.listen():
             del user_states[user_id]
             continue
 
-        # СОЗДАНИЕ ПОДКАТЕГОРИИ
         if state == "create_sub_type":
             c_type = "Доход" if "доход" in user_text_lower else "Расход"
             send_vk_message(user_id, "⏳ Загружаю список категорий...")
@@ -538,7 +536,8 @@ for event in longpoll.listen():
                     del user_states[user_id]
                     continue
                 msg = f"Выберите категорию ({c_type}), в которую добавим подкатегорию:\n\n"
-                for i, c in enumerate(cats): msg += f"{i+1}. {c}\n"
+                for i, c in enumerate(cats):
+                    msg += f"{i+1}. {c}\n"
                 user_states[user_id] = {"state": "create_sub_catselect", "c_type": c_type, "cats": cats, "menu": menu}
                 send_vk_message(user_id, msg, get_numbered_keyboard(len(cats)))
             continue
@@ -546,13 +545,13 @@ for event in longpoll.listen():
         if state == "create_sub_catselect":
             if user_text.isdigit():
                 idx = int(user_text) - 1
-                cats = user_states[user_id]["cats"]
+                cats = user_states[user_id].get("cats", [])
                 if 0 <= idx < len(cats):
                     sel_cat = cats[idx]
                     user_states[user_id]["sel_cat"] = sel_cat
                     user_states[user_id]["state"] = "create_sub_name"
                     send_vk_message(user_id, f"Категория: {sel_cat}.\n\nВведите название НОВОЙ ПОДКАТЕГОРИИ:", get_cancel_keyboard())
-                    continue
+            continue
 
         if state == "create_sub_name":
             new_sub = user_text
@@ -565,7 +564,6 @@ for event in longpoll.listen():
             del user_states[user_id]
             continue
 
-        # СОЗДАНИЕ СТАТЬИ
         if state == "create_art_type":
             c_type = "Доход" if "доход" in user_text_lower else "Расход"
             send_vk_message(user_id, "⏳ Загружаю список категорий...")
@@ -575,39 +573,57 @@ for event in longpoll.listen():
                 cats = list(menu.keys())
                 cats.sort()
                 msg = f"Выберите категорию ({c_type}):\n\n"
-                for i, c in enumerate(cats): msg += f"{i+1}. {c}\n"
-                user_states[user_id] = {"state": "create_art_catselect", "c_type": c_type, "cats": cats, "menu": menu}
+                for i, c in enumerate(cats):
+                    msg += f"{i+1}. {c}\n"
+                user_states[user_id] = {"state": "create_art_catselect", "c_type": c_type, "cats": cats, "menu": res.get("menu", {})}
                 send_vk_message(user_id, msg, get_numbered_keyboard(len(cats)))
             continue
 
         if state == "create_art_catselect":
             if user_text.isdigit():
                 idx = int(user_text) - 1
-                cats = user_states[user_id]["cats"]
+                cats = user_states[user_id].get("cats", [])
                 if 0 <= idx < len(cats):
                     sel_cat = cats[idx]
-                    c_type = user_states[user_id]["c_type"]
-                    subs_dict = user_states[user_id]["menu"][c_type].get(sel_cat, {})
-                    subs = list(subs_dict.keys())
+                    c_type = user_states[user_id].get("c_type", "Расход")
+                    
+                    # --- ИСПРАВЛЕННЫЙ БЛОК БЕЗОПАСНОГО ИЗВЛЕЧЕНИЯ ---
+                    full_menu = user_states[user_id].get("menu", {})
+                    type_menu = full_menu.get(c_type, {}) if isinstance(full_menu, dict) else {}
+                    subs_dict = type_menu.get(sel_cat, {}) if isinstance(type_menu, dict) else {}
+                    
+                    if isinstance(subs_dict, dict):
+                        subs = list(subs_dict.keys())
+                    else:
+                        subs = []
+                        
                     subs.sort()
+                    
+                    if not subs:
+                        send_vk_message(user_id, f"В категории '{sel_cat}' пока нет подкатегорий. Сначала создайте её.", get_main_keyboard())
+                        del user_states[user_id]
+                        continue
+                    # ------------------------------------------------
+
                     msg = f"Выберите подкатегорию в '{sel_cat}':\n\n"
-                    for i, s in enumerate(subs): msg += f"{i+1}. {s}\n"
+                    for i, s in enumerate(subs):
+                        msg += f"{i+1}. {s}\n"
                     user_states[user_id]["state"] = "create_art_subselect"
                     user_states[user_id]["sel_cat"] = sel_cat
                     user_states[user_id]["subs"] = subs
                     send_vk_message(user_id, msg, get_numbered_keyboard(len(subs)))
-                    continue
+            continue
 
         if state == "create_art_subselect":
             if user_text.isdigit():
                 idx = int(user_text) - 1
-                subs = user_states[user_id]["subs"]
+                subs = user_states[user_id].get("subs", [])
                 if 0 <= idx < len(subs):
                     sel_sub = subs[idx]
                     user_states[user_id]["state"] = "create_art_name"
                     user_states[user_id]["sel_sub"] = sel_sub
                     send_vk_message(user_id, f"Отлично: {user_states[user_id]['sel_cat']} -> {sel_sub}.\n\nВведите название НОВОЙ СТАТЬИ:", get_cancel_keyboard())
-                    continue
+            continue
 
         if state == "create_art_name":
             art_name = user_text
@@ -623,7 +639,6 @@ for event in longpoll.listen():
             send_vk_message(user_id, f"✅ Статья '{art_name}' успешно создана!", get_main_keyboard())
             del user_states[user_id]
             continue
-
         # ---------------------------------------------------------
         # ВЕТКА: ПЕРЕИМЕНОВАТЬ
         # ---------------------------------------------------------
