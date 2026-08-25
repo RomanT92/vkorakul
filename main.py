@@ -5,6 +5,11 @@ from vk_api.keyboard import VkKeyboard, VkKeyboardColor
 from openai import OpenAI
 import requests
 import json
+from keyboards import (
+    get_main_keyboard, get_crud_keyboard, get_del_move_keyboard, 
+    get_entity_keyboard, get_move_entity_keyboard, get_numbered_keyboard, 
+    get_yes_no_keyboard, type_keyboard, get_cancel_keyboard
+)
 
 # ====================================================================
 # 1. НАСТРОЙКИ (КЛЮЧИ ДОСТУПА)
@@ -51,86 +56,6 @@ PROMPT_CATEGORIZE = """
   "subcategory": "Точное название подкатегории из меню"
 }
 """
-
-# ====================================================================
-# 3. ГЕНЕРАТОРЫ КЛАВИАТУР (МНОГОУРОВНЕВОЕ МЕНЮ)
-# ====================================================================
-def get_main_keyboard():
-    keyboard = VkKeyboard(one_time=False)
-    keyboard.add_button('Разобрать завалы', color=VkKeyboardColor.PRIMARY)
-    keyboard.add_line()
-    keyboard.add_button('Категории и статьи', color=VkKeyboardColor.SECONDARY)
-    keyboard.add_line()
-    keyboard.add_button('Помощь', color=VkKeyboardColor.SECONDARY)
-    return keyboard
-
-def get_crud_keyboard():
-    keyboard = VkKeyboard(one_time=False)
-    keyboard.add_button('Создать', color=VkKeyboardColor.POSITIVE)
-    keyboard.add_button('Переименовать', color=VkKeyboardColor.PRIMARY)
-    keyboard.add_line()
-    keyboard.add_button('Удалить / перенести', color=VkKeyboardColor.SECONDARY)
-    keyboard.add_line()
-    keyboard.add_button('Назад', color=VkKeyboardColor.NEGATIVE)
-    return keyboard
-
-def get_del_move_keyboard():
-    keyboard = VkKeyboard(one_time=False)
-    keyboard.add_button('Удалить', color=VkKeyboardColor.NEGATIVE)
-    keyboard.add_button('Перенести', color=VkKeyboardColor.PRIMARY)
-    keyboard.add_line()
-    keyboard.add_button('Назад', color=VkKeyboardColor.SECONDARY)
-    return keyboard
-
-def get_entity_keyboard():
-    keyboard = VkKeyboard(one_time=False)
-    keyboard.add_button('Категорию', color=VkKeyboardColor.PRIMARY)
-    keyboard.add_button('Подкатегорию', color=VkKeyboardColor.PRIMARY)
-    keyboard.add_line()
-    keyboard.add_button('Статью', color=VkKeyboardColor.PRIMARY)
-    keyboard.add_line()
-    keyboard.add_button('Назад', color=VkKeyboardColor.NEGATIVE)
-    return keyboard
-
-def get_move_entity_keyboard():
-    keyboard = VkKeyboard(one_time=False)
-    keyboard.add_button('Подкатегорию', color=VkKeyboardColor.PRIMARY)
-    keyboard.add_button('Статью', color=VkKeyboardColor.PRIMARY)
-    keyboard.add_line()
-    keyboard.add_button('Назад', color=VkKeyboardColor.NEGATIVE)
-    return keyboard
-
-def get_numbered_keyboard(count):
-    keyboard = VkKeyboard(one_time=False)
-    limit = min(count, 36)
-    for i in range(1, limit + 1):
-        keyboard.add_button(str(i), color=VkKeyboardColor.SECONDARY)
-        if i % 4 == 0 and i != limit:
-            keyboard.add_line()
-    keyboard.add_line()
-    keyboard.add_button('Отмена', color=VkKeyboardColor.NEGATIVE)
-    return keyboard
-
-def get_yes_no_keyboard():
-    keyboard = VkKeyboard(one_time=False)
-    keyboard.add_button('Да', color=VkKeyboardColor.POSITIVE)
-    keyboard.add_button('Нет', color=VkKeyboardColor.NEGATIVE)
-    keyboard.add_line()
-    keyboard.add_button('Отмена', color=VkKeyboardColor.SECONDARY)
-    return keyboard
-
-def type_keyboard():
-    keyboard = VkKeyboard(one_time=False)
-    keyboard.add_button('Расход', color=VkKeyboardColor.NEGATIVE)
-    keyboard.add_button('Доход', color=VkKeyboardColor.POSITIVE)
-    keyboard.add_line()
-    keyboard.add_button('Отмена', color=VkKeyboardColor.SECONDARY)
-    return keyboard
-
-def get_cancel_keyboard():
-    keyboard = VkKeyboard(one_time=False)
-    keyboard.add_button('Отмена', color=VkKeyboardColor.NEGATIVE)
-    return keyboard
 
 # ====================================================================
 # 4. ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
@@ -445,7 +370,7 @@ for event in longpoll.listen():
                         send_vk_message(user_id, msg, get_numbered_keyboard(len(arts)))
             continue
 
-      if state == "move_select_art":
+        if state == "move_select_art":
             if user_text.isdigit():
                 idx = int(user_text) - 1
                 arts = user_states[user_id].get("arts", [])
