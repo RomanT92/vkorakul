@@ -1,0 +1,83 @@
+# -*- coding: utf-8 -*-
+from vk_api.keyboard import VkKeyboard, VkKeyboardColor
+
+# ====================================================================
+# ГЕНЕРАТОРЫ КЛАВИАТУР (МНОГОУРОВНЕВОЕ МЕНЮ)
+# ====================================================================
+
+def get_main_keyboard():
+    keyboard = VkKeyboard(one_time=False)
+    keyboard.add_button('Разобрать завалы', color=VkKeyboardColor.PRIMARY)
+    keyboard.add_line()
+    keyboard.add_button('Категории и статьи', color=VkKeyboardColor.SECONDARY)
+    keyboard.add_line()
+    keyboard.add_button('Помощь', color=VkKeyboardColor.SECONDARY)
+    return keyboard
+
+def get_crud_keyboard():
+    keyboard = VkKeyboard(one_time=False)
+    keyboard.add_button('Создать', color=VkKeyboardColor.POSITIVE)
+    keyboard.add_button('Переименовать', color=VkKeyboardColor.PRIMARY)
+    keyboard.add_line()
+    keyboard.add_button('Удалить / перенести', color=VkKeyboardColor.SECONDARY)
+    keyboard.add_line()
+    keyboard.add_button('Назад', color=VkKeyboardColor.NEGATIVE)
+    return keyboard
+
+def get_del_move_keyboard():
+    keyboard = VkKeyboard(one_time=False)
+    keyboard.add_button('Удалить', color=VkKeyboardColor.NEGATIVE)
+    keyboard.add_button('Перенести', color=VkKeyboardColor.PRIMARY)
+    keyboard.add_line()
+    keyboard.add_button('Назад', color=VkKeyboardColor.SECONDARY)
+    return keyboard
+
+def get_entity_keyboard():
+    keyboard = VkKeyboard(one_time=False)
+    keyboard.add_button('Категорию', color=VkKeyboardColor.PRIMARY)
+    keyboard.add_button('Подкатегорию', color=VkKeyboardColor.PRIMARY)
+    keyboard.add_line()
+    keyboard.add_button('Статью', color=VkKeyboardColor.PRIMARY)
+    keyboard.add_line()
+    keyboard.add_button('Назад', color=VkKeyboardColor.NEGATIVE)
+    return keyboard
+
+def get_move_entity_keyboard():
+    keyboard = VkKeyboard(one_time=False)
+    keyboard.add_button('Подкатегорию', color=VkKeyboardColor.PRIMARY)
+    keyboard.add_button('Статью', color=VkKeyboardColor.PRIMARY)
+    keyboard.add_line()
+    keyboard.add_button('Назад', color=VkKeyboardColor.NEGATIVE)
+    return keyboard
+
+def get_numbered_keyboard(count):
+    keyboard = VkKeyboard(one_time=False)
+    limit = min(count, 36)
+    for i in range(1, limit + 1):
+        keyboard.add_button(str(i), color=VkKeyboardColor.SECONDARY)
+        if i % 4 == 0 and i != limit:
+            keyboard.add_line()
+    keyboard.add_line()
+    keyboard.add_button('Отмена', color=VkKeyboardColor.NEGATIVE)
+    return keyboard
+
+def get_yes_no_keyboard():
+    keyboard = VkKeyboard(one_time=False)
+    keyboard.add_button('Да', color=VkKeyboardColor.POSITIVE)
+    keyboard.add_button('Нет', color=VkKeyboardColor.NEGATIVE)
+    keyboard.add_line()
+    keyboard.add_button('Отмена', color=VkKeyboardColor.SECONDARY)
+    return keyboard
+
+def type_keyboard():
+    keyboard = VkKeyboard(one_time=False)
+    keyboard.add_button('Расход', color=VkKeyboardColor.NEGATIVE)
+    keyboard.add_button('Доход', color=VkKeyboardColor.POSITIVE)
+    keyboard.add_line()
+    keyboard.add_button('Отмена', color=VkKeyboardColor.SECONDARY)
+    return keyboard
+
+def get_cancel_keyboard():
+    keyboard = VkKeyboard(one_time=False)
+    keyboard.add_button('Отмена', color=VkKeyboardColor.NEGATIVE)
+    return keyboard
