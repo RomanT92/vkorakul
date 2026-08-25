@@ -445,7 +445,7 @@ for event in longpoll.listen():
                         send_vk_message(user_id, msg, get_numbered_keyboard(len(arts)))
             continue
 
-        state == "move_select_art":
+      if state == "move_select_art":
             if user_text.isdigit():
                 idx = int(user_text) - 1
                 arts = user_states[user_id].get("arts", [])
