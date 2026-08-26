@@ -81,3 +81,23 @@ def get_cancel_keyboard():
     keyboard = VkKeyboard(one_time=False)
     keyboard.add_button('Отмена', color=VkKeyboardColor.NEGATIVE)
     return keyboard
+
+def get_receipt_mode_keyboard():
+    keyboard = VkKeyboard(one_time=False)
+    keyboard.add_button('Общий итог', color=VkKeyboardColor.PRIMARY)
+    keyboard.add_button('По позициям', color=VkKeyboardColor.PRIMARY)
+    keyboard.add_line()
+    keyboard.add_button('Отмена', color=VkKeyboardColor.NEGATIVE)
+    return keyboard
+
+def get_receipt_review_keyboard(count):
+    keyboard = VkKeyboard(one_time=False)
+    limit = min(count, 36)
+    for i in range(1, limit + 1):
+        keyboard.add_button(str(i), color=VkKeyboardColor.SECONDARY)
+        if i % 4 == 0 and i != limit:
+            keyboard.add_line()
+    keyboard.add_line()
+    keyboard.add_button('Готово', color=VkKeyboardColor.POSITIVE)
+    keyboard.add_button('Отмена', color=VkKeyboardColor.NEGATIVE)
+    return keyboard
