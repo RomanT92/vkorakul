@@ -25,6 +25,8 @@ def process_next_in_queue(user_id, user_states):
     state_data["ai_cat"] = ai_cat
     state_data["ai_sub"] = ai_sub
     state_data["attempts"] = 0
+    # Очищаем историю подсказок для новой операции
+    state_data["context_history"] = "" 
     
     msg = f"📅 Дата: {current['date'][:10]}\n💰 Сумма: {current['amount']}\n🛒 Операция: {current['original_item']}\n\n🤖 ИИ думает, это:\n📂 {ai_cat} -> {ai_sub}\n\nВерно?"
     send_vk_message(user_id, msg, get_yes_no_keyboard())
@@ -33,7 +35,6 @@ def process_next_in_queue(user_id, user_states):
 def handle_queue_and_learning(user_id, user_text, user_text_lower, state, user_states, MAX_ATTEMPTS):
     """
     Обрабатывает ветку "Разобрать завалы" и процесс обучения (когда ИИ не знает категорию).
-    Возвращает True, если стейт относится к этой ветке и был обработан.
     """
 
     # =========================================================
@@ -84,6 +85,17 @@ def handle_queue_and_learning(user_id, user_text, user_text_lower, state, user_s
         menu = user_states[user_id]["menu"]
         menu_str = "\n".join([f"{c}: {', '.join(subs)}" for c, subs in menu.items()])
         
+        # АВТО-ИСПРАВЛЕНИЕ ТИПА: Если пользователь в подсказке явно говорит, что это доход или расход
+        if "доход" in user_text_lower or "приход" in user_text_lower:
+            current["type"] = "Доход"
+        elif "расход" in user_text_lower or "трата" in user_text_lower:
+            current["type"] = "Расход"
+
+        # НАКОПЛЕНИЕ ПАМЯТИ: Добавляем новую подсказку к старым
+        prev_context = user_states[user_id].get("context_history", "")
+        current_context = f"{prev_context}\n- {user_text}" if prev_context else f"- {user_text}"
+        user_states[user_id]["context_history"] = current_context
+        
         check_payload = {"action": "check_item", "item": user_text, "type": current.get("type", "Расход")}
         check_res = send_to_google_sheets(check_payload)
         if check_res.get("status") == "FOUND":
@@ -93,12 +105,13 @@ def handle_queue_and_learning(user_id, user_text, user_text_lower, state, user_s
             send_vk_message(user_id, f"Ага! Слово '{user_text}' мне знакомо.\n📂 {check_res.get('cat')} -> {check_res.get('sub')}\n\nВсё верно?", get_yes_no_keyboard())
             return True
             
-        ai_cat, ai_sub = categorize_with_ai(current["original_item"], menu_str, context=user_text)
+        # Отправляем ИИ ВСЮ историю подсказок
+        ai_cat, ai_sub = categorize_with_ai(current["original_item"], menu_str, context=current_context)
         if ai_cat in menu and ai_sub in menu[ai_cat]:
             user_states[user_id]["state"] = "queue_confirm"
             user_states[user_id]["ai_cat"] = ai_cat
             user_states[user_id]["ai_sub"] = ai_sub
-            send_vk_message(user_id, f"Ага! С учетом подсказки, думаю это:\n📂 {ai_cat} -> {ai_sub}\n\nВсё верно?", get_yes_no_keyboard())
+            send_vk_message(user_id, f"Ага! С учетом всех подсказок, думаю это:\n📂 {ai_cat} -> {ai_sub}\n\nВсё верно?", get_yes_no_keyboard())
         else:
             user_states[user_id]["state"] = "queue_manual"
             cats_list = "\n".join([f"• {k}" for k in menu.keys()])
@@ -143,6 +156,8 @@ def handle_queue_and_learning(user_id, user_text, user_text_lower, state, user_s
         elif user_text_lower in ["нет", "неверно", "не", "no", "-"]:
             if user_states[user_id]["attempts"] < MAX_ATTEMPTS:
                 user_states[user_id]["state"] = "provide_context"
+                # Очищаем историю при первом промахе
+                user_states[user_id]["context_history"] = "" 
                 send_vk_message(user_id, f"Понял, ошибся 😔 (Попытка {user_states[user_id]['attempts']} из {MAX_ATTEMPTS})\nПодскажи другими словами, что это за операция?", get_cancel_keyboard())
             else:
                 user_states[user_id]["state"] = "manual_category"
@@ -160,6 +175,17 @@ def handle_queue_and_learning(user_id, user_text, user_text_lower, state, user_s
         menu = user_states[user_id]["menu"]
         menu_str = "\n".join([f"{c}: {', '.join(subs)}" for c, subs in menu.items()])
         
+        # АВТО-ИСПРАВЛЕНИЕ ТИПА
+        if "доход" in user_text_lower or "приход" in user_text_lower:
+            payload["type"] = "Доход"
+        elif "расход" in user_text_lower or "трата" in user_text_lower:
+            payload["type"] = "Расход"
+
+        # НАКОПЛЕНИЕ ПАМЯТИ
+        prev_context = user_states[user_id].get("context_history", "")
+        current_context = f"{prev_context}\n- {user_text}" if prev_context else f"- {user_text}"
+        user_states[user_id]["context_history"] = current_context
+        
         check_payload = {"action": "check_item", "item": user_text, "type": payload.get("type", "Расход")}
         check_res = send_to_google_sheets(check_payload)
         if check_res.get("status") == "FOUND":
@@ -169,12 +195,13 @@ def handle_queue_and_learning(user_id, user_text, user_text_lower, state, user_s
             send_vk_message(user_id, f"Ага! Слово '{user_text}' мне знакомо.\n📂 {check_res.get('cat')} -> {check_res.get('sub')}\n\nВсё верно?", get_yes_no_keyboard())
             return True
             
-        ai_cat, ai_sub = categorize_with_ai(payload["item"], menu_str, context=user_text)
+        # Отправляем ИИ ВСЮ историю подсказок
+        ai_cat, ai_sub = categorize_with_ai(payload["item"], menu_str, context=current_context)
         if ai_cat in menu and ai_sub in menu[ai_cat]:
             user_states[user_id]["state"] = "confirm_category"
             user_states[user_id]["ai_cat"] = ai_cat
             user_states[user_id]["ai_sub"] = ai_sub
-            send_vk_message(user_id, f"Ага! С учетом подсказки, думаю это:\n📂 {ai_cat} -> {ai_sub}\n\nВсё верно?", get_yes_no_keyboard())
+            send_vk_message(user_id, f"Ага! С учетом всех подсказок, думаю это:\n📂 {ai_cat} -> {ai_sub}\n\nВсё верно?", get_yes_no_keyboard())
         else:
             if user_states[user_id]["attempts"] < MAX_ATTEMPTS:
                 send_vk_message(user_id, f"Всё равно не могу сообразить 🤔 (Попытка {user_states[user_id]['attempts']} из {MAX_ATTEMPTS})\nПопробуй объяснить чуть подробнее?", get_cancel_keyboard())
