@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 import json
 from keyboards import (
-    get_main_keyboard, get_cancel_keyboard, get_receipt_review_keyboard
+    get_main_keyboard, get_cancel_keyboard, get_receipt_review_keyboard, get_yes_no_keyboard
 )
 from services import (
     send_vk_message, send_to_google_sheets, 
@@ -45,10 +45,34 @@ def handle_receipt(user_id, user_text, user_text_lower, state, user_states):
             
             if reply_text:
                 reply_text = _clean_json_string(reply_text)
-                # Передаем полученный от ИИ JSON в обычный обработчик транзакций!
-                # Он сам всё проверит, запишет в таблицу или спросит категорию.
-                from handlers_transaction import handle_transaction
-                handle_transaction(user_id, reply_text, "", user_states)
+                try:
+                    parsed_data = json.loads(reply_text)
+                    
+                    # Прямая отправка в таблицу (БЕЗ двойного прогона через ИИ)
+                    send_vk_message(user_id, f"⏳ Ищу '{parsed_data.get('item', 'Трата')}' в базах...")
+                    gs_response = send_to_google_sheets(parsed_data)
+                    
+                    if gs_response.get("status") == "SUCCESS":
+                        send_vk_message(user_id, "✅ Успешно записано!", get_main_keyboard())
+                    elif gs_response.get("status") == "SUCCESS_AUTO_ADDED":
+                        send_vk_message(user_id, f"✅ Записано!\nНашел в Глобальной базе: {gs_response.get('recognized_cat')} -> {gs_response.get('recognized_sub')}", get_main_keyboard())
+                    elif gs_response.get("status") == "UNKNOWN_ITEM":
+                        # Если магазин неизвестен, запускаем процесс обучения
+                        menu = gs_response.get("available_menu", {})
+                        menu_str = "\n".join([f"{c}: {', '.join(subs)}" for c, subs in menu.items()])
+                        ai_cat, ai_sub = categorize_with_ai(parsed_data['item'], menu_str)
+                        
+                        if ai_cat in menu and ai_sub in menu[ai_cat]:
+                            user_states[user_id] = {"state": "confirm_category", "payload": parsed_data, "menu": menu, "menu_str": menu_str, "ai_cat": ai_cat, "ai_sub": ai_sub, "attempts": 1}
+                            send_vk_message(user_id, f"🤖 Думаю, '{parsed_data['item']}' относится к:\n📂 {ai_cat} -> {ai_sub}\n\nВсё верно?", get_yes_no_keyboard())
+                        else:
+                            user_states[user_id] = {"state": "provide_context", "payload": parsed_data, "menu": menu, "menu_str": menu_str, "attempts": 1}
+                            send_vk_message(user_id, f"🤔 Я пока не знаю статью '{parsed_data['item']}'.\nПодскажи буквально в двух словах, что это за трата/доход?", get_cancel_keyboard())
+                    else:
+                        send_vk_message(user_id, f"❌ Ошибка таблицы: {gs_response.get('message')}", get_main_keyboard())
+                        
+                except json.JSONDecodeError:
+                    send_vk_message(user_id, "❌ Ошибка: ИИ вернул неправильный формат.", get_main_keyboard())
             else:
                 send_vk_message(user_id, "❌ Не удалось прочитать чек.", get_main_keyboard())
             return True
