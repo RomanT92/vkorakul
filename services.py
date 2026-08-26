@@ -149,3 +149,46 @@ def transcribe_audio_with_ai(audio_url):
     except Exception as e:
         print(f"Ошибка распознавания голоса: {e}")
         return None
+
+def extract_receipt_total_with_ai(image_url):
+    """Извлекает только общий итог и магазин из чека"""
+    try:
+        response = ai_client.chat.completions.create(
+            model="gpt-4o", 
+            temperature=0.0,
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": PROMPT_RECEIPT_TOTAL},
+                        {"type": "image_url", "image_url": {"url": image_url}}
+                    ]
+                }
+            ]
+        )
+        return response.choices[0].message.content.strip()
+    except Exception as e:
+        print(f"Ошибка AI при чтении итога чека: {e}")
+        return None
+
+def extract_receipt_items_with_ai(image_url, menu_str):
+    """Извлекает все товары из чека и распределяет их по переданному меню"""
+    prompt = PROMPT_RECEIPT_ITEMS.replace("{menu_str}", menu_str)
+    try:
+        response = ai_client.chat.completions.create(
+            model="gpt-4o", 
+            temperature=0.0,
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {"type": "image_url", "image_url": {"url": image_url}}
+                    ]
+                }
+            ]
+        )
+        return response.choices[0].message.content.strip()
+    except Exception as e:
+        print(f"Ошибка AI при чтении позиций чека: {e}")
+        return None
