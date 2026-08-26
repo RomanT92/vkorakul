@@ -4,6 +4,8 @@ from vk_api.longpoll import VkLongPoll
 from openai import OpenAI
 import requests
 import json
+import tempfile
+import os
 
 # Импортируем настройки и промпты из нашего файла конфигурации (config.py)
 from config import (
@@ -113,4 +115,37 @@ def extract_transaction_with_ai(user_text):
         return response.choices[0].message.content.strip()
     except Exception as e:
         print(f"Ошибка AI при извлечении/общении: {e}")
+        return None
+
+def transcribe_audio_with_ai(audio_url):
+    """
+    Скачивает голосовое сообщение из ВК и переводит его в текст 
+    с помощью модели Whisper (OpenAI).
+    """
+    try:
+        # 1. Скачиваем аудиофайл по ссылке от ВК
+        response = requests.get(audio_url)
+        if response.status_code != 200:
+            return None
+        
+        # 2. Сохраняем его во временный файл на сервере
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".ogg") as temp_audio:
+            temp_audio.write(response.content)
+            temp_audio_path = temp_audio.name
+
+        # 3. Отправляем аудиофайл в нейросеть на распознавание
+        with open(temp_audio_path, "rb") as audio_file:
+            transcript = ai_client.audio.transcriptions.create(
+                model="whisper-1", 
+                file=audio_file
+            )
+        
+        # 4. Удаляем временный файл, чтобы не засорять память сервера
+        os.remove(temp_audio_path)
+        
+        # Возвращаем распознанный текст
+        return transcript.text.strip()
+        
+    except Exception as e:
+        print(f"Ошибка распознавания голоса: {e}")
         return None
