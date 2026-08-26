@@ -101,3 +101,15 @@ def get_receipt_review_keyboard(count):
     keyboard.add_button('Готово', color=VkKeyboardColor.POSITIVE)
     keyboard.add_button('Отмена', color=VkKeyboardColor.NEGATIVE)
     return keyboard
+
+def get_queue_review_keyboard(count):
+    keyboard = VkKeyboard(one_time=False)
+    limit = min(count, 36)
+    for i in range(1, limit + 1):
+        keyboard.add_button(str(i), color=VkKeyboardColor.SECONDARY)
+        if i % 4 == 0 and i != limit:
+            keyboard.add_line()
+    keyboard.add_line()
+    keyboard.add_button('Сохранить пакет', color=VkKeyboardColor.POSITIVE)
+    keyboard.add_button('Отмена', color=VkKeyboardColor.NEGATIVE)
+    return keyboard
