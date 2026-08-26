@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 import json
+import difflib # <-- ДОБАВИЛИ БИБЛИОТЕКУ ДЛЯ УМНОГО ПОИСКА
 from keyboards import (
     get_main_keyboard, get_yes_no_keyboard, get_cancel_keyboard,
     type_keyboard, get_entity_keyboard, get_del_move_keyboard, get_numbered_keyboard
@@ -10,20 +11,38 @@ from services import (
 )
 
 def find_entity_in_menu(menu, target_name):
-    """Ищет сущность по всему меню и возвращает её точный путь и уровень"""
+    """Ищет сущность по всему меню (с учетом опечаток и падежей)"""
     target = target_name.lower().strip()
-    results = []
+    all_entities = []
+    
+    # Собираем все элементы меню в один плоский список
     for c_type in ["Расход", "Доход"]:
         type_menu = menu.get(c_type, {})
         for cat, subs in type_menu.items():
-            if cat.lower().strip() == target:
-                results.append({"level": "category", "type": c_type, "cat": cat, "sub": "", "art": ""})
+            all_entities.append({"level": "category", "type": c_type, "cat": cat, "sub": "", "art": "", "name": cat.lower().strip()})
             for sub, arts in subs.items():
-                if sub.lower().strip() == target:
-                    results.append({"level": "subcategory", "type": c_type, "cat": cat, "sub": sub, "art": ""})
+                all_entities.append({"level": "subcategory", "type": c_type, "cat": cat, "sub": sub, "art": "", "name": sub.lower().strip()})
                 for art in arts:
-                    if art.lower().strip() == target:
-                        results.append({"level": "article", "type": c_type, "cat": cat, "sub": sub, "art": art})
+                    all_entities.append({"level": "article", "type": c_type, "cat": cat, "sub": sub, "art": art, "name": art.lower().strip()})
+    
+    results = []
+    
+    # 1. Сначала ищем точное совпадение
+    for ent in all_entities:
+        if ent["name"] == target:
+            results.append(ent)
+            
+    # 2. Если точного совпадения нет, ищем похожее слово (опечатки, падежи)
+    if not results:
+        names = [ent["name"] for ent in all_entities]
+        # cutoff=0.7 означает, что слова должны совпадать минимум на 70% (топлива / топливо совпадает на 85%)
+        matches = difflib.get_close_matches(target, names, n=1, cutoff=0.7)
+        if matches:
+            best_match = matches[0]
+            for ent in all_entities:
+                if ent["name"] == best_match:
+                    results.append(ent)
+                    
     return results
 
 def handle_transaction(user_id, user_text, state, user_states):
@@ -57,6 +76,7 @@ def handle_transaction(user_id, user_text, state, user_states):
                         return True
                         
                     r = results[0]
+                    found_name = r["cat"] if r["level"] == "category" else (r["sub"] if r["level"] == "subcategory" else r["art"])
                     
                     # --- ПЕРЕИМЕНОВАНИЕ (Делаем сразу) ---
                     if action == "smart_rename":
@@ -68,7 +88,7 @@ def handle_transaction(user_id, user_text, state, user_states):
                         else:
                             payload = {"action": "rename_article", "type": r["type"], "cat": r["cat"], "sub": r["sub"], "old_art": r["art"], "new_art": new_name}
                         
-                        send_vk_message(user_id, f"⏳ Переименовываю {r['level']} '{target_name}' в '{new_name}'...")
+                        send_vk_message(user_id, f"⏳ Переименовываю {r['level']} '{found_name}' в '{new_name}'...")
                         gs_res = send_to_google_sheets(payload)
                         msg = "✅ Успешно переименовано!" if gs_res.get("status") == "SUCCESS" else f"❌ Ошибка: {gs_res.get('message')}"
                         send_vk_message(user_id, msg, get_main_keyboard())
@@ -84,7 +104,7 @@ def handle_transaction(user_id, user_text, state, user_states):
                             "sel_sub": r["sub"],
                             "sel_art": r["art"]
                         }
-                        send_vk_message(user_id, f"⚠️ Вы уверены, что хотите удалить {level_ru} '{target_name}'?", get_yes_no_keyboard())
+                        send_vk_message(user_id, f"⚠️ Вы уверены, что хотите удалить {level_ru} '{found_name}'?", get_yes_no_keyboard())
                     
                     # --- ПЕРЕНОС (Спрашиваем, куда перенести) ---
                     elif action == "smart_move":
@@ -106,7 +126,7 @@ def handle_transaction(user_id, user_text, state, user_states):
                                 "cats": cats,
                                 "menu": menu.get(r["type"], {})
                             }
-                            msg = f"В какую КАТЕГОРИЮ перенести статью '{target_name}'?\n\n"
+                            msg = f"В какую КАТЕГОРИЮ перенести статью '{found_name}'?\n\n"
                             for i, c in enumerate(cats):
                                 msg += f"{i+1}. {c}\n"
                             send_vk_message(user_id, msg, get_numbered_keyboard(len(cats)))
@@ -120,7 +140,7 @@ def handle_transaction(user_id, user_text, state, user_states):
                                 "sel_sub": r["sub"],
                                 "cats": cats
                             }
-                            msg = f"В какую КАТЕГОРИЮ перенести подкатегорию '{target_name}'?\n\n"
+                            msg = f"В какую КАТЕГОРИЮ перенести подкатегорию '{found_name}'?\n\n"
                             for i, c in enumerate(cats):
                                 msg += f"{i+1}. {c}\n"
                             send_vk_message(user_id, msg, get_numbered_keyboard(len(cats)))
