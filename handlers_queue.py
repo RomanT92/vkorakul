@@ -7,7 +7,7 @@ from services import (
     categorize_with_ai, categorize_batch_with_ai
 )
 
-BATCH_SIZE = 7  # Количество операций в одном пакете
+BATCH_SIZE = 7  # Количество операций в одном пакете при импорте
 
 def _show_batch_items(user_id, batch, total_left):
     """Выводит пронумерованный список операций пакета"""
@@ -25,7 +25,7 @@ def _process_next_batch(user_id, user_states):
     queue = state_data.get("queue", [])
     
     if not queue:
-        send_vk_message(user_id, "🎉 Ура! Все завалы разобраны! Журнал чист.", get_main_keyboard())
+        send_vk_message(user_id, "🎉 Ура! Импорт завершен! Журнал чист.", get_main_keyboard())
         del user_states[user_id]
         return
         
@@ -60,19 +60,21 @@ def _process_next_batch(user_id, user_states):
 
 def handle_queue_and_learning(user_id, user_text, user_text_lower, state, user_states, MAX_ATTEMPTS):
     """
-    Обрабатывает ветку "Разобрать завалы" (пакетно) и процесс одиночного обучения.
+    Обрабатывает ветку "Импорт статистики прошлого" (пакетно) и процесс одиночного обучения.
     """
 
     # =========================================================
     # РАЗБОР ИМПОРТА (ЗАВАЛОВ) - СТАРТ
     # =========================================================
-    if user_text_lower in ["разобрать завалы", "разобрать"]:
+    # Добавлена реакция на новую кнопку "импорт статистики прошлого"
+    # Оставили старые фразы для удобства (если пользователь напишет их текстом)
+    if user_text_lower in ["импорт статистики прошлого", "разобрать завалы", "разобрать"]:
         send_vk_message(user_id, "⏳ Запрашиваю список нераспознанных операций из Таблицы...")
         res = send_to_google_sheets({"action": "get_unverified"})
         if res.get("status") == "SUCCESS":
             unverified = res.get("data", [])
             if not unverified:
-                send_vk_message(user_id, "🎉 Всё чисто! Нераспознанных операций нет.", get_main_keyboard())
+                send_vk_message(user_id, "🎉 Всё чисто! Нераспознанных операций для импорта нет.", get_main_keyboard())
             else:
                 user_states[user_id] = {
                     "state": "queue_process", 
@@ -242,4 +244,4 @@ def handle_queue_and_learning(user_id, user_text, user_text_lower, state, user_s
             send_vk_message(user_id, "⚠️ Напиши через дефис. Пример: Транспорт - Такси", get_cancel_keyboard())
         return True
 
-    return False 
+    return False
