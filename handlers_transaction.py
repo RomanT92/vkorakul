@@ -2,12 +2,29 @@
 import json
 from keyboards import (
     get_main_keyboard, get_yes_no_keyboard, get_cancel_keyboard,
-    type_keyboard, get_entity_keyboard, get_del_move_keyboard
+    type_keyboard, get_entity_keyboard, get_del_move_keyboard, get_numbered_keyboard
 )
 from services import (
     send_vk_message, send_to_google_sheets, 
     extract_transaction_with_ai, categorize_with_ai
 )
+
+def find_entity_in_menu(menu, target_name):
+    """Ищет сущность по всему меню и возвращает её точный путь и уровень"""
+    target = target_name.lower().strip()
+    results = []
+    for c_type in ["Расход", "Доход"]:
+        type_menu = menu.get(c_type, {})
+        for cat, subs in type_menu.items():
+            if cat.lower().strip() == target:
+                results.append({"level": "category", "type": c_type, "cat": cat, "sub": "", "art": ""})
+            for sub, arts in subs.items():
+                if sub.lower().strip() == target:
+                    results.append({"level": "subcategory", "type": c_type, "cat": cat, "sub": sub, "art": ""})
+                for art in arts:
+                    if art.lower().strip() == target:
+                        results.append({"level": "article", "type": c_type, "cat": cat, "sub": sub, "art": art})
+    return results
 
 def handle_transaction(user_id, user_text, state, user_states):
     if state != "":
@@ -18,11 +35,101 @@ def handle_transaction(user_id, user_text, state, user_states):
     if reply_text and reply_text.startswith("{") and reply_text.endswith("}"):
         try:
             parsed_data = json.loads(reply_text)
+            action = parsed_data.get("action")
             
             # ==============================================================
-            # РЕЖИМ 2: ИНТЕРАКТИВНОЕ УПРАВЛЕНИЕ СТРУКТУРОЙ
+            # РЕЖИМ 2.1: УМНЫЙ ПОИСК (ПЕРЕИМЕНОВАТЬ, УДАЛИТЬ, ПЕРЕНЕСТИ)
             # ==============================================================
-            if parsed_data.get("action") == "start_interactive":
+            if action in ["smart_rename", "smart_delete", "smart_move"]:
+                target_name = parsed_data.get("old_name") if action == "smart_rename" else parsed_data.get("item", "")
+                send_vk_message(user_id, f"⏳ Ищу '{target_name}' в структуре...")
+                
+                res = send_to_google_sheets({"action": "get_full_menu"})
+                if res.get("status") == "SUCCESS":
+                    menu = res.get("menu", {})
+                    results = find_entity_in_menu(menu, target_name)
+                    
+                    if len(results) == 0:
+                        send_vk_message(user_id, f"❌ Не нашел '{target_name}' в базе. Попробуйте через кнопки меню.", get_main_keyboard())
+                        return True
+                    elif len(results) > 1:
+                        send_vk_message(user_id, f"⚠️ Нашел несколько совпадений для '{target_name}' (например, это и категория, и статья). Пожалуйста, воспользуйтесь кнопками меню для точности.", get_main_keyboard())
+                        return True
+                        
+                    r = results[0]
+                    
+                    # --- ПЕРЕИМЕНОВАНИЕ (Делаем сразу) ---
+                    if action == "smart_rename":
+                        new_name = parsed_data.get("new_name", "")
+                        if r["level"] == "category":
+                            payload = {"action": "rename_category", "type": r["type"], "old_cat": r["cat"], "new_cat": new_name}
+                        elif r["level"] == "subcategory":
+                            payload = {"action": "rename_subcategory", "type": r["type"], "cat": r["cat"], "old_sub": r["sub"], "new_sub": new_name}
+                        else:
+                            payload = {"action": "rename_article", "type": r["type"], "cat": r["cat"], "sub": r["sub"], "old_art": r["art"], "new_art": new_name}
+                        
+                        send_vk_message(user_id, f"⏳ Переименовываю {r['level']} '{target_name}' в '{new_name}'...")
+                        gs_res = send_to_google_sheets(payload)
+                        msg = "✅ Успешно переименовано!" if gs_res.get("status") == "SUCCESS" else f"❌ Ошибка: {gs_res.get('message')}"
+                        send_vk_message(user_id, msg, get_main_keyboard())
+                    
+                    # --- УДАЛЕНИЕ (Просим подтверждение) ---
+                    elif action == "smart_delete":
+                        level_ru = {"category": "КАТЕГОРИЮ", "subcategory": "ПОДКАТЕГОРИЮ", "article": "СТАТЬЮ"}[r["level"]]
+                        user_states[user_id] = {
+                            "state": "delete_confirm",
+                            "del_level": r["level"],
+                            "c_type": r["type"],
+                            "sel_cat": r["cat"],
+                            "sel_sub": r["sub"],
+                            "sel_art": r["art"]
+                        }
+                        send_vk_message(user_id, f"⚠️ Вы уверены, что хотите удалить {level_ru} '{target_name}'?", get_yes_no_keyboard())
+                    
+                    # --- ПЕРЕНОС (Спрашиваем, куда перенести) ---
+                    elif action == "smart_move":
+                        if r["level"] == "category":
+                            send_vk_message(user_id, "❌ Категорию нельзя перенести. Только подкатегорию или статью.", get_main_keyboard())
+                            return True
+                            
+                        cats = list(menu.get(r["type"], {}).keys())
+                        cats.sort()
+                        
+                        if r["level"] == "article":
+                            user_states[user_id] = {
+                                "state": "move_target_cat",
+                                "move_level": "article",
+                                "c_type": r["type"],
+                                "sel_cat": r["cat"],
+                                "sel_sub": r["sub"],
+                                "sel_art": r["art"],
+                                "cats": cats,
+                                "menu": menu.get(r["type"], {})
+                            }
+                            msg = f"В какую КАТЕГОРИЮ перенести статью '{target_name}'?\n\n"
+                            for i, c in enumerate(cats):
+                                msg += f"{i+1}. {c}\n"
+                            send_vk_message(user_id, msg, get_numbered_keyboard(len(cats)))
+                            
+                        elif r["level"] == "subcategory":
+                            user_states[user_id] = {
+                                "state": "move_target_parent",
+                                "move_level": "subcategory",
+                                "c_type": r["type"],
+                                "sel_cat": r["cat"],
+                                "sel_sub": r["sub"],
+                                "cats": cats
+                            }
+                            msg = f"В какую КАТЕГОРИЮ перенести подкатегорию '{target_name}'?\n\n"
+                            for i, c in enumerate(cats):
+                                msg += f"{i+1}. {c}\n"
+                            send_vk_message(user_id, msg, get_numbered_keyboard(len(cats)))
+                return True
+
+            # ==============================================================
+            # РЕЖИМ 2.2: ИНТЕРАКТИВНОЕ СОЗДАНИЕ
+            # ==============================================================
+            if action == "start_interactive":
                 op = parsed_data.get("operation")
                 item = parsed_data.get("item", "")
                 
@@ -38,23 +145,7 @@ def handle_transaction(user_id, user_text, state, user_states):
                     user_states[user_id] = {"state": "create_cat_type", "pending_name": item}
                     send_vk_message(user_id, f"Ок, создаем категорию {f'«{item}»' if item else ''}.\nЭто будет категория Расходов или Доходов?", type_keyboard())
                     return True
-                elif op == "rename":
-                    user_states[user_id] = {"state": "wait_entity_rename"}
-                    send_vk_message(user_id, "Что именно вы хотите переименовать?", get_entity_keyboard())
-                    return True
-                elif op in ["delete", "move"]:
-                    user_states[user_id] = {"state": "wait_del_move_action"}
-                    send_vk_message(user_id, "Что вы хотите сделать?", get_del_move_keyboard())
-                    return True
 
-            # Резерв на случай, если ИИ всё же выдаст прямую команду
-            elif "action" in parsed_data:
-                send_vk_message(user_id, "⏳ Выполняю команду по изменению структуры...")
-                gs_response = send_to_google_sheets(parsed_data)
-                msg = gs_response.get("message", "✅ Структура успешно обновлена!") if gs_response.get("status") == "SUCCESS" else f"❌ Ошибка таблицы: {gs_response.get('message')}"
-                send_vk_message(user_id, msg, get_main_keyboard())
-                return True
-            
             # ==============================================================
             # РЕЖИМ 1: ОБЫЧНАЯ ТРАТА ИЛИ ДОХОД
             # ==============================================================
