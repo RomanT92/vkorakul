@@ -5,7 +5,7 @@ from openai import OpenAI
 import requests
 import json
 
-# Импортируем настройки и промпты из нашего файла конфигурации
+# Импортируем настройки и промпты из нашего файла конфигурации (config.py)
 from config import (
     VK_TOKEN, AI_TUNNEL_KEY, GOOGLE_SHEETS_URL, AI_BASE_URL, 
     PROMPT_CATEGORIZE, PROMPT_EXTRACT
@@ -14,7 +14,7 @@ from config import (
 # ====================================================================
 # ИНИЦИАЛИЗАЦИЯ КЛИЕНТОВ (ВК и ИИ)
 # ====================================================================
-# Подключаемся к ВКонтакте
+# Подключаемся к ВКонтакте, жестко фиксируя версию API для поддержки кнопок
 vk_session = vk_api.VkApi(token=VK_TOKEN, api_version='5.131')
 longpoll = VkLongPoll(vk_session)
 vk = vk_session.get_api()
@@ -39,8 +39,9 @@ def send_vk_message(user_id, text, keyboard=None):
     except Exception as e:
         print(f"Ошибка отправки с клавиатурой: {e}")
         try:
-            # Защита от сбоев: если ВК ругается на клавиатуру, 
-            # пробуем отправить хотя бы просто текст, чтобы бот не молчал.
+            # Защита от сбоев: если ВК ругается на формат клавиатуры 
+            # (например, если кнопок слишком много), 
+            # пробуем отправить просто текст, чтобы бот не молчал.
             vk.messages.send(user_id=user_id, message=text, random_id=0)
         except:
             pass
@@ -54,6 +55,8 @@ def send_to_google_sheets(payload):
         response = requests.post(GOOGLE_SHEETS_URL, json=payload)
         return response.json()
     except Exception as e:
+        # Если таблица недоступна или скрипт упал, возвращаем ошибку, 
+        # чтобы бот мог сообщить об этом пользователю.
         return {"status": "ERROR", "message": str(e)}
 
 def categorize_with_ai(item, menu_str, context=""):
@@ -70,7 +73,8 @@ def categorize_with_ai(item, menu_str, context=""):
         response = ai_client.chat.completions.create(
             model="gpt-3.5-turbo",
             # temperature=0.2 дает ИИ немного "фантазии" и гибкости ума. 
-            # Это позволяет ему понимать сленг, ассоциации и сложные объяснения из подсказок.
+            # Это позволяет ему понимать сленг, ассоциации и сложные объяснения из подсказок,
+            # но при этом не выдумывать несуществующие категории.
             temperature=0.2, 
             messages=[
                 {"role": "system", "content": PROMPT_CATEGORIZE},
@@ -78,6 +82,8 @@ def categorize_with_ai(item, menu_str, context=""):
             ]
         )
         text = response.choices[0].message.content.strip()
+        
+        # Проверяем, что ИИ действительно вернул JSON
         if text.startswith("{") and text.endswith("}"):
             data = json.loads(text)
             return data.get("category", "UNKNOWN"), data.get("subcategory", "UNKNOWN")
@@ -88,16 +94,17 @@ def categorize_with_ai(item, menu_str, context=""):
 
 def extract_transaction_with_ai(user_text):
     """
-    Просит ИИ извлечь сумму, очищенное название и тип из свободного текста.
-    Используется самым первым, когда пользователь только написал сообщение.
+    Универсальная функция для обычного режима.
+    Просит ИИ извлечь сумму и очищенное название (вернет JSON), 
+    ЛИБО просто ответить на вопрос пользователя обычным текстом (режим собеседника).
     """
     try:
         response = ai_client.chat.completions.create(
             model="gpt-3.5-turbo",
-            # temperature=0.0 делает ИИ строгим роботом. 
-            # Здесь нам нужна 100% точность, чтобы он не придумал лишних цифр 
-            # и правильно очистил строку от мусора.
-            temperature=0.0, 
+            # temperature=0.3 — идеальный баланс! 
+            # ИИ будет достаточно точным, чтобы правильно собрать JSON с цифрами,
+            # но при этом достаточно "живым", чтобы интересно отвечать на вопросы как собеседник.
+            temperature=0.3, 
             messages=[
                 {"role": "system", "content": PROMPT_EXTRACT},
                 {"role": "user", "content": user_text}
@@ -105,5 +112,5 @@ def extract_transaction_with_ai(user_text):
         )
         return response.choices[0].message.content.strip()
     except Exception as e:
-        print(f"Ошибка AI при извлечении: {e}")
+        print(f"Ошибка AI при извлечении/общении: {e}")
         return None
