@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 from keyboards import (
     type_keyboard, get_cancel_keyboard, get_numbered_keyboard, 
-    get_main_keyboard, get_yes_no_keyboard
+    get_main_keyboard, get_yes_no_keyboard, get_entity_keyboard, get_move_entity_keyboard
 )
 from services import send_vk_message, send_to_google_sheets
 
@@ -11,6 +11,73 @@ def handle_structure(user_id, user_text, user_text_lower, state, user_states):
     Возвращает True, если стейт относится к структуре и был обработан.
     """
     
+    # ====================================================================
+    # 0. МАРШРУТИЗАЦИЯ ВЫБОРА (СВЯЗУЮЩИЕ БЛОКИ)
+    # ====================================================================
+    if state == "wait_entity_create":
+        if user_text_lower == "категорию":
+            user_states[user_id] = {"state": "create_cat_type"}
+            send_vk_message(user_id, "Это будет категория Расходов или Доходов?", type_keyboard())
+            return True
+        elif user_text_lower == "подкатегорию":
+            user_states[user_id] = {"state": "create_sub_type"}
+            send_vk_message(user_id, "Это будет подкатегория Расходов или Доходов?", type_keyboard())
+            return True
+        elif user_text_lower == "статью":
+            user_states[user_id] = {"state": "create_art_type"}
+            send_vk_message(user_id, "Это будет статья Расходов или Доходов?", type_keyboard())
+            return True
+
+    if state == "wait_entity_rename":
+        if user_text_lower == "категорию":
+            send_vk_message(user_id, "⏳ Загружаю список категорий...")
+            res = send_to_google_sheets({"action": "get_full_menu"})
+            if res.get("status") == "SUCCESS":
+                menu = res.get("menu", {})
+                cats = list(set(list(menu.get("Расход", {}).keys()) + list(menu.get("Доход", {}).keys())))
+                cats.sort()
+                if not cats:
+                    send_vk_message(user_id, "Категорий пока нет.", get_main_keyboard())
+                    return True
+                msg = "Какую категорию переименовать?\n\n"
+                for i, c in enumerate(cats):
+                    msg += f"{i+1}. {c}\n"
+                user_states[user_id] = {"state": "rename_cat_select", "cats": cats, "menu": menu}
+                send_vk_message(user_id, msg, get_numbered_keyboard(len(cats)))
+            return True
+            
+        elif user_text_lower == "подкатегорию":
+            send_vk_message(user_id, "⏳ Загружаю список...")
+            res = send_to_google_sheets({"action": "get_full_menu"})
+            if res.get("status") == "SUCCESS":
+                menu = res.get("menu", {})
+                cats = list(set(list(menu.get("Расход", {}).keys()) + list(menu.get("Доход", {}).keys())))
+                cats.sort()
+                msg = "В какой категории находится подкатегория?\n\n"
+                for i, c in enumerate(cats):
+                    msg += f"{i+1}. {c}\n"
+                user_states[user_id] = {"state": "rename_sub_select_cat", "cats": cats, "menu": menu}
+                send_vk_message(user_id, msg, get_numbered_keyboard(len(cats)))
+            return True
+            
+        elif user_text_lower == "статью":
+            send_vk_message(user_id, "⏳ Загружаю меню...")
+            res = send_to_google_sheets({"action": "get_full_menu"})
+            if res.get("status") == "SUCCESS":
+                user_states[user_id] = {"state": "rename_art_type", "menu": res.get("menu", {})}
+                send_vk_message(user_id, "Статья находится в Расходах или Доходах?", type_keyboard())
+            return True
+
+    if state == "wait_del_move_action":
+        if user_text_lower == "удалить":
+            user_states[user_id]["state"] = "delete_select_level"
+            send_vk_message(user_id, "Что именно удалить?", get_entity_keyboard())
+            return True
+        elif user_text_lower == "перенести":
+            user_states[user_id]["state"] = "move_select_level"
+            send_vk_message(user_id, "Что именно перенести?", get_move_entity_keyboard())
+            return True
+
     # ====================================================================
     # 1. ВЕТКА: СОЗДАТЬ
     # ====================================================================
@@ -66,7 +133,7 @@ def handle_structure(user_id, user_text, user_text_lower, state, user_states):
                 user_states[user_id]["sel_cat"] = sel_cat
                 user_states[user_id]["state"] = "create_sub_name"
                 send_vk_message(user_id, f"Категория: {sel_cat}.\n\nВведите название НОВОЙ ПОДКАТЕГОРИИ:", get_cancel_keyboard())
-        return True
+                return True
 
     if state == "create_sub_name":
         new_sub = user_text
@@ -124,7 +191,7 @@ def handle_structure(user_id, user_text, user_text_lower, state, user_states):
                 user_states[user_id]["sel_cat"] = sel_cat
                 user_states[user_id]["subs"] = subs
                 send_vk_message(user_id, msg, get_numbered_keyboard(len(subs)))
-        return True
+                return True
 
     if state == "create_art_subselect":
         if user_text.isdigit():
@@ -135,7 +202,7 @@ def handle_structure(user_id, user_text, user_text_lower, state, user_states):
                 user_states[user_id]["state"] = "create_art_name"
                 user_states[user_id]["sel_sub"] = sel_sub
                 send_vk_message(user_id, f"Отлично: {user_states[user_id]['sel_cat']} -> {sel_sub}.\n\nВведите название НОВОЙ СТАТЬИ:", get_cancel_keyboard())
-        return True
+                return True
 
     if state == "create_art_name":
         art_name = user_text
@@ -164,7 +231,7 @@ def handle_structure(user_id, user_text, user_text_lower, state, user_states):
                 user_states[user_id]["state"] = "rename_cat_type"
                 user_states[user_id]["old_cat"] = old_cat
                 send_vk_message(user_id, f"Введите новое название для категории '{old_cat}':", get_cancel_keyboard())
-        return True
+                return True
 
     if state == "rename_cat_type":
         new_cat = user_text
@@ -198,7 +265,7 @@ def handle_structure(user_id, user_text, user_text_lower, state, user_states):
                 user_states[user_id]["sel_cat"] = sel_cat
                 user_states[user_id]["subs"] = subs
                 send_vk_message(user_id, msg, get_numbered_keyboard(len(subs)))
-        return True
+                return True
 
     if state == "rename_sub_select_sub":
         if user_text.isdigit():
@@ -209,7 +276,7 @@ def handle_structure(user_id, user_text, user_text_lower, state, user_states):
                 user_states[user_id]["state"] = "rename_sub_type"
                 user_states[user_id]["old_sub"] = old_sub
                 send_vk_message(user_id, f"Введите новое название для '{old_sub}':", get_cancel_keyboard())
-        return True
+                return True
 
     if state == "rename_sub_type":
         new_sub = user_text
@@ -239,7 +306,7 @@ def handle_structure(user_id, user_text, user_text_lower, state, user_states):
                 user_states[user_id]["sel_cat"] = sel_cat
                 user_states[user_id]["subs"] = subs
                 send_vk_message(user_id, msg, get_numbered_keyboard(len(subs)))
-        return True
+                return True
 
     if state == "rename_art_sub":
         if user_text.isdigit():
@@ -262,7 +329,7 @@ def handle_structure(user_id, user_text, user_text_lower, state, user_states):
                 user_states[user_id]["sel_sub"] = sel_sub
                 user_states[user_id]["arts"] = arts
                 send_vk_message(user_id, msg, get_numbered_keyboard(len(arts)))
-        return True
+                return True
 
     if state == "rename_art_select":
         if user_text.isdigit():
@@ -273,7 +340,7 @@ def handle_structure(user_id, user_text, user_text_lower, state, user_states):
                 user_states[user_id]["state"] = "rename_art_newname"
                 user_states[user_id]["old_art"] = old_art
                 send_vk_message(user_id, f"Введите новое название для статьи '{old_art}':", get_cancel_keyboard())
-        return True
+                return True
 
     if state == "rename_art_newname":
         new_art = user_text
@@ -300,7 +367,7 @@ def handle_structure(user_id, user_text, user_text_lower, state, user_states):
             user_states[user_id]["del_level"] = level_map[user_text_lower]
             user_states[user_id]["state"] = "delete_select_type"
             send_vk_message(user_id, "В Расходах или Доходах?", type_keyboard())
-        return True
+            return True
 
     if state == "delete_select_type":
         c_type = "Доход" if "доход" in user_text_lower else "Расход"
@@ -340,7 +407,7 @@ def handle_structure(user_id, user_text, user_text_lower, state, user_states):
                     for i, s in enumerate(subs):
                         msg += f"{i+1}. {s}\n"
                     send_vk_message(user_id, msg, get_numbered_keyboard(len(subs)))
-        return True
+                return True
 
     if state == "delete_select_sub":
         if user_text.isdigit():
@@ -362,7 +429,7 @@ def handle_structure(user_id, user_text, user_text_lower, state, user_states):
                     for i, a in enumerate(arts):
                         msg += f"{i+1}. {a}\n"
                     send_vk_message(user_id, msg, get_numbered_keyboard(len(arts)))
-        return True
+                return True
 
     if state == "delete_select_art":
         if user_text.isdigit():
@@ -373,7 +440,7 @@ def handle_structure(user_id, user_text, user_text_lower, state, user_states):
                 user_states[user_id]["sel_art"] = sel_art
                 user_states[user_id]["state"] = "delete_confirm"
                 send_vk_message(user_id, f"⚠️ Вы уверены, что хотите удалить СТАТЬЮ '{sel_art}'?", get_yes_no_keyboard())
-        return True
+                return True
 
     if state == "delete_confirm":
         if user_text_lower in ["да", "верно", "ага", "yes", "+"]:
@@ -403,7 +470,7 @@ def handle_structure(user_id, user_text, user_text_lower, state, user_states):
             user_states[user_id]["move_level"] = level_map[user_text_lower]
             user_states[user_id]["state"] = "move_select_type"
             send_vk_message(user_id, "В Расходах или Доходах?", type_keyboard())
-        return True
+            return True
 
     if state == "move_select_type":
         c_type = "Доход" if "доход" in user_text_lower else "Расход"
@@ -438,7 +505,7 @@ def handle_structure(user_id, user_text, user_text_lower, state, user_states):
                 for i, s in enumerate(subs):
                     msg += f"{i+1}. {s}\n"
                 send_vk_message(user_id, msg, get_numbered_keyboard(len(subs)))
-        return True
+                return True
 
     if state == "move_select_sub":
         if user_text.isdigit():
@@ -464,7 +531,7 @@ def handle_structure(user_id, user_text, user_text_lower, state, user_states):
                     for i, a in enumerate(arts):
                         msg += f"{i+1}. {a}\n"
                     send_vk_message(user_id, msg, get_numbered_keyboard(len(arts)))
-        return True
+                return True
 
     if state == "move_select_art":
         if user_text.isdigit():
@@ -479,7 +546,7 @@ def handle_structure(user_id, user_text, user_text_lower, state, user_states):
                 for i, c in enumerate(cats):
                     msg += f"{i+1}. {c}\n"
                 send_vk_message(user_id, msg, get_numbered_keyboard(len(cats)))
-        return True
+                return True
 
     if state == "move_target_cat":
         if user_text.isdigit():
@@ -510,7 +577,7 @@ def handle_structure(user_id, user_text, user_text_lower, state, user_states):
                 for i, s in enumerate(new_subs):
                     msg += f"{i+1}. {s}\n"
                 send_vk_message(user_id, msg, get_numbered_keyboard(len(new_subs)))
-        return True
+                return True
 
     if state == "move_target_sub":
         if user_text.isdigit():
@@ -532,7 +599,7 @@ def handle_structure(user_id, user_text, user_text_lower, state, user_states):
                 send_to_google_sheets(payload)
                 send_vk_message(user_id, "✅ Успешно перенесено!", get_main_keyboard())
                 del user_states[user_id]
-        return True
+                return True
 
     if state == "move_target_parent":
         if user_text.isdigit():
@@ -554,7 +621,8 @@ def handle_structure(user_id, user_text, user_text_lower, state, user_states):
                     send_to_google_sheets(payload)
                     send_vk_message(user_id, "✅ Успешно перенесено!", get_main_keyboard())
                     del user_states[user_id]
-        return True
+                    return True
 
-    # Если ни один if не сработал, возвращаем False
+    # Если ни один if не сработал (например, ввели текст вместо цифры), возвращаем False, 
+    # чтобы сработала защита от дурака в main.py
     return False
