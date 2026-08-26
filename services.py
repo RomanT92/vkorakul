@@ -10,7 +10,7 @@ import os
 # Импортируем настройки и промпты из нашего файла конфигурации (config.py)
 from config import (
     VK_TOKEN, AI_TUNNEL_KEY, GOOGLE_SHEETS_URL, AI_BASE_URL, 
-    PROMPT_CATEGORIZE, PROMPT_EXTRACT
+    PROMPT_CATEGORIZE, PROMPT_EXTRACT, PROMPT_RECEIPT_TOTAL, PROMPT_RECEIPT_ITEMS
 )
 
 # ====================================================================
