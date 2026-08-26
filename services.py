@@ -10,7 +10,8 @@ import os
 # Импортируем настройки и промпты из нашего файла конфигурации (config.py)
 from config import (
     VK_TOKEN, AI_TUNNEL_KEY, GOOGLE_SHEETS_URL, AI_BASE_URL, 
-    PROMPT_CATEGORIZE, PROMPT_EXTRACT, PROMPT_RECEIPT_TOTAL, PROMPT_RECEIPT_ITEMS
+    PROMPT_CATEGORIZE, PROMPT_EXTRACT, PROMPT_RECEIPT_TOTAL, PROMPT_RECEIPT_ITEMS,
+    PROMPT_BATCH_CATEGORIZE
 )
 
 # ====================================================================
@@ -192,3 +193,33 @@ def extract_receipt_items_with_ai(image_url, menu_str):
     except Exception as e:
         print(f"Ошибка AI при чтении позиций чека: {e}")
         return None
+
+def categorize_batch_with_ai(items_list, menu_str):
+    """Отправляет список операций в ИИ для массовой категоризации"""
+    prompt = f"Меню:\n{menu_str}\n\nОперации:\n"
+    for item in items_list:
+        prompt += f"- {item['original_item']} ({item['amount']} руб.)\n"
+        
+    try:
+        response = ai_client.chat.completions.create(
+            model="gpt-3.5-turbo",
+            temperature=0.2,
+            messages=[
+                {"role": "system", "content": PROMPT_BATCH_CATEGORIZE},
+                {"role": "user", "content": prompt}
+            ]
+        )
+        text = response.choices[0].message.content.strip()
+        
+        # Очищаем от маркдауна, если ИИ его добавил
+        if text.startswith("```json"):
+            text = text[7:-3].strip()
+        elif text.startswith("```"):
+            text = text[3:-3].strip()
+            
+        if text.startswith("[") and text.endswith("]"):
+            return json.loads(text)
+    except Exception as e:
+        print(f"Ошибка AI при пакетной категоризации: {e}")
+        
+    return []
