@@ -6,8 +6,10 @@ from vk_api.keyboard import VkKeyboard, VkKeyboardColor
 # ====================================================================
 
 def get_main_keyboard():
+    """Главное меню бота"""
     keyboard = VkKeyboard(one_time=False)
-    keyboard.add_button('Разобрать завалы', color=VkKeyboardColor.PRIMARY)
+    # Новое, профессиональное название для разбора завалов
+    keyboard.add_button('Импорт статистики прошлого', color=VkKeyboardColor.PRIMARY)
     keyboard.add_line()
     keyboard.add_button('Категории и статьи', color=VkKeyboardColor.SECONDARY)
     keyboard.add_line()
@@ -15,6 +17,7 @@ def get_main_keyboard():
     return keyboard
 
 def get_crud_keyboard():
+    """Меню управления структурой"""
     keyboard = VkKeyboard(one_time=False)
     keyboard.add_button('Создать', color=VkKeyboardColor.POSITIVE)
     keyboard.add_button('Переименовать', color=VkKeyboardColor.PRIMARY)
@@ -25,6 +28,7 @@ def get_crud_keyboard():
     return keyboard
 
 def get_del_move_keyboard():
+    """Подменю для удаления и переноса"""
     keyboard = VkKeyboard(one_time=False)
     keyboard.add_button('Удалить', color=VkKeyboardColor.NEGATIVE)
     keyboard.add_button('Перенести', color=VkKeyboardColor.PRIMARY)
@@ -33,6 +37,7 @@ def get_del_move_keyboard():
     return keyboard
 
 def get_entity_keyboard():
+    """Выбор уровня структуры (Категория, Подкатегория, Статья)"""
     keyboard = VkKeyboard(one_time=False)
     keyboard.add_button('Категорию', color=VkKeyboardColor.PRIMARY)
     keyboard.add_button('Подкатегорию', color=VkKeyboardColor.PRIMARY)
@@ -43,6 +48,7 @@ def get_entity_keyboard():
     return keyboard
 
 def get_move_entity_keyboard():
+    """Для переноса категорию выбрать нельзя, поэтому кнопок меньше"""
     keyboard = VkKeyboard(one_time=False)
     keyboard.add_button('Подкатегорию', color=VkKeyboardColor.PRIMARY)
     keyboard.add_button('Статью', color=VkKeyboardColor.PRIMARY)
@@ -51,10 +57,12 @@ def get_move_entity_keyboard():
     return keyboard
 
 def get_numbered_keyboard(count):
+    """Универсальная клавиатура с цифрами для выбора из списков"""
     keyboard = VkKeyboard(one_time=False)
-    limit = min(count, 36)
+    limit = min(count, 36) # ВК поддерживает максимум 40 кнопок, ставим лимит
     for i in range(1, limit + 1):
         keyboard.add_button(str(i), color=VkKeyboardColor.SECONDARY)
+        # Перенос на новую строку каждые 4 кнопки
         if i % 4 == 0 and i != limit:
             keyboard.add_line()
     keyboard.add_line()
@@ -62,6 +70,7 @@ def get_numbered_keyboard(count):
     return keyboard
 
 def get_yes_no_keyboard():
+    """Клавиатура подтверждения"""
     keyboard = VkKeyboard(one_time=False)
     keyboard.add_button('Да', color=VkKeyboardColor.POSITIVE)
     keyboard.add_button('Нет', color=VkKeyboardColor.NEGATIVE)
@@ -70,6 +79,7 @@ def get_yes_no_keyboard():
     return keyboard
 
 def type_keyboard():
+    """Выбор типа транзакции"""
     keyboard = VkKeyboard(one_time=False)
     keyboard.add_button('Расход', color=VkKeyboardColor.NEGATIVE)
     keyboard.add_button('Доход', color=VkKeyboardColor.POSITIVE)
@@ -78,11 +88,15 @@ def type_keyboard():
     return keyboard
 
 def get_cancel_keyboard():
+    """Просто кнопка Отмена для текстового ввода"""
     keyboard = VkKeyboard(one_time=False)
     keyboard.add_button('Отмена', color=VkKeyboardColor.NEGATIVE)
     return keyboard
 
+# --- КЛАВИАТУРЫ ДЛЯ ЧЕКОВ И ИМПОРТА ---
+
 def get_receipt_mode_keyboard():
+    """Выбор режима обработки чека"""
     keyboard = VkKeyboard(one_time=False)
     keyboard.add_button('Общий итог', color=VkKeyboardColor.PRIMARY)
     keyboard.add_button('По позициям', color=VkKeyboardColor.PRIMARY)
@@ -91,6 +105,7 @@ def get_receipt_mode_keyboard():
     return keyboard
 
 def get_receipt_review_keyboard(count):
+    """Клавиатура для ревью позиций чека (цифры + Готово)"""
     keyboard = VkKeyboard(one_time=False)
     limit = min(count, 36)
     for i in range(1, limit + 1):
@@ -103,6 +118,7 @@ def get_receipt_review_keyboard(count):
     return keyboard
 
 def get_queue_review_keyboard(count):
+    """Клавиатура для ревью пакета импорта (цифры + Сохранить пакет)"""
     keyboard = VkKeyboard(one_time=False)
     limit = min(count, 36)
     for i in range(1, limit + 1):
