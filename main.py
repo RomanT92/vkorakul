@@ -10,7 +10,7 @@ from handlers_transaction import handle_transaction
 
 # Память бота (хранит состояния пользователей)
 user_states = {}
-MAX_ATTEMPTS = 5
+MAX_ATTEMPTS = 3
 
 print("Бот успешно запущен и слушает сообщения ВКонтакте...")
 
