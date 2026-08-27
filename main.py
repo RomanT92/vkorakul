@@ -7,7 +7,7 @@ from services import (
     parse_bank_file_with_ai, send_to_google_sheets 
 )
 
-# Импортируем клавиатуры (ДОБАВИЛИ get_main_keyboard)
+# Импортируем клавиатуры
 from keyboards import get_receipt_mode_keyboard, get_main_keyboard
 
 # Импортируем наши обработчики (Handlers), по которым мы разбили логику
@@ -16,16 +16,13 @@ from handlers_structure import handle_structure
 from handlers_queue import handle_queue_and_learning
 from handlers_receipt import handle_receipt
 from handlers_transaction import handle_transaction
-from handlers_queue import _process_next_batch
 
 # ====================================================================
 # ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ
 # ====================================================================
-# Память бота (хранит состояния пользователей в оперативной памяти)
 user_states = {}
-
-# Максимальное количество попыток запросить подсказку у пользователя
 MAX_ATTEMPTS = 3
+
 # ====================================================================
 # ГЛАВНЫЙ ЦИКЛ БОТА
 # ====================================================================
@@ -40,13 +37,11 @@ for event in longpoll.listen():
         # 1. ПЕРЕХВАТ ГОЛОСОВОГО СООБЩЕНИЯ
         # ==============================================================
         if not user_text and event.attachments:
-            # Ищем маркер голосового сообщения по всем значениям в словаре вложений
             is_voice = any(val in ['audiomsg', 'audio_message'] for val in event.attachments.values())
             
             if is_voice:
                 send_vk_message(user_id, "🎧 Слушаю голосовое сообщение...")
                 try:
-                    # Получаем полную информацию о сообщении через API ВК
                     msg_data = vk.messages.getById(message_ids=event.message_id)['items'][0]
                     attachments = msg_data.get('attachments', [])
                     
@@ -57,11 +52,8 @@ for event in longpoll.listen():
                             break
                     
                     if audio_url:
-                        # Отправляем ссылку на аудиофайл в нейросеть (Whisper) на распознавание
                         transcribed_text = transcribe_audio_with_ai(audio_url)
-                        
                         if transcribed_text:
-                            # Подменяем пустой текст на распознанный текст от ИИ!
                             user_text = transcribed_text
                             send_vk_message(user_id, f"📝 Распознано: «{user_text}»")
                         else:
@@ -76,10 +68,9 @@ for event in longpoll.listen():
                     continue
 
         # ==============================================================
-        # 1.5 ПЕРЕХВАТ ФОТОГРАФИИ (ЧЕКА)
+        # 2. ПЕРЕХВАТ ФОТОГРАФИИ (ЧЕКА)
         # ==============================================================
         if not user_text and event.attachments:
-            # Проверяем, есть ли среди вложений фотография
             is_photo = any(val == 'photo' for val in event.attachments.values())
             
             if is_photo:
@@ -90,14 +81,12 @@ for event in longpoll.listen():
                     
                     for att in attachments:
                         if att['type'] == 'photo':
-                            # Берем фотографию в максимальном разрешении (последнюю в списке sizes)
                             sizes = att['photo']['sizes']
                             largest_photo = sorted(sizes, key=lambda x: x['width'])[-1]
                             photo_url = largest_photo['url']
                             break
                     
                     if photo_url:
-                        # Сохраняем ссылку на фото в память и переводим пользователя в режим выбора
                         user_states[user_id] = {"state": "receipt_mode_select", "photo_url": photo_url}
                         send_vk_message(user_id, "👀 Вижу чек. Как его записать?", get_receipt_mode_keyboard())
                     else:
@@ -108,14 +97,13 @@ for event in longpoll.listen():
                 continue
 
         # ==============================================================
-        # 1.6 ПЕРЕХВАТ ДОКУМЕНТА (БАНКОВСКОЙ ВЫПИСКИ ИЛИ МАТРИЦЫ)
+        # 3. ПЕРЕХВАТ ДОКУМЕНТА (БАНКОВСКОЙ ВЫПИСКИ ИЛИ МАТРИЦЫ)
         # ==============================================================
         if not user_text and event.attachments:
             is_doc = any(val == 'doc' for val in event.attachments.values())
             
             if is_doc:
                 send_vk_message(user_id, "📁 Вижу файл. Изучаю его структуру...")
-                
                 try:
                     msg_data = vk.messages.getById(message_ids=event.message_id)['items'][0]
                     attachments = msg_data.get('attachments', [])
@@ -133,14 +121,12 @@ for event in longpoll.listen():
                                 break
                     
                     if doc_url:
-                        # Отправляем файл в нашу Тяжелую Артиллерию
                         parse_result = parse_bank_file_with_ai(doc_url, doc_ext)
                         
                         if parse_result.get("status") == "SUCCESS":
                             operations = parse_result.get("operations", [])
                             send_vk_message(user_id, f"✅ Структура понятна! Извлек {len(operations)} операций.\n⏳ Отправляю их в таблицу на анализ...")
                             
-                            # Отправляем операции в Google Таблицу и запускаем авто-импорт
                             gs_res = send_to_google_sheets({
                                 "action": "run_import_and_get_unverified",
                                 "rows": operations
@@ -151,7 +137,6 @@ for event in longpoll.listen():
                                 if not unverified:
                                     send_vk_message(user_id, "🎉 Импорт завершен! Все операции автоматически раскиданы по категориям. Завалов нет.", get_main_keyboard())
                                 else:
-                                    # Запускаем пакетный разбор завалов
                                     from handlers_queue import _process_next_batch
                                     user_states[user_id] = {
                                         "state": "queue_process", 
@@ -168,12 +153,11 @@ for event in longpoll.listen():
                 except Exception as e:
                     print(f"Ошибка при обработке документа: {e}")
                     send_vk_message(user_id, "❌ Произошла ошибка при загрузке файла.")
-                continue 
+                continue
 
         # ==============================================================
-        # 2. ФИЛЬТР ПУСТЫХ СООБЩЕНИЙ
+        # 4. ФИЛЬТР ПУСТЫХ СООБЩЕНИЙ
         # ==============================================================
-        # Если после всех проверок сообщение всё ещё пустое (например, прислали стикер)
         if not user_text:
             continue
 
@@ -181,34 +165,21 @@ for event in longpoll.listen():
         state = user_states.get(user_id, {}).get("state", "")
 
         # ==============================================================
-        # 3. МАРШРУТИЗАЦИЯ (STATE MACHINE / РОУТЕР)
+        # 5. МАРШРУТИЗАЦИЯ (STATE MACHINE / РОУТЕР)
         # ==============================================================
-        # Бот по очереди передает сообщение в разные обработчики.
-        # Если обработчик вернул True, значит он распознал команду и взял её на себя.
-
-        # Шаг А: Базовые команды (отмена, назад, помощь, переходы из главного меню)
         if handle_base_commands(user_id, user_text_lower, state, user_states):
             continue
 
-        # Шаг Б: Ветка управления структурой (Создать, Переименовать, Удалить, Перенести через меню)
         if handle_structure(user_id, user_text, user_text_lower, state, user_states):
             continue
 
-        # Шаг В: Ветка разбора завалов и интерактивного обучения ИИ
         if handle_queue_and_learning(user_id, user_text, user_text_lower, state, user_states, MAX_ATTEMPTS):
             continue
 
-        # Шаг Г: Ветка обработки чеков (выбор режима, ревью позиций, исправление)
         if handle_receipt(user_id, user_text, user_text_lower, state, user_states):
             continue
 
-        # Шаг Д: Обычный режим (парсинг транзакции, умные команды структуры или общение)
         if handle_transaction(user_id, user_text, state, user_states):
             continue
 
-        # ==============================================================
-        # 4. ГЛОБАЛЬНАЯ ЗАЩИТА ОТ ОШИБОК
-        # ==============================================================
-        # Сработает только если у пользователя ЕСТЬ активный стейт, 
-        # но он ввел что-то, что ни один из обработчиков не смог распознать.
         send_vk_message(user_id, "⚠️ Неверный ввод. Пожалуйста, выберите вариант из меню.\nДля выхода нажмите «Отмена».")
