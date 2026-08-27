@@ -3,9 +3,9 @@ from vk_api.longpoll import VkEventType
 
 # Импортируем сервисы для работы с ВК и ИИ
 from services import (
-    longpoll, vk, send_vk_message, transcribe_audio_with_ai
-)
-
+    longpoll, vk, send_vk_message, transcribe_audio_with_ai, 
+    parse_bank_file_with_ai, send_to_google_sheets # <-- Добавили парсер и отправку
+) 
 # Импортируем клавиатуру для выбора режима чека
 from keyboards import get_receipt_mode_keyboard
 
@@ -15,7 +15,7 @@ from handlers_structure import handle_structure
 from handlers_queue import handle_queue_and_learning
 from handlers_receipt import handle_receipt
 from handlers_transaction import handle_transaction
-
+from handlers_queue import _process_next_batch
 # ====================================================================
 # ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ
 # ====================================================================
@@ -105,6 +105,69 @@ for event in longpoll.listen():
                     print(f"Ошибка при обработке фото: {e}")
                     send_vk_message(user_id, "❌ Произошла ошибка при загрузке фотографии.")
                 continue
+
+        # ==============================================================
+        # 1.6 ПЕРЕХВАТ ДОКУМЕНТА (БАНКОВСКОЙ ВЫПИСКИ ИЛИ МАТРИЦЫ)
+        # ==============================================================
+        if not user_text and event.attachments:
+            is_doc = any(val == 'doc' for val in event.attachments.values())
+            
+            if is_doc:
+                send_vk_message(user_id, "📁 Вижу файл. Изучаю его структуру...")
+                
+                try:
+                    msg_data = vk.messages.getById(message_ids=event.message_id)['items'][0]
+                    attachments = msg_data.get('attachments', [])
+                    
+                    doc_url = None
+                    doc_ext = None
+                    
+                    for att in attachments:
+                        if att['type'] == 'doc':
+                            doc = att['doc']
+                            ext = doc.get('ext', '').lower()
+                            if ext in ['csv', 'xlsx', 'xls']:
+                                doc_url = doc['url']
+                                doc_ext = f".{ext}"
+                                break
+                    
+                    if doc_url:
+                        # Отправляем файл в нашу Тяжелую Артиллерию
+                        parse_result = parse_bank_file_with_ai(doc_url, doc_ext)
+                        
+                        if parse_result.get("status") == "SUCCESS":
+                            operations = parse_result.get("operations", [])
+                            send_vk_message(user_id, f"✅ Структура понятна! Извлек {len(operations)} операций.\n⏳ Отправляю их в таблицу на анализ...")
+                            
+                            # Отправляем операции в Google Таблицу и запускаем авто-импорт
+                            gs_res = send_to_google_sheets({
+                                "action": "run_import_and_get_unverified",
+                                "rows": operations
+                            })
+                            
+                            if gs_res.get("status") == "SUCCESS":
+                                unverified = gs_res.get("data", [])
+                                if not unverified:
+                                    send_vk_message(user_id, "🎉 Импорт завершен! Все операции автоматически раскиданы по категориям. Завалов нет.", get_main_keyboard())
+                                else:
+                                    # Запускаем пакетный разбор завалов
+                                    from handlers_queue import _process_next_batch
+                                    user_states[user_id] = {
+                                        "state": "queue_process", 
+                                        "queue": unverified, 
+                                        "menu": gs_res.get("available_menu", {})
+                                    }
+                                    _process_next_batch(user_id, user_states)
+                            else:
+                                send_vk_message(user_id, f"❌ Ошибка таблицы при импорте: {gs_res.get('message')}")
+                        else:
+                            send_vk_message(user_id, f"❌ Не удалось разобрать файл: {parse_result.get('message')}")
+                    else:
+                        send_vk_message(user_id, "⚠️ Пожалуйста, отправьте файл в формате .CSV или .XLSX")
+                except Exception as e:
+                    print(f"Ошибка при обработке документа: {e}")
+                    send_vk_message(user_id, "❌ Произошла ошибка при загрузке файла.")
+                continue 
 
         # ==============================================================
         # 2. ФИЛЬТР ПУСТЫХ СООБЩЕНИЙ
