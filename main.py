@@ -4,10 +4,11 @@ from vk_api.longpoll import VkEventType
 # Импортируем сервисы для работы с ВК и ИИ
 from services import (
     longpoll, vk, send_vk_message, transcribe_audio_with_ai, 
-    parse_bank_file_with_ai, send_to_google_sheets # <-- Добавили парсер и отправку
-) 
-# Импортируем клавиатуру для выбора режима чека
-from keyboards import get_receipt_mode_keyboard
+    parse_bank_file_with_ai, send_to_google_sheets 
+)
+
+# Импортируем клавиатуры (ДОБАВИЛИ get_main_keyboard)
+from keyboards import get_receipt_mode_keyboard, get_main_keyboard
 
 # Импортируем наши обработчики (Handlers), по которым мы разбили логику
 from handlers_base import handle_base_commands
@@ -16,6 +17,7 @@ from handlers_queue import handle_queue_and_learning
 from handlers_receipt import handle_receipt
 from handlers_transaction import handle_transaction
 from handlers_queue import _process_next_batch
+
 # ====================================================================
 # ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ
 # ====================================================================
@@ -23,8 +25,7 @@ from handlers_queue import _process_next_batch
 user_states = {}
 
 # Максимальное количество попыток запросить подсказку у пользователя
-MAX_ATTEMPTS = 3  
-
+MAX_ATTEMPTS = 3
 # ====================================================================
 # ГЛАВНЫЙ ЦИКЛ БОТА
 # ====================================================================
