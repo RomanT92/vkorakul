@@ -6,13 +6,13 @@ import subprocess
 # ====================================================================
 # АВТОУСТАНОВКА БИБЛИОТЕК (Хак для Bothost)
 # ====================================================================
-# Проверяем, установлена ли библиотека pandas. Если нет — скачиваем её и openpyxl.
 try:
     import pandas as pd
 except ImportError:
     print("Библиотеки не найдены. Запускаю автоустановку...")
     subprocess.check_call([sys.executable, "-m", "pip", "install", "pandas", "openpyxl"])
-    import pandas as pd
+    print("Установка завершена! Перезапускаю скрипт, чтобы применить изменения...")
+    os.execv(sys.executable, [sys.executable] + sys.argv)
 
 import vk_api
 from vk_api.longpoll import VkLongPoll
@@ -200,7 +200,10 @@ def categorize_batch_with_ai(items_list, menu_str):
     return []
 
 def parse_bank_file_with_ai(file_url, file_ext):
-    """Скачивает файл (Excel/CSV), анализирует структуру через ИИ и вытаскивает все операции."""
+    """
+    Скачивает файл, перебирает ВСЕ вкладки, анализирует структуру через ИИ 
+    и вытаскивает все операции со всех подходящих листов.
+    """
     try:
         response = requests.get(file_url)
         if response.status_code != 200:
@@ -210,95 +213,123 @@ def parse_bank_file_with_ai(file_url, file_ext):
             temp_file.write(response.content)
             temp_file_path = temp_file.name
 
+        # Читаем все вкладки из файла
         if file_ext == ".csv":
-            df = pd.read_csv(temp_file_path, header=None, dtype=str)
+            dfs = {"CSV": pd.read_csv(temp_file_path, header=None, dtype=str)}
         else:
-            df = pd.read_excel(temp_file_path, header=None, dtype=str)
+            dfs = pd.read_excel(temp_file_path, sheet_name=None, header=None, dtype=str)
         
         os.remove(temp_file_path)
 
-        # Берем первые 150 строк для анализа ИИ
-        sample_df = df.head(150).fillna("")
-        csv_sample = sample_df.to_csv(index=False, sep=";")
-
-        ai_response = ai_client.chat.completions.create(
-            model="gpt-4o",
-            temperature=0.0,
-            messages=[
-                {"role": "system", "content": PROMPT_FILE_MAPPING},
-                {"role": "user", "content": f"Файл:\n{csv_sample}"}
-            ]
-        )
-        
-        mapping_text = ai_response.choices[0].message.content.strip()
-        if mapping_text.startswith("```json"):
-            mapping_text = mapping_text[7:-3].strip()
-        elif mapping_text.startswith("```"):
-            mapping_text = mapping_text[3:-3].strip()
-            
-        mapping = json.loads(mapping_text)
-        file_type = mapping.get("file_type")
-        
         parsed_operations = []
         
-        if file_type == "flat":
-            header_idx = mapping.get("header_row_index", 0)
-            date_col = mapping.get("date_col_idx")
-            amount_col = mapping.get("amount_col_idx")
-            desc_col = mapping.get("desc_col_idx")
-            is_signed = mapping.get("is_amount_signed", False)
-            
-            for i in range(header_idx + 1, len(df)):
-                row = df.iloc[i].fillna("")
-                try:
-                    date_val = str(row[date_col]).strip()
-                    desc_val = str(row[desc_col]).strip()
-                    amount_str = str(row[amount_col]).replace(" ", "").replace("\xa0", "").replace(",", ".")
+        # Проходимся по каждой вкладке по очереди
+        for sheet_name, df in dfs.items():
+            if df.empty:
+                continue
+                
+            # Берем первые 150 строк текущей вкладки
+            sample_df = df.head(150).fillna("")
+            csv_sample = sample_df.to_csv(index=False, sep=";")
+
+            try:
+                ai_response = ai_client.chat.completions.create(
+                    model="gpt-4o",
+                    temperature=0.0,
+                    messages=[
+                        {"role": "system", "content": PROMPT_FILE_MAPPING},
+                        {"role": "user", "content": f"Вкладка: {sheet_name}\nДанные:\n{csv_sample}"}
+                    ]
+                )
+                
+                mapping_text = ai_response.choices[0].message.content.strip()
+                if mapping_text.startswith("```json"):
+                    mapping_text = mapping_text[7:-3].strip()
+                elif mapping_text.startswith("```"):
+                    mapping_text = mapping_text[3:-3].strip()
                     
-                    if not amount_str or not desc_val:
-                        continue
-                        
-                    amount_val = float(amount_str)
-                    if amount_val == 0:
-                        continue
-                    
-                    op_type = "Расход"
-                    if is_signed:
-                        if amount_val > 0:
-                            op_type = "Доход"
-                        amount_val = abs(amount_val)
-                        
-                    parsed_operations.append([date_val, op_type, amount_val, desc_val])
-                except:
+                mapping = json.loads(mapping_text)
+                file_type = mapping.get("file_type")
+                
+                # Если ИИ сказал, что это мусорная вкладка — просто пропускаем её
+                if file_type not in ["flat", "matrix"]:
+                    print(f"Пропускаю вкладку '{sheet_name}' (тип: {file_type})")
                     continue
                     
-        elif file_type == "matrix":
-            header_idx = mapping.get("header_row_index", 0)
-            cat_col = mapping.get("category_col_idx")
-            start_col = mapping.get("date_start_col_idx")
-            
-            days_row = df.iloc[header_idx].fillna("")
-            
-            for i in range(header_idx + 1, len(df)):
-                row = df.iloc[i].fillna("")
-                category_name = str(row[cat_col]).strip()
-                if not category_name:
-                    continue
+                # =========================================================
+                # ТИП 1: ПЛОСКАЯ БАНКОВСКАЯ ВЫПИСКА
+                # =========================================================
+                if file_type == "flat":
+                    header_idx = mapping.get("header_row_index", 0)
+                    date_col = mapping.get("date_col_idx")
+                    amount_col = mapping.get("amount_col_idx")
+                    desc_col = mapping.get("desc_col_idx")
+                    is_signed = mapping.get("is_amount_signed", False)
                     
-                for col_idx in range(start_col, len(df.columns)):
-                    day_val = str(days_row[col_idx]).strip()
-                    amount_str = str(row[col_idx]).replace(" ", "").replace("\xa0", "").replace(",", ".")
-                    
-                    if not amount_str or amount_str.lower() in ["0", "0.0", "none", "nan"]:
-                        continue
-                        
-                    try:
-                        amount_val = float(amount_str)
-                        if amount_val == 0:
+                    for i in range(header_idx + 1, len(df)):
+                        row = df.iloc[i].fillna("")
+                        try:
+                            date_val = str(row[date_col]).strip()
+                            desc_val = str(row[desc_col]).strip()
+                            amount_str = str(row[amount_col]).replace(" ", "").replace("\xa0", "").replace(",", ".")
+                            
+                            # СТРОГОЕ ПРАВИЛО: Если нет даты, описания или суммы - пропускаем строку!
+                            if not amount_str or not desc_val or not date_val or date_val.lower() in ["nan", "none", "nat"]:
+                                continue
+                                
+                            amount_val = float(amount_str)
+                            if amount_val == 0:
+                                continue
+                            
+                            op_type = "Расход"
+                            if is_signed:
+                                if amount_val > 0:
+                                    op_type = "Доход"
+                                amount_val = abs(amount_val)
+                                
+                            parsed_operations.append([date_val, op_type, amount_val, desc_val])
+                        except:
                             continue
-                        parsed_operations.append([f"{day_val} число", "Расход", abs(amount_val), category_name])
-                    except:
-                        continue
+                            
+                # =========================================================
+                # ТИП 2: СЛОЖНАЯ МАТРИЦА (ШАБЛОН-КАЛЕНДАРЬ)
+                # =========================================================
+                elif file_type == "matrix":
+                    header_idx = mapping.get("header_row_index", 0)
+                    cat_col = mapping.get("category_col_idx")
+                    start_col = mapping.get("date_start_col_idx")
+                    
+                    days_row = df.iloc[header_idx].fillna("")
+                    
+                    for i in range(header_idx + 1, len(df)):
+                        row = df.iloc[i].fillna("")
+                        category_name = str(row[cat_col]).strip()
+                        
+                        # СТРОГОЕ ПРАВИЛО 1: Если нет названия статьи (категории) в строке - пропускаем!
+                        if not category_name or category_name.lower() in ["nan", "none"]:
+                            continue
+                            
+                        for col_idx in range(start_col, len(df.columns)):
+                            day_val = str(days_row[col_idx]).strip()
+                            amount_str = str(row[col_idx]).replace(" ", "").replace("\xa0", "").replace(",", ".")
+                            
+                            # СТРОГОЕ ПРАВИЛО 2: Если нет суммы или даты (дня) в столбце - пропускаем ячейку!
+                            if not amount_str or amount_str.lower() in ["0", "0.0", "none", "nan"]:
+                                continue
+                            if not day_val or day_val.lower() in ["nan", "none", "nat"]:
+                                continue
+                                
+                            try:
+                                amount_val = float(amount_str)
+                                if amount_val == 0:
+                                    continue
+                                parsed_operations.append([f"{day_val} число ({sheet_name})", "Расход", abs(amount_val), category_name])
+                            except:
+                                continue
+
+            except Exception as e:
+                print(f"Ошибка при анализе вкладки '{sheet_name}': {e}")
+                continue # Если одна вкладка упала, идем к следующей
 
         return {"status": "SUCCESS", "operations": parsed_operations}
         
