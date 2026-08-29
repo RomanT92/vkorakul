@@ -11,7 +11,6 @@ from services import (
 )
 
 def find_entity_in_menu(menu, target_name):
-    """Ищет сущность по всему меню (с учетом опечаток и падежей)"""
     target = target_name.lower().strip()
     all_entities = []
     
@@ -152,7 +151,6 @@ def handle_transaction(user_id, user_text, state, user_states):
             parsed_data.pop("category", None)
             parsed_data.pop("subcategory", None)
             
-            # ЖЕСТКИЙ ПРЕДОХРАНИТЕЛЬ ТИПА ОПЕРАЦИИ (Защита от галлюцинаций ИИ)
             income_triggers = ["приход", "доход", "зарплата", "аванс", "премия", "подарили", "поступление"]
             expense_triggers = ["расход", "трата", "купил", "оплатил"]
             
@@ -161,7 +159,6 @@ def handle_transaction(user_id, user_text, state, user_states):
             elif any(word in user_text_lower for word in expense_triggers):
                 parsed_data["type"] = "Расход"
 
-            # Очистка мусора в названии
             current_item = parsed_data.get("item", "").strip().lower()
             if not current_item or current_item in ["приход", "доход", "расход", "трата"]:
                 parsed_data["item"] = "Поступление" if parsed_data.get("type") in ["Доход", "Приход"] else "Трата"
@@ -199,4 +196,4 @@ def handle_transaction(user_id, user_text, state, user_states):
         else:
             send_vk_message(user_id, "❌ Ошибка связи с ИИ.", get_main_keyboard())
             
-    return True
+    return True 
