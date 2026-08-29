@@ -228,7 +228,7 @@ def parse_bank_file_with_ai(file_url, file_ext):
             if df.empty:
                 continue
                 
-            # Берем первые 150 строк текущей вкладки
+            # Берем первые 150 строк текущей вкладки для анализа ИИ
             sample_df = df.head(150).fillna("")
             csv_sample = sample_df.to_csv(index=False, sep=";")
 
@@ -251,7 +251,7 @@ def parse_bank_file_with_ai(file_url, file_ext):
                 mapping = json.loads(mapping_text)
                 file_type = mapping.get("file_type")
                 
-                # Если ИИ сказал, что это мусорная вкладка — просто пропускаем её
+                # Если ИИ сказал, что это мусорная вкладка — пропускаем
                 if file_type not in ["flat", "matrix"]:
                     print(f"Пропускаю вкладку '{sheet_name}' (тип: {file_type})")
                     continue
@@ -301,19 +301,26 @@ def parse_bank_file_with_ai(file_url, file_ext):
                     
                     days_row = df.iloc[header_idx].fillna("")
                     
+                    # СТОП-СЛОВА: Игнорируем технические строки и промежуточные итоги матрицы
+                    stop_words = ["план", "факт", "баланс", "итого", "максимум", "минимум", "средне", "почему", "часов", "осталось", "неделя", "месяц", "доходы-расходы", "резерв"]
+                    
                     for i in range(header_idx + 1, len(df)):
                         row = df.iloc[i].fillna("")
                         category_name = str(row[cat_col]).strip()
                         
-                        # СТРОГОЕ ПРАВИЛО 1: Если нет названия статьи (категории) в строке - пропускаем!
+                        # СТРОГОЕ ПРАВИЛО 1: Пропускаем пустые строки
                         if not category_name or category_name.lower() in ["nan", "none"]:
+                            continue
+                            
+                        # СТРОГОЕ ПРАВИЛО 2: Пропускаем технические строки
+                        if any(word in category_name.lower() for word in stop_words):
                             continue
                             
                         for col_idx in range(start_col, len(df.columns)):
                             day_val = str(days_row[col_idx]).strip()
                             amount_str = str(row[col_idx]).replace(" ", "").replace("\xa0", "").replace(",", ".")
                             
-                            # СТРОГОЕ ПРАВИЛО 2: Если нет суммы или даты (дня) в столбце - пропускаем ячейку!
+                            # СТРОГОЕ ПРАВИЛО 3: Если нет суммы или даты (дня) в столбце - пропускаем ячейку!
                             if not amount_str or amount_str.lower() in ["0", "0.0", "none", "nan"]:
                                 continue
                             if not day_val or day_val.lower() in ["nan", "none", "nat"]:
@@ -330,6 +337,17 @@ def parse_bank_file_with_ai(file_url, file_ext):
             except Exception as e:
                 print(f"Ошибка при анализе вкладки '{sheet_name}': {e}")
                 continue # Если одна вкладка упала, идем к следующей
+
+        # =========================================================
+        # ПРЕДОХРАНИТЕЛЬ ОТ ПЕРЕГРУЗКИ ТАБЛИЦЫ
+        # =========================================================
+        # Если бот нашел больше 2000 операций, скорее всего он захватил мусор или итоги.
+        # Это защитит твою таблицу от лимита в 10 млн ячеек.
+        if len(parsed_operations) > 2000:
+            return {
+                "status": "ERROR", 
+                "message": f"Найдено слишком много цифр ({len(parsed_operations)}). Бот захватил формулы и промежуточные итоги. Чтобы не задублировать расходы, пожалуйста, загружайте историю в виде плоского списка (Дата, Сумма, Статья)."
+            }
 
         return {"status": "SUCCESS", "operations": parsed_operations}
         
