@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 import json
-import difflib # <-- ДОБАВИЛИ БИБЛИОТЕКУ ДЛЯ УМНОГО ПОИСКА
+import difflib
 from keyboards import (
     get_main_keyboard, get_yes_no_keyboard, get_cancel_keyboard,
     type_keyboard, get_entity_keyboard, get_del_move_keyboard, get_numbered_keyboard
@@ -15,7 +15,6 @@ def find_entity_in_menu(menu, target_name):
     target = target_name.lower().strip()
     all_entities = []
     
-    # Собираем все элементы меню в один плоский список
     for c_type in ["Расход", "Доход"]:
         type_menu = menu.get(c_type, {})
         for cat, subs in type_menu.items():
@@ -26,16 +25,12 @@ def find_entity_in_menu(menu, target_name):
                     all_entities.append({"level": "article", "type": c_type, "cat": cat, "sub": sub, "art": art, "name": art.lower().strip()})
     
     results = []
-    
-    # 1. Сначала ищем точное совпадение
     for ent in all_entities:
         if ent["name"] == target:
             results.append(ent)
             
-    # 2. Если точного совпадения нет, ищем похожее слово (опечатки, падежи)
     if not results:
         names = [ent["name"] for ent in all_entities]
-        # cutoff=0.7 означает, что слова должны совпадать минимум на 70% (топлива / топливо совпадает на 85%)
         matches = difflib.get_close_matches(target, names, n=1, cutoff=0.7)
         if matches:
             best_match = matches[0]
@@ -49,6 +44,7 @@ def handle_transaction(user_id, user_text, state, user_states):
     if state != "":
         return False
         
+    user_text_lower = user_text.lower()
     reply_text = extract_transaction_with_ai(user_text)
     
     if reply_text and reply_text.startswith("{") and reply_text.endswith("}"):
@@ -72,13 +68,12 @@ def handle_transaction(user_id, user_text, state, user_states):
                         send_vk_message(user_id, f"❌ Не нашел '{target_name}' в базе. Попробуйте через кнопки меню.", get_main_keyboard())
                         return True
                     elif len(results) > 1:
-                        send_vk_message(user_id, f"⚠️ Нашел несколько совпадений для '{target_name}' (например, это и категория, и статья). Пожалуйста, воспользуйтесь кнопками меню для точности.", get_main_keyboard())
+                        send_vk_message(user_id, f"⚠️ Нашел несколько совпадений для '{target_name}'. Пожалуйста, воспользуйтесь кнопками меню для точности.", get_main_keyboard())
                         return True
                         
                     r = results[0]
                     found_name = r["cat"] if r["level"] == "category" else (r["sub"] if r["level"] == "subcategory" else r["art"])
                     
-                    # --- ПЕРЕИМЕНОВАНИЕ (Делаем сразу) ---
                     if action == "smart_rename":
                         new_name = parsed_data.get("new_name", "")
                         if r["level"] == "category":
@@ -93,20 +88,14 @@ def handle_transaction(user_id, user_text, state, user_states):
                         msg = "✅ Успешно переименовано!" if gs_res.get("status") == "SUCCESS" else f"❌ Ошибка: {gs_res.get('message')}"
                         send_vk_message(user_id, msg, get_main_keyboard())
                     
-                    # --- УДАЛЕНИЕ (Просим подтверждение) ---
                     elif action == "smart_delete":
                         level_ru = {"category": "КАТЕГОРИЮ", "subcategory": "ПОДКАТЕГОРИЮ", "article": "СТАТЬЮ"}[r["level"]]
                         user_states[user_id] = {
-                            "state": "delete_confirm",
-                            "del_level": r["level"],
-                            "c_type": r["type"],
-                            "sel_cat": r["cat"],
-                            "sel_sub": r["sub"],
-                            "sel_art": r["art"]
+                            "state": "delete_confirm", "del_level": r["level"], "c_type": r["type"],
+                            "sel_cat": r["cat"], "sel_sub": r["sub"], "sel_art": r["art"]
                         }
                         send_vk_message(user_id, f"⚠️ Вы уверены, что хотите удалить {level_ru} '{found_name}'?", get_yes_no_keyboard())
                     
-                    # --- ПЕРЕНОС (Спрашиваем, куда перенести) ---
                     elif action == "smart_move":
                         if r["level"] == "category":
                             send_vk_message(user_id, "❌ Категорию нельзя перенести. Только подкатегорию или статью.", get_main_keyboard())
@@ -117,14 +106,9 @@ def handle_transaction(user_id, user_text, state, user_states):
                         
                         if r["level"] == "article":
                             user_states[user_id] = {
-                                "state": "move_target_cat",
-                                "move_level": "article",
-                                "c_type": r["type"],
-                                "sel_cat": r["cat"],
-                                "sel_sub": r["sub"],
-                                "sel_art": r["art"],
-                                "cats": cats,
-                                "menu": menu.get(r["type"], {})
+                                "state": "move_target_cat", "move_level": "article", "c_type": r["type"],
+                                "sel_cat": r["cat"], "sel_sub": r["sub"], "sel_art": r["art"],
+                                "cats": cats, "menu": menu.get(r["type"], {})
                             }
                             msg = f"В какую КАТЕГОРИЮ перенести статью '{found_name}'?\n\n"
                             for i, c in enumerate(cats):
@@ -133,12 +117,8 @@ def handle_transaction(user_id, user_text, state, user_states):
                             
                         elif r["level"] == "subcategory":
                             user_states[user_id] = {
-                                "state": "move_target_parent",
-                                "move_level": "subcategory",
-                                "c_type": r["type"],
-                                "sel_cat": r["cat"],
-                                "sel_sub": r["sub"],
-                                "cats": cats
+                                "state": "move_target_parent", "move_level": "subcategory", "c_type": r["type"],
+                                "sel_cat": r["cat"], "sel_sub": r["sub"], "cats": cats
                             }
                             msg = f"В какую КАТЕГОРИЮ перенести подкатегорию '{found_name}'?\n\n"
                             for i, c in enumerate(cats):
@@ -172,7 +152,18 @@ def handle_transaction(user_id, user_text, state, user_states):
             parsed_data.pop("category", None)
             parsed_data.pop("subcategory", None)
             
-            if not parsed_data.get("item", "").strip():
+            # ЖЕСТКИЙ ПРЕДОХРАНИТЕЛЬ ТИПА ОПЕРАЦИИ (Защита от галлюцинаций ИИ)
+            income_triggers = ["приход", "доход", "зарплата", "аванс", "премия", "подарили", "поступление"]
+            expense_triggers = ["расход", "трата", "купил", "оплатил"]
+            
+            if any(word in user_text_lower for word in income_triggers) and not any(word in user_text_lower for word in expense_triggers):
+                parsed_data["type"] = "Доход"
+            elif any(word in user_text_lower for word in expense_triggers):
+                parsed_data["type"] = "Расход"
+
+            # Очистка мусора в названии
+            current_item = parsed_data.get("item", "").strip().lower()
+            if not current_item or current_item in ["приход", "доход", "расход", "трата"]:
                 parsed_data["item"] = "Поступление" if parsed_data.get("type") in ["Доход", "Приход"] else "Трата"
                     
             send_vk_message(user_id, f"⏳ Ищу '{parsed_data['item']}' в базах...")
