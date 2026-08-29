@@ -68,7 +68,7 @@ for event in longpoll.listen():
                     continue
 
         # ==============================================================
-        # 2. ПЕРЕХВАТ ФОТОГРАФИИ (ЧЕКА)
+        # 1.5 ПЕРЕХВАТ ФОТОГРАФИИ (ЧЕКА)
         # ==============================================================
         if not user_text and event.attachments:
             is_photo = any(val == 'photo' for val in event.attachments.values())
@@ -97,7 +97,7 @@ for event in longpoll.listen():
                 continue
 
         # ==============================================================
-        # 3. ПЕРЕХВАТ ДОКУМЕНТА (БАНКОВСКОЙ ВЫПИСКИ ИЛИ МАТРИЦЫ)
+        # 1.6 ПЕРЕХВАТ ДОКУМЕНТА (БАНКОВСКОЙ ВЫПИСКИ ИЛИ МАТРИЦЫ)
         # ==============================================================
         if not user_text and event.attachments:
             is_doc = any(val == 'doc' for val in event.attachments.values())
@@ -125,11 +125,24 @@ for event in longpoll.listen():
                         
                         if parse_result.get("status") == "SUCCESS":
                             operations = parse_result.get("operations", [])
-                            send_vk_message(user_id, f"✅ Структура понятна! Извлек {len(operations)} операций.\n⏳ Отправляю их в таблицу на анализ...")
+                            send_vk_message(user_id, f"✅ Структура понятна! Извлек {len(operations)} операций.\n⏳ Отправляю их в таблицу частями...")
                             
+                            # ОТПРАВКА ЧАСТЯМИ (ЧАНКАМИ)
+                            # Режем огромный массив на пачки по 500 строк, чтобы Google не завис
+                            chunk_size = 500
+                            for i in range(0, len(operations), chunk_size):
+                                chunk = operations[i:i + chunk_size]
+                                send_to_google_sheets({
+                                    "action": "append_import_rows",
+                                    "rows": chunk
+                                })
+                            
+                            send_vk_message(user_id, "⏳ Данные загружены. Запускаю умный анализ и поиск совпадений...")
+                            
+                            # Когда всё загружено, даем команду таблице на переваривание
                             gs_res = send_to_google_sheets({
                                 "action": "run_import_and_get_unverified",
-                                "rows": operations
+                                "rows": [] # Строки уже загружены, просто запускаем алгоритм
                             })
                             
                             if gs_res.get("status") == "SUCCESS":
@@ -156,7 +169,7 @@ for event in longpoll.listen():
                 continue
 
         # ==============================================================
-        # 4. ФИЛЬТР ПУСТЫХ СООБЩЕНИЙ
+        # 2. ФИЛЬТР ПУСТЫХ СООБЩЕНИЙ
         # ==============================================================
         if not user_text:
             continue
@@ -165,7 +178,7 @@ for event in longpoll.listen():
         state = user_states.get(user_id, {}).get("state", "")
 
         # ==============================================================
-        # 5. МАРШРУТИЗАЦИЯ (STATE MACHINE / РОУТЕР)
+        # 3. МАРШРУТИЗАЦИЯ (STATE MACHINE / РОУТЕР)
         # ==============================================================
         if handle_base_commands(user_id, user_text_lower, state, user_states):
             continue
