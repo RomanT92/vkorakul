@@ -99,3 +99,28 @@ def save_transaction(user_id, op_type, category, subcategory, article, amount, c
     finally:
         cur.close()
         conn.close()
+
+def get_full_menu(user_id):
+    """Собирает меню категорий для конкретного пользователя"""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    menu = {"Расход": {}, "Доход": {}}
+    try:
+        # Берем скелет из глобальной базы и кастомные папки юзера
+        cur.execute("""
+            SELECT type, category, subcategory 
+            FROM global_dictionary 
+            UNION 
+            SELECT type, category, subcategory 
+            FROM user_dictionary WHERE user_id = %s AND is_deleted = FALSE
+        """, (user_id,))
+        
+        for row in cur.fetchall():
+            t, c, s = row[0], row[1], row[2]
+            if t not in menu: menu[t] = {}
+            if c not in menu[t]: menu[t][c] = []
+            if s not in menu[t][c]: menu[t][c].append(s)
+        return menu
+    finally:
+        cur.close()
+        conn.close()
