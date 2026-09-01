@@ -9,6 +9,7 @@ def handle_transaction(user_id, user_text, state, user_states):
         return False
 
     user_text_lower = user_text.lower()
+    # 1. Просим ИИ извлечь сумму и название
     reply_text = extract_transaction_with_ai(user_text)
 
     if reply_text and reply_text.startswith("{") and reply_text.endswith("}"):
@@ -16,7 +17,7 @@ def handle_transaction(user_id, user_text, state, user_states):
             parsed_data = json.loads(reply_text)
             action = parsed_data.get("action")
             
-            # ВРЕМЕННАЯ ЗАГЛУШКА ДЛЯ CRUD (пока мы не перенесли их в БД на следующем шаге)
+            # ВРЕМЕННАЯ ЗАГЛУШКА ДЛЯ CRUD (пока мы не перенесли их в БД)
             if action in ["smart_rename", "smart_delete", "smart_move", "start_interactive"]:
                 send_vk_message(user_id, "⚙️ Управление структурой сейчас переезжает на новую сверхбыструю базу данных. Эта функция заработает чуть позже!", get_main_keyboard())
                 return True
@@ -46,7 +47,9 @@ def handle_transaction(user_id, user_text, state, user_states):
             send_vk_message(user_id, f"⚡ Ищу '{current_item}' в новой базе PostgreSQL...")
 
             # --- МАГИЯ POSTGRESQL ---
+            # Получаем внутренний ID пользователя в базе
             internal_uid = get_or_create_user(user_id)
+            # Ищем слово в БД с опечатками
             search_res = smart_search_item(internal_uid, current_item, parsed_data["type"])
 
             if search_res["status"] == "FOUND":
