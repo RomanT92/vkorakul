@@ -7,7 +7,7 @@ VK_TOKEN = "vk1.a.Mvn90TUedTR7oGAliJvvGbsUvaxnmfjz8SRM7lvuJLbvfsfHK7kMfOB5YPIPSn
 AI_TUNNEL_KEY = "sk-aitunnel-uR0sN0BlJhJNKC1IyNGLVFMvRw5Pv1Xw"
 GOOGLE_SHEETS_URL = "https://script.google.com/macros/s/AKfycbyeFzUu2-u1N0bJBg9sL4olZOQnoUOciceXxEB9jGzfcrfZD07IYo-LyIP03nx-yAtV/exec"
 AI_BASE_URL = "https://api.aitunnel.ru/v1/"
-
+DB_URL = "postgresql://postgres:W3geb*KYdbase@db.lgmwmzzvhqvpihwttlsb.supabase.co:5432/postgres"
 # ====================================================================
 # 2. ПРОМПТЫ (ИНСТРУКЦИИ ДЛЯ НЕЙРОСЕТИ)
 # ====================================================================
