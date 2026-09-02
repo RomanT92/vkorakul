@@ -6,11 +6,9 @@ import subprocess
 # ====================================================================
 # АВТОУСТАНОВКА БИБЛИОТЕК
 # ====================================================================
-# Проверяем, установлена ли библиотека для работы с PostgreSQL.
-# Если нет — скрипт сам её скачает и установит (удобно для Bothost).
 try:
     import psycopg2
-    from psycopg2.extras import execute_values # <-- Тот самый инструмент для сверхбыстрой массовой загрузки
+    from psycopg2.extras import execute_values
 except ImportError:
     print("Библиотека psycopg2 не найдена. Устанавливаю...")
     subprocess.check_call([sys.executable, "-m", "pip", "install", "psycopg2-binary"])
@@ -24,25 +22,17 @@ from config import DB_URL
 # ====================================================================
 
 def get_db_connection():
-    """
-    Устанавливает соединение с базой данных Supabase.
-    Использует ссылку DB_URL из файла config.py.
-    """
+    """Устанавливает соединение с базой данных Supabase."""
     return psycopg2.connect(DB_URL)
 
 def get_or_create_user(vk_id):
-    """
-    Проверяет, есть ли пользователь в нашей базе PostgreSQL.
-    Если есть — возвращает его внутренний ID.
-    Если нет — создает новую запись и возвращает новый ID.
-    """
+    """Находит пользователя по vk_id или создает нового."""
     conn = get_db_connection()
     cur = conn.cursor()
     try:
         cur.execute("SELECT id FROM users WHERE vk_id = %s", (vk_id,))
         user = cur.fetchone()
         if not user:
-            # RETURNING id позволяет сразу получить ID только что созданной строки
             cur.execute("INSERT INTO users (vk_id) VALUES (%s) RETURNING id", (vk_id,))
             user_id = cur.fetchone()[0]
             conn.commit()
@@ -59,26 +49,27 @@ def get_or_create_user(vk_id):
 
 def smart_search_item(user_id, item_name, op_type):
     """
-    Умный поиск с опечатками (использует расширение pg_trgm в PostgreSQL).
-    Ищет слово сначала в личной базе пользователя, потом в глобальной.
-    Работает в 100 раз быстрее, чем старый поиск в Google Таблицах.
+    Умный поиск с опечатками.
+    Берет ЛИЧНЫЕ слова юзера + ГЛОБАЛЬНЫЕ слова (только те, где стоит ГАЛОЧКА / is_default = TRUE).
     """
     conn = get_db_connection()
     cur = conn.cursor()
     try:
-        # Запрос объединяет личную базу юзера и глобальную базу.
-        # Знак <-> вычисляет "расстояние" между словами (насколько они похожи).
         query = """
         SELECT type, category, subcategory, article, synonym, 
                1 - (synonym <-> %s) as similarity_score
         FROM (
+            -- 1. Личные слова пользователя
             SELECT type, category, subcategory, article, synonym 
             FROM user_dictionary 
             WHERE user_id = %s AND type = %s AND is_deleted = FALSE
+            
             UNION ALL
+            
+            -- 2. Глобальные слова (ТОЛЬКО С ГАЛОЧКОЙ)
             SELECT type, category, subcategory, article, synonym 
             FROM global_dictionary 
-            WHERE type = %s
+            WHERE type = %s AND is_default = TRUE
         ) AS combined
         ORDER BY synonym <-> %s
         LIMIT 1;
@@ -88,7 +79,6 @@ def smart_search_item(user_id, item_name, op_type):
         
         if result:
             score = result[5]
-            # Порог совпадения: 0.7 (70%). Если совпадает больше чем на 70% - берем!
             if score >= 0.7:
                 return {
                     "status": "FOUND",
@@ -103,9 +93,7 @@ def smart_search_item(user_id, item_name, op_type):
         conn.close()
 
 def save_transaction(user_id, op_type, category, subcategory, article, amount, comment, original_text, status='verified'):
-    """
-    Сохраняет транзакцию (трату или доход) в таблицу transactions.
-    """
+    """Сохраняет транзакцию (трату или доход) в Журнал операций PostgreSQL."""
     conn = get_db_connection()
     cur = conn.cursor()
     try:
@@ -126,8 +114,8 @@ def save_transaction(user_id, op_type, category, subcategory, article, amount, c
 
 def get_full_menu(user_id):
     """
-    Собирает актуальное меню категорий для ИИ (чтобы он мог угадывать категории).
-    Берет эталонный скелет из глобальной базы + личные папки пользователя.
+    Собирает актуальное меню категорий для ИИ.
+    Скелет из глобальной базы (ТОЛЬКО С ГАЛОЧКОЙ) + личные папки пользователя.
     """
     conn = get_db_connection()
     cur = conn.cursor()
@@ -136,9 +124,13 @@ def get_full_menu(user_id):
         cur.execute("""
             SELECT type, category, subcategory 
             FROM global_dictionary 
+            WHERE is_default = TRUE
+            
             UNION 
+            
             SELECT type, category, subcategory 
-            FROM user_dictionary WHERE user_id = %s AND is_deleted = FALSE
+            FROM user_dictionary 
+            WHERE user_id = %s AND is_deleted = FALSE
         """, (user_id,))
         
         for row in cur.fetchall():
@@ -157,19 +149,21 @@ def get_full_menu(user_id):
 
 def migrate_dictionary_from_gs(raw_data):
     """
-    Служебная функция. Переносит Глобальную базу из Google Sheets в PostgreSQL.
-    Использует массовую вставку (execute_values), чтобы загрузить тысячи слов за 1 секунду.
+    Переносит Глобальную базу из Google Sheets в PostgreSQL.
+    Теперь считывает колонку А (Галочка) и сохраняет её в is_default.
     """
     conn = get_db_connection()
     cur = conn.cursor()
     try:
-        # Очищаем глобальную таблицу перед новой заливкой
         cur.execute("TRUNCATE TABLE global_dictionary RESTART IDENTITY CASCADE;")
         
         data_to_insert = []
         for i, row in enumerate(raw_data):
-            if i == 0: continue # Пропускаем строку с заголовками
+            if i == 0: continue # Пропускаем заголовки
             if not row or len(row) < 5: continue
+            
+            # Читаем галочку из первой колонки (индекс 0)
+            is_default = str(row[0]).strip().lower() == 'true'
             
             op_type = str(row[1]).strip()
             cat = str(row[2]).strip()
@@ -181,25 +175,23 @@ def migrate_dictionary_from_gs(raw_data):
             if op_type not in ["Расход", "Доход"]:
                 op_type = "Расход"
                 
-            # Собираем синонимы: само название статьи + все колонки правее (синонимы)
+            # Собираем синонимы
             synonyms = [article.lower()]
             for col_idx in range(5, len(row)):
                 syn = str(row[col_idx]).strip().lower()
                 if syn and syn not in synonyms:
                     synonyms.append(syn)
                     
-            # Распаковываем синонимы (одно слово = одна строка для быстрого поиска)
             for syn in synonyms:
-                data_to_insert.append((op_type, cat, sub, article, syn))
+                # Передаем is_default (Галочку) в базу
+                data_to_insert.append((op_type, cat, sub, article, syn, is_default))
                 
-        # МАССОВАЯ ВСТАВКА (отправляем всё за 1 запрос)
         if data_to_insert:
             query = """
-                INSERT INTO global_dictionary (type, category, subcategory, article, synonym)
+                INSERT INTO global_dictionary (type, category, subcategory, article, synonym, is_default)
                 VALUES %s
                 ON CONFLICT DO NOTHING
             """
-            # execute_values автоматически разбивает массив data_to_insert и вставляет его
             execute_values(cur, query, data_to_insert)
             
         conn.commit()
