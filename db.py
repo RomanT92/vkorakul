@@ -20,15 +20,18 @@ except ImportError:
 from config import DB_URL
 
 # ====================================================================
-# ФУНКЦИИ ПОДКЛЮЧЕНИЯ И РАБОТЫ С ПОЛЬЗОВАТЕЛЯМИ
+# 1. ПОДКЛЮЧЕНИЕ И УПРАВЛЕНИЕ ПОЛЬЗОВАТЕЛЯМИ
 # ====================================================================
 
 def get_db_connection():
-    """Устанавливает соединение с базой данных Supabase."""
+    """Устанавливает соединение с базой данных Supabase (PostgreSQL)."""
     return psycopg2.connect(DB_URL)
 
 def get_or_create_user(vk_id):
-    """Находит пользователя по vk_id или создает нового."""
+    """
+    Находит пользователя по vk_id.
+    Если пользователь пишет впервые — создает запись и возвращает сгенерированный id.
+    """
     conn = get_db_connection()
     cur = conn.cursor()
     try:
@@ -46,13 +49,14 @@ def get_or_create_user(vk_id):
         conn.close()
 
 # ====================================================================
-# ОСНОВНАЯ ЛОГИКА БОТА (ПОИСК, СОХРАНЕНИЕ, ОБУЧЕНИЕ)
+# 2. ОСНОВНАЯ ЛОГИКА ТРАНЗАКЦИЙ И ПОИСКА
 # ====================================================================
 
 def smart_search_item(user_id, item_name, op_type):
     """
-    Умный поиск с опечатками.
-    Берет ЛИЧНЫЕ слова юзера + ГЛОБАЛЬНЫЕ слова (только с галочкой и не удаленные пользователем).
+    Нечеткий поиск синонима с учетом опечаток через триграммы (pg_trgm).
+    Сначала проверяет личный словарь пользователя, затем глобальный эталон (где стоит галочка).
+    Исключает скрытые пользователем категории/статьи.
     """
     conn = get_db_connection()
     cur = conn.cursor()
@@ -87,6 +91,7 @@ def smart_search_item(user_id, item_name, op_type):
         
         if result:
             score = result[5]
+            # Порог соответствия 70%
             if score >= 0.7:
                 return {
                     "status": "FOUND",
@@ -101,7 +106,7 @@ def smart_search_item(user_id, item_name, op_type):
         conn.close()
 
 def save_transaction(user_id, op_type, category, subcategory, article, amount, comment, original_text, status='verified'):
-    """Сохраняет транзакцию (трату или доход) в Журнал операций PostgreSQL."""
+    """Записывает операцию дохода или расхода в таблицу transactions."""
     conn = get_db_connection()
     cur = conn.cursor()
     try:
@@ -121,7 +126,7 @@ def save_transaction(user_id, op_type, category, subcategory, article, amount, c
         conn.close()
 
 def learn_user_word(user_id, op_type, category, subcategory, article, synonym):
-    """Запоминает новое слово в личный словарь пользователя."""
+    """Сохраняет новое слово в персональный словарь пользователя (user_dictionary)."""
     conn = get_db_connection()
     cur = conn.cursor()
     try:
@@ -143,9 +148,8 @@ def learn_user_word(user_id, op_type, category, subcategory, article, synonym):
 
 def get_full_menu(user_id):
     """
-    Собирает актуальное 3-уровневое меню:
-    menu[type][category][subcategory] = [article1, article2, ...]
-    Исключает элементы, которые пользователь скрыл (is_deleted = TRUE).
+    Строит актуальное трехуровневое дерево структуры для пользователя:
+    menu[Тип][Категория][Подкатегория] = [Статья1, Статья2, ...]
     """
     conn = get_db_connection()
     cur = conn.cursor()
@@ -187,7 +191,7 @@ def get_full_menu(user_id):
         conn.close()
 
 def get_unverified_transactions(user_id):
-    """Получает нераспознанные операции ('Завалы') из базы."""
+    """Возвращает список нераспознанных операций пользователя со статусом 'needs_review'."""
     conn = get_db_connection()
     cur = conn.cursor()
     try:
@@ -213,7 +217,10 @@ def get_unverified_transactions(user_id):
         conn.close()
 
 def resolve_unverified_item(user_id, original_item, op_type, category, subcategory):
-    """Массово подтверждает статьи из завалов и добавляет слово в словарь."""
+    """
+    Массово подтверждает операции из завалов, устанавливая категорию,
+    и одновременно вносит термин в личный словарь.
+    """
     conn = get_db_connection()
     cur = conn.cursor()
     try:
@@ -235,20 +242,20 @@ def resolve_unverified_item(user_id, original_item, op_type, category, subcatego
         conn.close()
 
 # ====================================================================
-# УПРАВЛЕНИЕ СТРУКТУРОЙ В POSTGRESQL (CRUD)
+# 3. УПРАВЛЕНИЕ СТРУКТУРОЙ (CRUD)
 # ====================================================================
 
 def db_add_subcategory(user_id, op_type, category, subcategory):
-    """Создает новую подкатегорию и служебную статью-заглушку."""
+    """Добавляет подкатегорию и служебную статью 'Другое <подкатегория>'."""
     dummy_article = f"Другое {subcategory.lower()}"
     return learn_user_word(user_id, op_type, category, subcategory, dummy_article, dummy_article)
 
 def db_add_article(user_id, op_type, category, subcategory, article):
-    """Создает новую статью в структуре пользователя."""
+    """Добавляет новую статью пользователю."""
     return learn_user_word(user_id, op_type, category, subcategory, article, article)
 
 def db_rename_category(user_id, op_type, old_cat, new_cat):
-    """Переименовывает категорию в транзакциях и личном словаре."""
+    """Переименовывает категорию в журнале и словаре пользователя."""
     conn = get_db_connection()
     cur = conn.cursor()
     try:
@@ -266,7 +273,6 @@ def db_rename_category(user_id, op_type, old_cat, new_cat):
                 WHERE user_id = %s AND type = %s AND category = %s;
             """, (new_cat, user_id, t, old_cat))
 
-            # Переносим стандартные статьи из global_dictionary в user_dictionary с новым именем
             cur.execute("""
                 INSERT INTO user_dictionary (user_id, type, category, subcategory, article, synonym, is_deleted)
                 SELECT %s, type, %s, subcategory, article, synonym, FALSE
@@ -275,7 +281,6 @@ def db_rename_category(user_id, op_type, old_cat, new_cat):
                 ON CONFLICT DO NOTHING;
             """, (user_id, new_cat, t, old_cat))
 
-            # Скрываем старые статьи из global_dictionary для этого пользователя
             cur.execute("""
                 INSERT INTO user_dictionary (user_id, type, category, subcategory, article, synonym, is_deleted)
                 SELECT %s, type, category, subcategory, article, synonym, TRUE
@@ -295,7 +300,7 @@ def db_rename_category(user_id, op_type, old_cat, new_cat):
         conn.close()
 
 def db_rename_subcategory(user_id, op_type, category, old_sub, new_sub):
-    """Переименовывает подкатегорию в транзакциях и словаре."""
+    """Переименовывает подкатегорию в журнале и словаре пользователя."""
     conn = get_db_connection()
     cur = conn.cursor()
     try:
@@ -313,7 +318,6 @@ def db_rename_subcategory(user_id, op_type, category, old_sub, new_sub):
                 WHERE user_id = %s AND type = %s AND category = %s AND subcategory = %s;
             """, (new_sub, user_id, t, category, old_sub))
 
-            # Переносим глобальные статьи
             cur.execute("""
                 INSERT INTO user_dictionary (user_id, type, category, subcategory, article, synonym, is_deleted)
                 SELECT %s, type, category, %s, article, synonym, FALSE
@@ -331,7 +335,6 @@ def db_rename_subcategory(user_id, op_type, category, old_sub, new_sub):
                 DO UPDATE SET is_deleted = TRUE;
             """, (user_id, t, category, old_sub))
 
-            # Обновляем заглушку "Другое ..."
             old_dummy = f"Другое {old_sub.lower()}"
             new_dummy = f"Другое {new_sub.lower()}"
             cur.execute("""
@@ -350,7 +353,7 @@ def db_rename_subcategory(user_id, op_type, category, old_sub, new_sub):
         conn.close()
 
 def db_rename_article(user_id, op_type, category, subcategory, old_art, new_art):
-    """Переименовывает статью в транзакциях и словаре."""
+    """Переименовывает статью в журнале и словаре пользователя."""
     conn = get_db_connection()
     cur = conn.cursor()
     try:
@@ -393,7 +396,7 @@ def db_rename_article(user_id, op_type, category, subcategory, old_art, new_art)
         conn.close()
 
 def db_delete_entity(user_id, level, op_type, category, subcategory='', article=''):
-    """Удаляет (скрывает) категорию, подкатегорию или статью для пользователя."""
+    """Удаляет категорию, подкатегорию или статью исключительно для текущего пользователя."""
     conn = get_db_connection()
     cur = conn.cursor()
     try:
@@ -452,7 +455,7 @@ def db_delete_entity(user_id, level, op_type, category, subcategory='', article=
         conn.close()
 
 def db_move_entity(user_id, level, op_type, category, subcategory, article, new_parent, new_cat=None):
-    """Переносит подкатегорию в другую категорию или статью в другую подкатегорию."""
+    """Переносит подкатегорию или статью в новую родительскую папку."""
     conn = get_db_connection()
     cur = conn.cursor()
     try:
@@ -493,11 +496,11 @@ def db_move_entity(user_id, level, op_type, category, subcategory, article, new_
         conn.close()
 
 # ====================================================================
-# МАССОВЫЙ ИНТЕЛЛЕКТУАЛЬНЫЙ ИМПОРТ ФАЙЛОВ
+# 4. МАССОВЫЙ ИНТЕЛЛЕКТУАЛЬНЫЙ ИМПОРТ ФАЙЛОВ
 # ====================================================================
 
 def import_parsed_operations(user_id, operations):
-    """Интеллектуальный импорт сотен/тысяч операций в PostgreSQL за секунды."""
+    """Массовая запись операций из выписок в PostgreSQL за один запрос."""
     conn = get_db_connection()
     cur = conn.cursor()
     try:
@@ -598,11 +601,14 @@ def import_parsed_operations(user_id, operations):
         conn.close()
 
 # ====================================================================
-# МИГРАЦИЯ ДАННЫХ ИЗ GOOGLE SHEETS
+# 5. МИГРАЦИЯ И СБОР НОВЫХ СЛОВ (ДЛЯ АДМИНИСТРАТОРА)
 # ====================================================================
 
 def migrate_dictionary_from_gs(raw_data):
-    """Переносит Глобальную базу из Google Sheets в PostgreSQL с учетом галочки."""
+    """
+    Импортирует Глобальную базу из Google Sheets в PostgreSQL.
+    Считывает колонку А (Галочка) и сохраняет её в поле is_default.
+    """
     conn = get_db_connection()
     cur = conn.cursor()
     try:
@@ -646,6 +652,39 @@ def migrate_dictionary_from_gs(raw_data):
     except Exception as e:
         print(f"Ошибка миграции: {e}")
         return 0
+    finally:
+        cur.close()
+        conn.close()
+
+def get_new_unharvested_words():
+    """
+    Находит все уникальные слова, которые пользователи добавили в свои личные словари,
+    но которых ещё нет в Глобальной базе.
+    Возвращает список строк для Google Таблицы: [FALSE, Тип, Категория, Подкатегория, Статья, Синоним]
+    """
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        query = """
+            SELECT DISTINCT u.type, u.category, u.subcategory, u.article, u.synonym
+            FROM user_dictionary u
+            WHERE u.is_deleted = FALSE
+              AND NOT EXISTS (
+                  SELECT 1 FROM global_dictionary g
+                  WHERE LOWER(g.synonym) = LOWER(u.synonym)
+                    AND g.type = u.type
+              )
+            ORDER BY u.type, u.category, u.subcategory, u.article;
+        """
+        cur.execute(query)
+        rows = cur.fetchall()
+        
+        harvested_rows = []
+        for r in rows:
+            # Первое значение False — пустой чекбокс для администратора
+            harvested_rows.append([False, r[0], r[1], r[2], r[3], r[4]])
+            
+        return harvested_rows
     finally:
         cur.close()
         conn.close()
