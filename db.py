@@ -44,7 +44,7 @@ def get_or_create_user(vk_id):
         conn.close()
 
 # ====================================================================
-# ОСНОВНАЯ ЛОГИКА БОТА (ПОИСК И СОХРАНЕНИЕ)
+# ОСНОВНАЯ ЛОГИКА БОТА (ПОИСК, СОХРАНЕНИЕ, ОБУЧЕНИЕ)
 # ====================================================================
 
 def smart_search_item(user_id, item_name, op_type):
@@ -112,6 +112,30 @@ def save_transaction(user_id, op_type, category, subcategory, article, amount, c
         cur.close()
         conn.close()
 
+def learn_user_word(user_id, op_type, category, subcategory, article, synonym):
+    """
+    Запоминает новое слово в личный словарь конкретного пользователя.
+    Теперь юзер сможет писать это слово, и бот сразу его поймет.
+    """
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        query = """
+        INSERT INTO user_dictionary (user_id, type, category, subcategory, article, synonym)
+        VALUES (%s, %s, %s, %s, %s, %s)
+        ON CONFLICT (user_id, type, category, subcategory, article, synonym) 
+        DO UPDATE SET is_deleted = FALSE;
+        """
+        cur.execute(query, (user_id, op_type, category, subcategory, article, synonym.lower().strip()))
+        conn.commit()
+        return True
+    except Exception as e:
+        print(f"Ошибка запоминания слова: {e}")
+        return False
+    finally:
+        cur.close()
+        conn.close()
+
 def get_full_menu(user_id):
     """
     Собирает актуальное меню категорий для ИИ.
@@ -143,15 +167,65 @@ def get_full_menu(user_id):
         cur.close()
         conn.close()
 
+def get_unverified_transactions(user_id):
+    """Получает список нераспознанных операций ('Завалы') из базы данных."""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            SELECT id, type, original_text, amount, comment 
+            FROM transactions 
+            WHERE user_id = %s AND status = 'needs_review'
+            ORDER BY id DESC;
+        """, (user_id,))
+        rows = cur.fetchall()
+        result = []
+        for r in rows:
+            result.append({
+                "id": r[0],
+                "type": r[1],
+                "original_item": r[2],
+                "amount": float(r[3]),
+                "comment": r[4] or ""
+            })
+        return result
+    finally:
+        cur.close()
+        conn.close()
+
+def resolve_unverified_item(user_id, original_item, op_type, category, subcategory):
+    """
+    Массово обновляет статус операций из завалов на 'verified'
+    и одновременно добавляет слово в словарь пользователя.
+    """
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        # 1. Обновляем транзакции
+        cur.execute("""
+            UPDATE transactions 
+            SET category = %s, subcategory = %s, article = %s, status = 'verified'
+            WHERE user_id = %s AND original_text = %s AND status = 'needs_review';
+        """, (category, subcategory, original_item, user_id, original_item))
+        updated_count = cur.rowcount
+        conn.commit()
+
+        # 2. Обучаем личный словарь пользователя
+        learn_user_word(user_id, op_type, category, subcategory, original_item, original_item)
+        return updated_count
+    except Exception as e:
+        print(f"Ошибка разрешения завалов: {e}")
+        return 0
+    finally:
+        cur.close()
+        conn.close()
+
 # ====================================================================
 # МИГРАЦИЯ ДАННЫХ ИЗ GOOGLE SHEETS
 # ====================================================================
 
 def migrate_dictionary_from_gs(raw_data):
-    """
-    Переносит Глобальную базу из Google Sheets в PostgreSQL.
-    Теперь считывает колонку А (Галочка) и сохраняет её в is_default.
-    """
+    """Переносит Глобальную базу из Google Sheets в PostgreSQL с учетом галочки."""
     conn = get_db_connection()
     cur = conn.cursor()
     try:
@@ -159,12 +233,10 @@ def migrate_dictionary_from_gs(raw_data):
         
         data_to_insert = []
         for i, row in enumerate(raw_data):
-            if i == 0: continue # Пропускаем заголовки
+            if i == 0: continue
             if not row or len(row) < 5: continue
             
-            # Читаем галочку из первой колонки (индекс 0)
             is_default = str(row[0]).strip().lower() == 'true'
-            
             op_type = str(row[1]).strip()
             cat = str(row[2]).strip()
             sub = str(row[3]).strip()
@@ -175,7 +247,6 @@ def migrate_dictionary_from_gs(raw_data):
             if op_type not in ["Расход", "Доход"]:
                 op_type = "Расход"
                 
-            # Собираем синонимы
             synonyms = [article.lower()]
             for col_idx in range(5, len(row)):
                 syn = str(row[col_idx]).strip().lower()
@@ -183,7 +254,6 @@ def migrate_dictionary_from_gs(raw_data):
                     synonyms.append(syn)
                     
             for syn in synonyms:
-                # Передаем is_default (Галочку) в базу
                 data_to_insert.append((op_type, cat, sub, article, syn, is_default))
                 
         if data_to_insert:
