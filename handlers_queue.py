@@ -5,7 +5,7 @@ from keyboards import (
     get_cancel_keyboard,
     get_queue_review_keyboard,
     get_numbered_keyboard,
-    type_keyboard  # <-- Добавили клавиатуру выбора типа
+    type_keyboard
 )
 from services import (
     send_vk_message,
@@ -17,7 +17,7 @@ from db import (
     save_transaction,
     learn_user_word,
     smart_search_item,
-    get_full_menu,  # <-- Берем меню из базы
+    get_full_menu,
     get_unverified_transactions,
     resolve_unverified_item
 )
@@ -25,7 +25,6 @@ from db import (
 BATCH_SIZE = 7
 
 def _show_batch_items(user_id, batch, total_left):
-    """Выводит пакет статей на проверку пользователю"""
     msg = f"📋 Пакет уникальных статей (осталось разобрать: {total_left + len(batch)}):\n\n"
     for i, item in enumerate(batch):
         msg += f"{i+1}. {item['original_item']} ({item['count']} операций)\n"
@@ -34,7 +33,6 @@ def _show_batch_items(user_id, batch, total_left):
     send_vk_message(user_id, msg, get_queue_review_keyboard(len(batch)))
 
 def _process_next_batch(user_id, user_states):
-    """Берет следующую пачку из очереди завалов и прогоняет через ИИ"""
     state_data = user_states[user_id]
     queue = state_data.get("queue", [])
     
@@ -70,7 +68,7 @@ def handle_queue_and_learning(user_id, user_text, user_text_lower, state, user_s
     internal_uid = get_or_create_user(user_id)
 
     # =========================================================
-    # 1. ЗАПУСК РАЗБОРА ЗАВАЛОВ (Из базы PostgreSQL)
+    # 1. ЗАПУСК РАЗБОРА ЗАВАЛОВ
     # =========================================================
     if user_text_lower in ["импорт статистики прошлого", "разобрать завалы", "разобрать"]:
         send_vk_message(user_id, "⏳ Проверяю нераспознанные операции в базе...")
@@ -98,7 +96,7 @@ def handle_queue_and_learning(user_id, user_text, user_text_lower, state, user_s
             combined_menu = {}
             for t in ["Расход", "Доход"]:
                 for c, s in full_menu.get(t, {}).items():
-                    combined_menu[c] = s
+                    combined_menu[c] = list(s.keys()) if isinstance(s, dict) else s
 
             user_states[user_id] = {
                 "state": "queue_process",
@@ -154,7 +152,7 @@ def handle_queue_and_learning(user_id, user_text, user_text_lower, state, user_s
         return True
 
     # =========================================================
-    # 3. ОБУЧЕНИЕ ОДИНОЧНОЙ ОПЕРАЦИИ (Подтверждение "Да/Нет")
+    # 3. ОДИНОЧНОЕ ОБУЧЕНИЕ: ПОДТВЕРЖДЕНИЕ "ДА / НЕТ"
     # =========================================================
     if state == "confirm_category":
         if user_text_lower in ["да", "верно", "ага", "давай", "ок", "yes", "+"]:
@@ -168,7 +166,6 @@ def handle_queue_and_learning(user_id, user_text, user_text_lower, state, user_s
 
             send_vk_message(user_id, "⏳ Запоминаю и записываю в базу...")
             
-            # 1. Сохраняем операцию в PostgreSQL
             save_transaction(
                 user_id=internal_uid,
                 op_type=op_type,
@@ -181,7 +178,6 @@ def handle_queue_and_learning(user_id, user_text, user_text_lower, state, user_s
                 status='verified'
             )
             
-            # 2. Обучаем личный словарь пользователя
             learn_user_word(
                 user_id=internal_uid,
                 op_type=op_type,
@@ -191,7 +187,7 @@ def handle_queue_and_learning(user_id, user_text, user_text_lower, state, user_s
                 synonym=item_name
             )
 
-            send_vk_message(user_id, "✅ Успешно записано и выучено!", get_main_keyboard())
+            send_vk_message(user_id, f"✅ Успешно выучено и записано!\n📂 {cat} -> {sub}", get_main_keyboard())
             del user_states[user_id]
             return True
 
@@ -199,9 +195,8 @@ def handle_queue_and_learning(user_id, user_text, user_text_lower, state, user_s
             if user_states[user_id]["attempts"] < MAX_ATTEMPTS:
                 user_states[user_id]["state"] = "provide_context"
                 user_states[user_id]["context_history"] = ""
-                send_vk_message(user_id, f"Понял, ошибся 😔 (Попытка {user_states[user_id]['attempts']} из {MAX_ATTEMPTS})\nПодскажи другими словами, что это за операция?", get_cancel_keyboard())
+                send_vk_message(user_id, f"Понял, ошибся 😔 (Попытка {user_states[user_id]['attempts']} из {MAX_ATTEMPTS})\nПодскажи другими словами, к чему относится «{user_states[user_id]['payload']['item']}»?", get_cancel_keyboard())
             else:
-                # Переход к ручному выбору (начинаем с типа)
                 user_states[user_id]["state"] = "tx_manual_type"
                 send_vk_message(user_id, "🤷‍♂️ Я сдаюсь. Давайте выберем вручную!\n\nЭто Расход или Доход?", type_keyboard())
             return True
@@ -216,45 +211,48 @@ def handle_queue_and_learning(user_id, user_text, user_text_lower, state, user_s
         send_vk_message(user_id, "🧠 Думаю...")
         user_states[user_id]["attempts"] += 1
         payload = user_states[user_id]["payload"]
-        op_type = payload.get("type", "Расход")
-
+        
+        # Если в подсказке явно указан тип
         if "доход" in user_text_lower or "приход" in user_text_lower:
-            op_type = "Доход"
             payload["type"] = "Доход"
         elif "расход" in user_text_lower or "трата" in user_text_lower:
-            op_type = "Расход"
             payload["type"] = "Расход"
 
-        # Ищем подсказку в PostgreSQL
+        op_type = payload.get("type", "Расход")
+
+        # 1. Проверяем: вдруг сама подсказка уже есть в словаре базы
         check_res = smart_search_item(internal_uid, user_text, op_type)
         if check_res.get("status") == "FOUND":
             user_states[user_id]["state"] = "confirm_category"
             user_states[user_id]["ai_cat"] = check_res.get("category")
             user_states[user_id]["ai_sub"] = check_res.get("subcategory")
-            send_vk_message(user_id, f"Ага! Слово '{user_text}' мне знакомо.\n📂 {check_res.get('category')} -> {check_res.get('subcategory')}\n\nВсё верно?", get_yes_no_keyboard())
+            send_vk_message(user_id, f"Ага! «{user_text}» — это знакомая категория:\n📂 {check_res.get('category')} -> {check_res.get('subcategory')}\n\nПривязать «{payload['item']}» сюда?", get_yes_no_keyboard())
             return True
 
+        # 2. Если в базе нет, просим ИИ подобрать по всему меню с подсказкой
         menu_full = get_full_menu(internal_uid)
-        menu = menu_full.get(op_type, {})
-        menu_str = "\n".join([f"{c}: {', '.join(subs)}" for c, subs in menu.items()])
+        type_menu = menu_full.get(op_type, {})
+        menu_str = f"[{op_type}]\n" + "\n".join([f"{c}: {', '.join(subs.keys() if isinstance(subs, dict) else subs)}" for c, subs in type_menu.items()])
 
         ai_cat, ai_sub = categorize_with_ai(payload["item"], menu_str, context=user_text)
-        if ai_cat in menu and ai_sub in menu[ai_cat]:
+        
+        valid_cat = ai_cat in type_menu and ai_sub in (type_menu[ai_cat].keys() if isinstance(type_menu[ai_cat], dict) else type_menu[ai_cat])
+
+        if valid_cat and ai_sub != "Требует проверки":
             user_states[user_id]["state"] = "confirm_category"
             user_states[user_id]["ai_cat"] = ai_cat
             user_states[user_id]["ai_sub"] = ai_sub
-            send_vk_message(user_id, f"Ага! С учетом подсказки, думаю это:\n📂 {ai_cat} -> {ai_sub}\n\nВсё верно?", get_yes_no_keyboard())
+            send_vk_message(user_id, f"Ага! С учетом подсказки, думаю «{payload['item']}» относится к:\n📂 {ai_cat} -> {ai_sub}\n\nВсё верно?", get_yes_no_keyboard())
         else:
             if user_states[user_id]["attempts"] < MAX_ATTEMPTS:
-                send_vk_message(user_id, f"Всё равно не могу сообразить 🤔 (Попытка {user_states[user_id]['attempts']} из {MAX_ATTEMPTS})\nПопробуй объяснить чуть подробнее?", get_cancel_keyboard())
+                send_vk_message(user_id, f"Всё равно не могу сообразить 🤔 (Попытка {user_states[user_id]['attempts']} из {MAX_ATTEMPTS})\nПопробуй назвать точную категорию из твоего меню?", get_cancel_keyboard())
             else:
-                # Переход к ручному выбору
                 user_states[user_id]["state"] = "tx_manual_type"
                 send_vk_message(user_id, "🤷‍♂️ Я сдаюсь. Давайте выберем вручную!\n\nЭто Расход или Доход?", type_keyboard())
         return True
 
     # =========================================================
-    # 5. ИНТЕРАКТИВНЫЙ РУЧНОЙ ВЫБОР (ШАГ 1: ТИП)
+    # 5. ИНТЕРАКТИВНЫЙ РУЧНОЙ ВЫБОР (ТИП -> КАТЕГОРИЯ -> ПОДКАТЕГОРИЯ)
     # =========================================================
     if state == "tx_manual_type":
         if "доход" in user_text_lower or "расход" in user_text_lower:
@@ -283,9 +281,6 @@ def handle_queue_and_learning(user_id, user_text, user_text_lower, state, user_s
             send_vk_message(user_id, "Пожалуйста, выберите 'Расход' или 'Доход' кнопками внизу.", type_keyboard())
             return True
 
-    # =========================================================
-    # 6. ИНТЕРАКТИВНЫЙ РУЧНОЙ ВЫБОР (ШАГ 2: КАТЕГОРИЯ)
-    # =========================================================
     if state == "tx_manual_cat":
         if user_text.isdigit():
             idx = int(user_text) - 1
@@ -294,7 +289,8 @@ def handle_queue_and_learning(user_id, user_text, user_text_lower, state, user_s
                 sel_cat = cats[idx]
                 user_states[user_id]["sel_cat"] = sel_cat
                 type_menu = user_states[user_id].get("type_menu", {})
-                subs = sorted(list(type_menu.get(sel_cat, [])))
+                raw_subs = type_menu.get(sel_cat, [])
+                subs = sorted(list(raw_subs.keys() if isinstance(raw_subs, dict) else raw_subs))
                 
                 if not subs:
                     subs = ["Другое"]
@@ -308,9 +304,6 @@ def handle_queue_and_learning(user_id, user_text, user_text_lower, state, user_s
                 send_vk_message(user_id, msg, get_numbered_keyboard(len(subs)))
             return True
 
-    # =========================================================
-    # 7. ИНТЕРАКТИВНЫЙ РУЧНОЙ ВЫБОР (ШАГ 3: ПОДКАТЕГОРИЯ И СОХРАНЕНИЕ)
-    # =========================================================
     if state == "tx_manual_sub":
         if user_text.isdigit():
             idx = int(user_text) - 1
@@ -326,7 +319,6 @@ def handle_queue_and_learning(user_id, user_text, user_text_lower, state, user_s
 
                 send_vk_message(user_id, "⏳ Обучаюсь и записываю в базу...")
                 
-                # 1. Записываем операцию в PostgreSQL
                 save_transaction(
                     user_id=internal_uid,
                     op_type=op_type,
@@ -339,7 +331,6 @@ def handle_queue_and_learning(user_id, user_text, user_text_lower, state, user_s
                     status='verified'
                 )
                 
-                # 2. Обучаем личный словарь пользователя в PostgreSQL
                 learn_user_word(
                     user_id=internal_uid,
                     op_type=op_type,
@@ -349,7 +340,7 @@ def handle_queue_and_learning(user_id, user_text, user_text_lower, state, user_s
                     synonym=item_name
                 )
 
-                send_vk_message(user_id, f"✅ Успешно! Я запомнил, что '{item_name}' — это {sel_cat} -> {sel_sub}.", get_main_keyboard())
+                send_vk_message(user_id, f"✅ Успешно! Я запомнил, что «{item_name}» — это {sel_cat} -> {sel_sub}.", get_main_keyboard())
                 del user_states[user_id]
             return True
 
