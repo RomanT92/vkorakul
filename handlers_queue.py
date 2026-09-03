@@ -4,7 +4,8 @@ from keyboards import (
     get_yes_no_keyboard,
     get_cancel_keyboard,
     get_queue_review_keyboard,
-    get_numbered_keyboard
+    get_numbered_keyboard,
+    type_keyboard  # <-- Добавили клавиатуру выбора типа
 )
 from services import (
     send_vk_message,
@@ -16,6 +17,7 @@ from db import (
     save_transaction,
     learn_user_word,
     smart_search_item,
+    get_full_menu,  # <-- Берем меню из базы
     get_unverified_transactions,
     resolve_unverified_item
 )
@@ -92,7 +94,6 @@ def handle_queue_and_learning(user_id, user_text, user_text_lower, state, user_s
             
             unverified_grouped = list(unique_items.values())
             
-            from db import get_full_menu
             full_menu = get_full_menu(internal_uid)
             combined_menu = {}
             for t in ["Расход", "Доход"]:
@@ -180,7 +181,7 @@ def handle_queue_and_learning(user_id, user_text, user_text_lower, state, user_s
                 status='verified'
             )
             
-            # 2. Учим новое слово в Личный словарь пользователя
+            # 2. Обучаем личный словарь пользователя
             learn_user_word(
                 user_id=internal_uid,
                 op_type=op_type,
@@ -200,15 +201,9 @@ def handle_queue_and_learning(user_id, user_text, user_text_lower, state, user_s
                 user_states[user_id]["context_history"] = ""
                 send_vk_message(user_id, f"Понял, ошибся 😔 (Попытка {user_states[user_id]['attempts']} из {MAX_ATTEMPTS})\nПодскажи другими словами, что это за операция?", get_cancel_keyboard())
             else:
-                # Интерактивный выбор вручную
-                user_states[user_id]["state"] = "tx_manual_cat"
-                menu = user_states[user_id]["menu"].get(user_states[user_id]["payload"].get("type", "Расход"), {})
-                cats = list(menu.keys())
-                cats.sort()
-                msg = "🤷‍♂️ Я сдаюсь. Давайте выберем вручную.\nВыберите КАТЕГОРИЮ:\n\n"
-                for i, c in enumerate(cats):
-                    msg += f"{i+1}. {c}\n"
-                send_vk_message(user_id, msg, get_numbered_keyboard(len(cats)))
+                # Переход к ручному выбору (начинаем с типа)
+                user_states[user_id]["state"] = "tx_manual_type"
+                send_vk_message(user_id, "🤷‍♂️ Я сдаюсь. Давайте выберем вручную!\n\nЭто Расход или Доход?", type_keyboard())
             return True
         else:
             send_vk_message(user_id, "Пожалуйста, ответь 'Да' или 'Нет'.", get_yes_no_keyboard())
@@ -230,7 +225,7 @@ def handle_queue_and_learning(user_id, user_text, user_text_lower, state, user_s
             op_type = "Расход"
             payload["type"] = "Расход"
 
-        # Ищем подсказку в PostgreSQL (быстрый поиск)
+        # Ищем подсказку в PostgreSQL
         check_res = smart_search_item(internal_uid, user_text, op_type)
         if check_res.get("status") == "FOUND":
             user_states[user_id]["state"] = "confirm_category"
@@ -239,7 +234,8 @@ def handle_queue_and_learning(user_id, user_text, user_text_lower, state, user_s
             send_vk_message(user_id, f"Ага! Слово '{user_text}' мне знакомо.\n📂 {check_res.get('category')} -> {check_res.get('subcategory')}\n\nВсё верно?", get_yes_no_keyboard())
             return True
 
-        menu = user_states[user_id]["menu"].get(op_type, {})
+        menu_full = get_full_menu(internal_uid)
+        menu = menu_full.get(op_type, {})
         menu_str = "\n".join([f"{c}: {', '.join(subs)}" for c, subs in menu.items()])
 
         ai_cat, ai_sub = categorize_with_ai(payload["item"], menu_str, context=user_text)
@@ -252,38 +248,69 @@ def handle_queue_and_learning(user_id, user_text, user_text_lower, state, user_s
             if user_states[user_id]["attempts"] < MAX_ATTEMPTS:
                 send_vk_message(user_id, f"Всё равно не могу сообразить 🤔 (Попытка {user_states[user_id]['attempts']} из {MAX_ATTEMPTS})\nПопробуй объяснить чуть подробнее?", get_cancel_keyboard())
             else:
-                user_states[user_id]["state"] = "tx_manual_cat"
-                cats = list(menu.keys())
-                cats.sort()
-                msg = "🤷‍♂️ Я сдаюсь. Давайте выберем вручную.\nВыберите КАТЕГОРИЮ:\n\n"
-                for i, c in enumerate(cats):
-                    msg += f"{i+1}. {c}\n"
-                send_vk_message(user_id, msg, get_numbered_keyboard(len(cats)))
+                # Переход к ручному выбору
+                user_states[user_id]["state"] = "tx_manual_type"
+                send_vk_message(user_id, "🤷‍♂️ Я сдаюсь. Давайте выберем вручную!\n\nЭто Расход или Доход?", type_keyboard())
         return True
 
     # =========================================================
-    # 5. РУЧНОЙ ВЫБОР (ЕСЛИ ИИ СДАЛСЯ)
+    # 5. ИНТЕРАКТИВНЫЙ РУЧНОЙ ВЫБОР (ШАГ 1: ТИП)
+    # =========================================================
+    if state == "tx_manual_type":
+        if "доход" in user_text_lower or "расход" in user_text_lower:
+            op_type = "Доход" if "доход" in user_text_lower else "Расход"
+            user_states[user_id]["payload"]["type"] = op_type
+            
+            menu_full = get_full_menu(internal_uid)
+            type_menu = menu_full.get(op_type, {})
+            cats = sorted(list(type_menu.keys()))
+            
+            if not cats:
+                send_vk_message(user_id, f"Категорий типа '{op_type}' пока нет.", get_main_keyboard())
+                del user_states[user_id]
+                return True
+                
+            user_states[user_id]["type_menu"] = type_menu
+            user_states[user_id]["cats"] = cats
+            user_states[user_id]["state"] = "tx_manual_cat"
+            
+            msg = f"Выберите КАТЕГОРИЮ ({op_type}):\n\n"
+            for i, c in enumerate(cats):
+                msg += f"{i+1}. {c}\n"
+            send_vk_message(user_id, msg, get_numbered_keyboard(len(cats)))
+            return True
+        else:
+            send_vk_message(user_id, "Пожалуйста, выберите 'Расход' или 'Доход' кнопками внизу.", type_keyboard())
+            return True
+
+    # =========================================================
+    # 6. ИНТЕРАКТИВНЫЙ РУЧНОЙ ВЫБОР (ШАГ 2: КАТЕГОРИЯ)
     # =========================================================
     if state == "tx_manual_cat":
         if user_text.isdigit():
             idx = int(user_text) - 1
-            op_type = user_states[user_id]["payload"].get("type", "Расход")
-            menu = user_states[user_id]["menu"].get(op_type, {})
-            cats = list(menu.keys())
-            cats.sort()
+            cats = user_states[user_id].get("cats", [])
             if 0 <= idx < len(cats):
                 sel_cat = cats[idx]
                 user_states[user_id]["sel_cat"] = sel_cat
-                subs = menu[sel_cat]
-                subs.sort()
+                type_menu = user_states[user_id].get("type_menu", {})
+                subs = sorted(list(type_menu.get(sel_cat, [])))
+                
+                if not subs:
+                    subs = ["Другое"]
+                    
                 user_states[user_id]["subs"] = subs
                 user_states[user_id]["state"] = "tx_manual_sub"
-                msg = f"Выберите ПОДКАТЕГОРИЮ в '{sel_cat}':\n\n"
+                
+                msg = f"Категория: {sel_cat}\nВыберите ПОДКАТЕГОРИЮ:\n\n"
                 for i, s in enumerate(subs):
                     msg += f"{i+1}. {s}\n"
                 send_vk_message(user_id, msg, get_numbered_keyboard(len(subs)))
             return True
 
+    # =========================================================
+    # 7. ИНТЕРАКТИВНЫЙ РУЧНОЙ ВЫБОР (ШАГ 3: ПОДКАТЕГОРИЯ И СОХРАНЕНИЕ)
+    # =========================================================
     if state == "tx_manual_sub":
         if user_text.isdigit():
             idx = int(user_text) - 1
@@ -295,15 +322,15 @@ def handle_queue_and_learning(user_id, user_text, user_text_lower, state, user_s
                 amount = float(payload.get("amount", 0))
                 op_type = payload.get("type", "Расход")
                 comment = payload.get("comment", "")
-                cat = user_states[user_id]["sel_cat"]
+                sel_cat = user_states[user_id]["sel_cat"]
 
                 send_vk_message(user_id, "⏳ Обучаюсь и записываю в базу...")
                 
-                # 1. Записываем операцию
+                # 1. Записываем операцию в PostgreSQL
                 save_transaction(
                     user_id=internal_uid,
                     op_type=op_type,
-                    category=cat,
+                    category=sel_cat,
                     subcategory=sel_sub,
                     article=item_name,
                     amount=amount,
@@ -312,17 +339,17 @@ def handle_queue_and_learning(user_id, user_text, user_text_lower, state, user_s
                     status='verified'
                 )
                 
-                # 2. Обучаем личный словарь
+                # 2. Обучаем личный словарь пользователя в PostgreSQL
                 learn_user_word(
                     user_id=internal_uid,
                     op_type=op_type,
-                    category=cat,
+                    category=sel_cat,
                     subcategory=sel_sub,
                     article=item_name,
                     synonym=item_name
                 )
 
-                send_vk_message(user_id, f"✅ Успешно! Я запомнил, что '{item_name}' — это {cat} -> {sel_sub}.", get_main_keyboard())
+                send_vk_message(user_id, f"✅ Успешно! Я запомнил, что '{item_name}' — это {sel_cat} -> {sel_sub}.", get_main_keyboard())
                 del user_states[user_id]
             return True
 
