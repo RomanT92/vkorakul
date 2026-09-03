@@ -2,6 +2,8 @@
 import os
 import sys
 import subprocess
+from datetime import datetime, timezone
+import difflib
 
 # ====================================================================
 # АВТОУСТАНОВКА БИБЛИОТЕК
@@ -59,14 +61,12 @@ def smart_search_item(user_id, item_name, op_type):
         SELECT type, category, subcategory, article, synonym, 
                1 - (synonym <-> %s) as similarity_score
         FROM (
-            -- 1. Личные слова пользователя
             SELECT type, category, subcategory, article, synonym 
             FROM user_dictionary 
             WHERE user_id = %s AND type = %s AND is_deleted = FALSE
             
             UNION ALL
             
-            -- 2. Глобальные слова (ТОЛЬКО С ГАЛОЧКОЙ)
             SELECT type, category, subcategory, article, synonym 
             FROM global_dictionary 
             WHERE type = %s AND is_default = TRUE
@@ -113,10 +113,7 @@ def save_transaction(user_id, op_type, category, subcategory, article, amount, c
         conn.close()
 
 def learn_user_word(user_id, op_type, category, subcategory, article, synonym):
-    """
-    Запоминает новое слово в личный словарь конкретного пользователя.
-    Теперь юзер сможет писать это слово, и бот сразу его поймет.
-    """
+    """Запоминает новое слово в личный словарь пользователя."""
     conn = get_db_connection()
     cur = conn.cursor()
     try:
@@ -137,10 +134,7 @@ def learn_user_word(user_id, op_type, category, subcategory, article, synonym):
         conn.close()
 
 def get_full_menu(user_id):
-    """
-    Собирает актуальное меню категорий для ИИ.
-    Скелет из глобальной базы (ТОЛЬКО С ГАЛОЧКОЙ) + личные папки пользователя.
-    """
+    """Собирает меню категорий (Глобальные с галочкой + Личные)."""
     conn = get_db_connection()
     cur = conn.cursor()
     menu = {"Расход": {}, "Доход": {}}
@@ -168,7 +162,7 @@ def get_full_menu(user_id):
         conn.close()
 
 def get_unverified_transactions(user_id):
-    """Получает список нераспознанных операций ('Завалы') из базы данных."""
+    """Получает нераспознанные операции ('Завалы') из базы."""
     conn = get_db_connection()
     cur = conn.cursor()
     try:
@@ -194,14 +188,10 @@ def get_unverified_transactions(user_id):
         conn.close()
 
 def resolve_unverified_item(user_id, original_item, op_type, category, subcategory):
-    """
-    Массово обновляет статус операций из завалов на 'verified'
-    и одновременно добавляет слово в словарь пользователя.
-    """
+    """Массово подтверждает статьи из завалов и добавляет слово в словарь."""
     conn = get_db_connection()
     cur = conn.cursor()
     try:
-        # 1. Обновляем транзакции
         cur.execute("""
             UPDATE transactions 
             SET category = %s, subcategory = %s, article = %s, status = 'verified'
@@ -210,12 +200,125 @@ def resolve_unverified_item(user_id, original_item, op_type, category, subcatego
         updated_count = cur.rowcount
         conn.commit()
 
-        # 2. Обучаем личный словарь пользователя
         learn_user_word(user_id, op_type, category, subcategory, original_item, original_item)
         return updated_count
     except Exception as e:
         print(f"Ошибка разрешения завалов: {e}")
         return 0
+    finally:
+        cur.close()
+        conn.close()
+
+# ====================================================================
+# МАССОВЫЙ ИНТЕЛЛЕКТУАЛЬНЫЙ ИМПОРТ ФАЙЛОВ
+# ====================================================================
+
+def import_parsed_operations(user_id, operations):
+    """
+    Интеллектуальный импорт сотен/тысяч операций в PostgreSQL за секунды.
+    Использует словарь юзера и глобальную базу для мгновенного сопоставления.
+    """
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        # 1. Загружаем активный словарь юзера в память
+        cur.execute("""
+            SELECT type, category, subcategory, article, synonym 
+            FROM user_dictionary 
+            WHERE user_id = %s AND is_deleted = FALSE
+            UNION ALL
+            SELECT type, category, subcategory, article, synonym 
+            FROM global_dictionary 
+            WHERE is_default = TRUE;
+        """, (user_id,))
+        
+        dict_rows = cur.fetchall()
+        exact_dict = {}
+        synonyms_by_type = {"Расход": [], "Доход": []}
+        
+        for r in dict_rows:
+            t, c, s, a, syn = r[0], r[1], r[2], r[3], r[4].lower().strip()
+            exact_dict[(t, syn)] = (c, s, a)
+            if t in synonyms_by_type:
+                synonyms_by_type[t].append(syn)
+
+        now = datetime.now(timezone.utc)
+        records_to_insert = []
+        verified_count = 0
+        needs_review_count = 0
+
+        # Попытка использовать pandas для парсинга дат
+        try:
+            import pandas as pd
+            has_pd = True
+        except ImportError:
+            has_pd = False
+
+        for op in operations:
+            if len(op) < 4: continue
+            raw_date, raw_type, amount, desc = op[0], op[1], float(op[2]), str(op[3]).strip()
+            if not desc or amount <= 0: continue
+
+            op_type = "Доход" if ("доход" in raw_type.lower() or "приход" in raw_type.lower()) else "Расход"
+            desc_lower = desc.lower()
+
+            # Преобразование даты
+            op_date = now
+            comment = ""
+            if has_pd:
+                parsed_ts = pd.to_datetime(raw_date, errors='coerce')
+                if pd.notnull(parsed_ts):
+                    op_date = parsed_ts.to_pydatetime()
+                else:
+                    op_date = now
+                    comment = f"Файл: {raw_date}"
+            else:
+                op_date = now
+                comment = f"Файл: {raw_date}"
+
+            # 1. Точное сопоставление
+            matched = exact_dict.get((op_type, desc_lower))
+
+            # 2. Нечеткое сопоставление с опечатками
+            if not matched:
+                avail = synonyms_by_type.get(op_type, [])
+                matches = difflib.get_close_matches(desc_lower, avail, n=1, cutoff=0.75)
+                if matches:
+                    matched = exact_dict.get((op_type, matches[0]))
+
+            if matched:
+                cat, sub, art = matched
+                status = 'verified'
+                verified_count += 1
+            else:
+                cat = 'Разное'
+                sub = 'Требует проверки'
+                art = desc
+                status = 'needs_review'
+                needs_review_count += 1
+
+            records_to_insert.append((
+                user_id, op_date, op_type, cat, sub, art, amount, comment, desc, status
+            ))
+
+        # Массовая вставка всех строк за 1 запрос
+        if records_to_insert:
+            query = """
+                INSERT INTO transactions 
+                (user_id, operation_date, type, category, subcategory, article, amount, comment, original_text, status)
+                VALUES %s
+            """
+            execute_values(cur, query, records_to_insert)
+            conn.commit()
+
+        return {
+            "total": len(records_to_insert),
+            "verified": verified_count,
+            "needs_review": needs_review_count
+        }
+    except Exception as e:
+        print(f"Ошибка массового импорта: {e}")
+        return {"total": 0, "verified": 0, "needs_review": 0}
     finally:
         cur.close()
         conn.close()
