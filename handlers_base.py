@@ -1,25 +1,54 @@
 # -*- coding: utf-8 -*-
 from keyboards import get_main_keyboard, get_crud_keyboard
 from services import send_vk_message, send_to_google_sheets
-from db import migrate_dictionary_from_gs
+from db import migrate_dictionary_from_gs, get_new_unharvested_words
 
 def handle_base_commands(user_id, user_text_lower, state, user_states):
-    
-    # --- СЕКРЕТНАЯ КОМАНДА ДЛЯ ПЕРЕНОСА БАЗЫ В POSTGRESQL ---
+    """
+    Обработчик базовой навигации, команд отмены и служебных команд администратора.
+    """
+    # =========================================================
+    # СЛУЖЕБНЫЕ КОМАНДЫ АДМИНИСТРАТОРА
+    # =========================================================
     if user_text_lower == "миграция базы":
         send_vk_message(user_id, "⏳ Начинаю скачивание Глобальной базы из Google Sheets... Это займет пару секунд.")
-        # Просим Гугл Таблицу отдать нам весь словарь
         res = send_to_google_sheets({"action": "export_global_dict"})
         if res.get("status") == "SUCCESS":
             send_vk_message(user_id, "✅ Данные получены. Распаковываю синонимы и загружаю в PostgreSQL...")
-            # Запускаем функцию миграции из db.py
             count = migrate_dictionary_from_gs(res.get("data", []))
             send_vk_message(user_id, f"🎉 Миграция успешно завершена! В базу загружено {count} синонимов.", get_main_keyboard())
         else:
             send_vk_message(user_id, "❌ Ошибка при скачивании базы.")
         return True
-    # ---------------------------------------------------------
 
+    if user_text_lower == "сбор новых слов":
+        send_vk_message(user_id, "⏳ Сканирую базы пользователей на наличие новых слов...")
+        new_words = get_new_unharvested_words()
+        
+        if not new_words:
+            send_vk_message(user_id, "🎉 Новых слов не найдено. Все пользовательские слова уже есть в Глобальной базе!", get_main_keyboard())
+            return True
+            
+        send_vk_message(user_id, f"Найдено {len(new_words)} новых слов. Выгружаю в Google Таблицу...")
+        res = send_to_google_sheets({
+            "action": "append_harvested_words",
+            "rows": new_words
+        })
+        
+        if res.get("status") == "SUCCESS":
+            send_vk_message(
+                user_id,
+                f"✅ Успешно выгружено {len(new_words)} строк в лист 'Глобальная База Синонимов'!\n\n"
+                f"Зайдите в таблицу, отметьте нужные галочками и отправьте команду «миграция базы».",
+                get_main_keyboard()
+            )
+        else:
+            send_vk_message(user_id, f"❌ Ошибка выгрузки в Google Таблицу: {res.get('message')}", get_main_keyboard())
+        return True
+
+    # =========================================================
+    # ПОЛЬЗОВАТЕЛЬСКАЯ НАВИГАЦИЯ
+    # =========================================================
     if user_text_lower in ["помощь", "начать", "start", "отмена", "назад"]:
         if user_text_lower in ["помощь", "начать", "start"]:
             if user_id in user_states:
