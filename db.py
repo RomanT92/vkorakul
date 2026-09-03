@@ -606,8 +606,9 @@ def import_parsed_operations(user_id, operations):
 
 def migrate_dictionary_from_gs(raw_data):
     """
-    Импортирует Глобальную базу из Google Sheets в PostgreSQL.
-    Считывает колонку А (Галочка) и сохраняет её в поле is_default.
+    Умный парсер миграции с авто-детектором сдвига колонок и галочек.
+    Корректно обрабатывает и строки с галочками [TRUE, Расход, ...],
+    и строки без галочек [Расход, Категория, ...].
     """
     conn = get_db_connection()
     cur = conn.cursor()
@@ -616,25 +617,58 @@ def migrate_dictionary_from_gs(raw_data):
         
         data_to_insert = []
         for i, row in enumerate(raw_data):
-            if i == 0: continue
-            if not row or len(row) < 5: continue
+            if i == 0: continue # Пропускаем шапку
+            if not row or len(row) < 3: continue
             
-            is_default = str(row[0]).strip().lower() == 'true'
-            op_type = str(row[1]).strip()
-            cat = str(row[2]).strip()
-            sub = str(row[3]).strip()
-            article = str(row[4]).strip()
+            # Приводим строку к чистому списку непустых ячеек
+            clean_row = [str(cell).strip() for cell in row if str(cell).strip() != ""]
+            if len(clean_row) < 3: continue
             
-            if not op_type or not cat or not sub or not article:
+            first_val = clean_row[0].lower()
+            
+            # --- СЛУЧАЙ А: Первая колонка - это чекбокс (true/false) ---
+            if first_val in ['true', 'false']:
+                is_default = (first_val == 'true')
+                clean_row = clean_row[1:] # Сдвигаем вправо
+            else:
+                # Если явной галочки нет, по умолчанию включаем статью в активные
+                is_default = True
+
+            if len(clean_row) < 3: continue
+
+            # --- ОПРЕДЕЛЯЕМ ТИП (Расход / Доход) ---
+            second_val = clean_row[0]
+            if second_val in ["Расход", "Доход", "Приход"]:
+                op_type = "Доход" if second_val in ["Доход", "Приход"] else "Расход"
+                clean_row = clean_row[1:]
+            else:
+                op_type = "Расход" # По умолчанию Расход
+
+            if len(clean_row) < 2: continue
+
+            # --- РАСКЛАДЫВАЕМ ИЕРАРХИЮ ---
+            if len(clean_row) >= 3:
+                cat = clean_row[0]
+                sub = clean_row[1]
+                article = clean_row[2]
+                synonyms_raw = clean_row[3:]
+            elif len(clean_row) == 2:
+                cat = clean_row[0]
+                sub = clean_row[1]
+                article = f"Другое {sub.lower()}"
+                synonyms_raw = []
+            else:
                 continue
-            if op_type not in ["Расход", "Доход"]:
-                op_type = "Расход"
-                
+
+            # Собираем синонимы: само название статьи + подкатегория + все остальные колонки
             synonyms = [article.lower()]
-            for col_idx in range(5, len(row)):
-                syn = str(row[col_idx]).strip().lower()
-                if syn and syn not in synonyms:
-                    synonyms.append(syn)
+            if sub.lower() not in synonyms:
+                synonyms.append(sub.lower())
+                
+            for syn in synonyms_raw:
+                s_clean = syn.lower().strip()
+                if s_clean and s_clean not in synonyms:
+                    synonyms.append(s_clean)
                     
             for syn in synonyms:
                 data_to_insert.append((op_type, cat, sub, article, syn, is_default))
@@ -681,7 +715,6 @@ def get_new_unharvested_words():
         
         harvested_rows = []
         for r in rows:
-            # Первое значение False — пустой чекбокс для администратора
             harvested_rows.append([False, r[0], r[1], r[2], r[3], r[4]])
             
         return harvested_rows
