@@ -52,7 +52,7 @@ def get_or_create_user(vk_id):
 def smart_search_item(user_id, item_name, op_type):
     """
     Умный поиск с опечатками.
-    Берет ЛИЧНЫЕ слова юзера + ГЛОБАЛЬНЫЕ слова (только те, где стоит ГАЛОЧКА / is_default = TRUE).
+    Берет ЛИЧНЫЕ слова юзера + ГЛОБАЛЬНЫЕ слова (только с галочкой и не удаленные пользователем).
     """
     conn = get_db_connection()
     cur = conn.cursor()
@@ -67,14 +67,22 @@ def smart_search_item(user_id, item_name, op_type):
             
             UNION ALL
             
-            SELECT type, category, subcategory, article, synonym 
-            FROM global_dictionary 
-            WHERE type = %s AND is_default = TRUE
+            SELECT g.type, g.category, g.subcategory, g.article, g.synonym 
+            FROM global_dictionary g
+            LEFT JOIN user_dictionary u ON (
+                u.user_id = %s 
+                AND u.type = g.type 
+                AND u.category = g.category 
+                AND u.subcategory = g.subcategory 
+                AND u.article = g.article 
+                AND u.is_deleted = TRUE
+            )
+            WHERE g.type = %s AND g.is_default = TRUE AND u.id IS NULL
         ) AS combined
         ORDER BY synonym <-> %s
         LIMIT 1;
         """
-        cur.execute(query, (item_name, user_id, op_type, op_type, item_name))
+        cur.execute(query, (item_name, user_id, op_type, user_id, op_type, item_name))
         result = cur.fetchone()
         
         if result:
@@ -118,8 +126,8 @@ def learn_user_word(user_id, op_type, category, subcategory, article, synonym):
     cur = conn.cursor()
     try:
         query = """
-        INSERT INTO user_dictionary (user_id, type, category, subcategory, article, synonym)
-        VALUES (%s, %s, %s, %s, %s, %s)
+        INSERT INTO user_dictionary (user_id, type, category, subcategory, article, synonym, is_deleted)
+        VALUES (%s, %s, %s, %s, %s, %s, FALSE)
         ON CONFLICT (user_id, type, category, subcategory, article, synonym) 
         DO UPDATE SET is_deleted = FALSE;
         """
@@ -134,28 +142,45 @@ def learn_user_word(user_id, op_type, category, subcategory, article, synonym):
         conn.close()
 
 def get_full_menu(user_id):
-    """Собирает меню категорий (Глобальные с галочкой + Личные)."""
+    """
+    Собирает актуальное 3-уровневое меню:
+    menu[type][category][subcategory] = [article1, article2, ...]
+    Исключает элементы, которые пользователь скрыл (is_deleted = TRUE).
+    """
     conn = get_db_connection()
     cur = conn.cursor()
     menu = {"Расход": {}, "Доход": {}}
     try:
-        cur.execute("""
-            SELECT type, category, subcategory 
-            FROM global_dictionary 
-            WHERE is_default = TRUE
+        query = """
+            SELECT g.type, g.category, g.subcategory, g.article
+            FROM global_dictionary g
+            LEFT JOIN user_dictionary u ON (
+                u.user_id = %s 
+                AND u.type = g.type 
+                AND u.category = g.category 
+                AND u.subcategory = g.subcategory 
+                AND u.article = g.article 
+                AND u.is_deleted = TRUE
+            )
+            WHERE g.is_default = TRUE AND u.id IS NULL
             
-            UNION 
+            UNION
             
-            SELECT type, category, subcategory 
-            FROM user_dictionary 
+            SELECT type, category, subcategory, article
+            FROM user_dictionary
             WHERE user_id = %s AND is_deleted = FALSE
-        """, (user_id,))
-        
+        """
+        cur.execute(query, (user_id, user_id))
         for row in cur.fetchall():
-            t, c, s = row[0], row[1], row[2]
-            if t not in menu: menu[t] = {}
-            if c not in menu[t]: menu[t][c] = []
-            if s not in menu[t][c]: menu[t][c].append(s)
+            t, c, s, a = row[0], row[1], row[2], row[3]
+            if t not in menu:
+                menu[t] = {}
+            if c not in menu[t]:
+                menu[t][c] = {}
+            if s not in menu[t][c]:
+                menu[t][c][s] = []
+            if a and a not in menu[t][c][s]:
+                menu[t][c][s].append(a)
         return menu
     finally:
         cur.close()
@@ -210,18 +235,272 @@ def resolve_unverified_item(user_id, original_item, op_type, category, subcatego
         conn.close()
 
 # ====================================================================
+# УПРАВЛЕНИЕ СТРУКТУРОЙ В POSTGRESQL (CRUD)
+# ====================================================================
+
+def db_add_subcategory(user_id, op_type, category, subcategory):
+    """Создает новую подкатегорию и служебную статью-заглушку."""
+    dummy_article = f"Другое {subcategory.lower()}"
+    return learn_user_word(user_id, op_type, category, subcategory, dummy_article, dummy_article)
+
+def db_add_article(user_id, op_type, category, subcategory, article):
+    """Создает новую статью в структуре пользователя."""
+    return learn_user_word(user_id, op_type, category, subcategory, article, article)
+
+def db_rename_category(user_id, op_type, old_cat, new_cat):
+    """Переименовывает категорию в транзакциях и личном словаре."""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        types_to_update = ["Расход", "Доход"] if not op_type else [op_type]
+        for t in types_to_update:
+            cur.execute("""
+                UPDATE transactions 
+                SET category = %s 
+                WHERE user_id = %s AND type = %s AND category = %s;
+            """, (new_cat, user_id, t, old_cat))
+
+            cur.execute("""
+                UPDATE user_dictionary 
+                SET category = %s 
+                WHERE user_id = %s AND type = %s AND category = %s;
+            """, (new_cat, user_id, t, old_cat))
+
+            # Переносим стандартные статьи из global_dictionary в user_dictionary с новым именем
+            cur.execute("""
+                INSERT INTO user_dictionary (user_id, type, category, subcategory, article, synonym, is_deleted)
+                SELECT %s, type, %s, subcategory, article, synonym, FALSE
+                FROM global_dictionary
+                WHERE is_default = TRUE AND type = %s AND category = %s
+                ON CONFLICT DO NOTHING;
+            """, (user_id, new_cat, t, old_cat))
+
+            # Скрываем старые статьи из global_dictionary для этого пользователя
+            cur.execute("""
+                INSERT INTO user_dictionary (user_id, type, category, subcategory, article, synonym, is_deleted)
+                SELECT %s, type, category, subcategory, article, synonym, TRUE
+                FROM global_dictionary
+                WHERE is_default = TRUE AND type = %s AND category = %s
+                ON CONFLICT (user_id, type, category, subcategory, article, synonym)
+                DO UPDATE SET is_deleted = TRUE;
+            """, (user_id, t, old_cat))
+
+        conn.commit()
+        return True
+    except Exception as e:
+        print(f"Ошибка переименования категории: {e}")
+        return False
+    finally:
+        cur.close()
+        conn.close()
+
+def db_rename_subcategory(user_id, op_type, category, old_sub, new_sub):
+    """Переименовывает подкатегорию в транзакциях и словаре."""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        types_to_update = ["Расход", "Доход"] if not op_type else [op_type]
+        for t in types_to_update:
+            cur.execute("""
+                UPDATE transactions 
+                SET subcategory = %s 
+                WHERE user_id = %s AND type = %s AND category = %s AND subcategory = %s;
+            """, (new_sub, user_id, t, category, old_sub))
+
+            cur.execute("""
+                UPDATE user_dictionary 
+                SET subcategory = %s 
+                WHERE user_id = %s AND type = %s AND category = %s AND subcategory = %s;
+            """, (new_sub, user_id, t, category, old_sub))
+
+            # Переносим глобальные статьи
+            cur.execute("""
+                INSERT INTO user_dictionary (user_id, type, category, subcategory, article, synonym, is_deleted)
+                SELECT %s, type, category, %s, article, synonym, FALSE
+                FROM global_dictionary
+                WHERE is_default = TRUE AND type = %s AND category = %s AND subcategory = %s
+                ON CONFLICT DO NOTHING;
+            """, (user_id, new_sub, t, category, old_sub))
+
+            cur.execute("""
+                INSERT INTO user_dictionary (user_id, type, category, subcategory, article, synonym, is_deleted)
+                SELECT %s, type, category, subcategory, article, synonym, TRUE
+                FROM global_dictionary
+                WHERE is_default = TRUE AND type = %s AND category = %s AND subcategory = %s
+                ON CONFLICT (user_id, type, category, subcategory, article, synonym)
+                DO UPDATE SET is_deleted = TRUE;
+            """, (user_id, t, category, old_sub))
+
+            # Обновляем заглушку "Другое ..."
+            old_dummy = f"Другое {old_sub.lower()}"
+            new_dummy = f"Другое {new_sub.lower()}"
+            cur.execute("""
+                UPDATE user_dictionary 
+                SET article = %s, synonym = %s 
+                WHERE user_id = %s AND article = %s;
+            """, (new_dummy, new_dummy.lower(), user_id, old_dummy))
+
+        conn.commit()
+        return True
+    except Exception as e:
+        print(f"Ошибка переименования подкатегории: {e}")
+        return False
+    finally:
+        cur.close()
+        conn.close()
+
+def db_rename_article(user_id, op_type, category, subcategory, old_art, new_art):
+    """Переименовывает статью в транзакциях и словаре."""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            UPDATE transactions 
+            SET article = %s 
+            WHERE user_id = %s AND type = %s AND category = %s AND subcategory = %s AND article = %s;
+        """, (new_art, user_id, op_type, category, subcategory, old_art))
+
+        cur.execute("""
+            UPDATE user_dictionary 
+            SET article = %s, synonym = %s 
+            WHERE user_id = %s AND type = %s AND category = %s AND subcategory = %s AND article = %s;
+        """, (new_art, new_art.lower().strip(), user_id, op_type, category, subcategory, old_art))
+
+        cur.execute("""
+            INSERT INTO user_dictionary (user_id, type, category, subcategory, article, synonym, is_deleted)
+            SELECT %s, type, category, subcategory, %s, %s, FALSE
+            FROM global_dictionary
+            WHERE is_default = TRUE AND type = %s AND category = %s AND subcategory = %s AND article = %s
+            ON CONFLICT DO NOTHING;
+        """, (user_id, new_art, new_art.lower().strip(), op_type, category, subcategory, old_art))
+
+        cur.execute("""
+            INSERT INTO user_dictionary (user_id, type, category, subcategory, article, synonym, is_deleted)
+            SELECT %s, type, category, subcategory, article, synonym, TRUE
+            FROM global_dictionary
+            WHERE is_default = TRUE AND type = %s AND category = %s AND subcategory = %s AND article = %s
+            ON CONFLICT (user_id, type, category, subcategory, article, synonym)
+            DO UPDATE SET is_deleted = TRUE;
+        """, (user_id, op_type, category, subcategory, old_art))
+
+        conn.commit()
+        return True
+    except Exception as e:
+        print(f"Ошибка переименования статьи: {e}")
+        return False
+    finally:
+        cur.close()
+        conn.close()
+
+def db_delete_entity(user_id, level, op_type, category, subcategory='', article=''):
+    """Удаляет (скрывает) категорию, подкатегорию или статью для пользователя."""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        if level == "category":
+            cur.execute("""
+                UPDATE user_dictionary SET is_deleted = TRUE 
+                WHERE user_id = %s AND type = %s AND category = %s;
+            """, (user_id, op_type, category))
+
+            cur.execute("""
+                INSERT INTO user_dictionary (user_id, type, category, subcategory, article, synonym, is_deleted)
+                SELECT %s, type, category, subcategory, article, synonym, TRUE
+                FROM global_dictionary
+                WHERE is_default = TRUE AND type = %s AND category = %s
+                ON CONFLICT (user_id, type, category, subcategory, article, synonym)
+                DO UPDATE SET is_deleted = TRUE;
+            """, (user_id, op_type, category))
+
+        elif level == "subcategory":
+            cur.execute("""
+                UPDATE user_dictionary SET is_deleted = TRUE 
+                WHERE user_id = %s AND type = %s AND category = %s AND subcategory = %s;
+            """, (user_id, op_type, category, subcategory))
+
+            cur.execute("""
+                INSERT INTO user_dictionary (user_id, type, category, subcategory, article, synonym, is_deleted)
+                SELECT %s, type, category, subcategory, article, synonym, TRUE
+                FROM global_dictionary
+                WHERE is_default = TRUE AND type = %s AND category = %s AND subcategory = %s
+                ON CONFLICT (user_id, type, category, subcategory, article, synonym)
+                DO UPDATE SET is_deleted = TRUE;
+            """, (user_id, op_type, category, subcategory))
+
+        elif level == "article":
+            cur.execute("""
+                UPDATE user_dictionary SET is_deleted = TRUE 
+                WHERE user_id = %s AND type = %s AND category = %s AND subcategory = %s AND article = %s;
+            """, (user_id, op_type, category, subcategory, article))
+
+            cur.execute("""
+                INSERT INTO user_dictionary (user_id, type, category, subcategory, article, synonym, is_deleted)
+                SELECT %s, type, category, subcategory, article, synonym, TRUE
+                FROM global_dictionary
+                WHERE is_default = TRUE AND type = %s AND category = %s AND subcategory = %s AND article = %s
+                ON CONFLICT (user_id, type, category, subcategory, article, synonym)
+                DO UPDATE SET is_deleted = TRUE;
+            """, (user_id, op_type, category, subcategory, article))
+
+        conn.commit()
+        return True
+    except Exception as e:
+        print(f"Ошибка удаления сущности: {e}")
+        return False
+    finally:
+        cur.close()
+        conn.close()
+
+def db_move_entity(user_id, level, op_type, category, subcategory, article, new_parent, new_cat=None):
+    """Переносит подкатегорию в другую категорию или статью в другую подкатегорию."""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        if level == "subcategory":
+            cur.execute("""
+                UPDATE transactions 
+                SET category = %s 
+                WHERE user_id = %s AND type = %s AND category = %s AND subcategory = %s;
+            """, (new_parent, user_id, op_type, category, subcategory))
+
+            cur.execute("""
+                UPDATE user_dictionary 
+                SET category = %s 
+                WHERE user_id = %s AND type = %s AND category = %s AND subcategory = %s;
+            """, (new_parent, user_id, op_type, category, subcategory))
+
+        elif level == "article":
+            target_cat = new_cat if new_cat else category
+            cur.execute("""
+                UPDATE transactions 
+                SET category = %s, subcategory = %s 
+                WHERE user_id = %s AND type = %s AND category = %s AND subcategory = %s AND article = %s;
+            """, (target_cat, new_parent, user_id, op_type, category, subcategory, article))
+
+            cur.execute("""
+                UPDATE user_dictionary 
+                SET category = %s, subcategory = %s 
+                WHERE user_id = %s AND type = %s AND category = %s AND subcategory = %s AND article = %s;
+            """, (target_cat, new_parent, user_id, op_type, category, subcategory, article))
+
+        conn.commit()
+        return True
+    except Exception as e:
+        print(f"Ошибка перемещения: {e}")
+        return False
+    finally:
+        cur.close()
+        conn.close()
+
+# ====================================================================
 # МАССОВЫЙ ИНТЕЛЛЕКТУАЛЬНЫЙ ИМПОРТ ФАЙЛОВ
 # ====================================================================
 
 def import_parsed_operations(user_id, operations):
-    """
-    Интеллектуальный импорт сотен/тысяч операций в PostgreSQL за секунды.
-    Использует словарь юзера и глобальную базу для мгновенного сопоставления.
-    """
+    """Интеллектуальный импорт сотен/тысяч операций в PostgreSQL за секунды."""
     conn = get_db_connection()
     cur = conn.cursor()
     try:
-        # 1. Загружаем активный словарь юзера в память
         cur.execute("""
             SELECT type, category, subcategory, article, synonym 
             FROM user_dictionary 
@@ -247,7 +526,6 @@ def import_parsed_operations(user_id, operations):
         verified_count = 0
         needs_review_count = 0
 
-        # Попытка использовать pandas для парсинга дат
         try:
             import pandas as pd
             has_pd = True
@@ -262,7 +540,6 @@ def import_parsed_operations(user_id, operations):
             op_type = "Доход" if ("доход" in raw_type.lower() or "приход" in raw_type.lower()) else "Расход"
             desc_lower = desc.lower()
 
-            # Преобразование даты
             op_date = now
             comment = ""
             if has_pd:
@@ -276,10 +553,8 @@ def import_parsed_operations(user_id, operations):
                 op_date = now
                 comment = f"Файл: {raw_date}"
 
-            # 1. Точное сопоставление
             matched = exact_dict.get((op_type, desc_lower))
 
-            # 2. Нечеткое сопоставление с опечатками
             if not matched:
                 avail = synonyms_by_type.get(op_type, [])
                 matches = difflib.get_close_matches(desc_lower, avail, n=1, cutoff=0.75)
@@ -301,7 +576,6 @@ def import_parsed_operations(user_id, operations):
                 user_id, op_date, op_type, cat, sub, art, amount, comment, desc, status
             ))
 
-        # Массовая вставка всех строк за 1 запрос
         if records_to_insert:
             query = """
                 INSERT INTO transactions 
