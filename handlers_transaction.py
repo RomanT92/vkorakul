@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 import json
+import re
 import difflib
 from keyboards import (
     get_main_keyboard,
@@ -43,6 +44,14 @@ def find_entity_in_menu(menu, target_name):
             best_match = matches[0]
             results = [ent for ent in all_entities if ent["name"] == best_match]
     return results
+
+def clean_fallback_item(user_text):
+    """Вырезает из текста пользователя сумму и служебные слова, оставляя реальное название."""
+    text = re.sub(r'\d+([.,]\d+)?', '', user_text).strip()
+    stop_words = ["руб", "рублей", "р", "к", "k", "приход", "доход", "расход", "трата", "купил", "оплатил"]
+    words = [w for w in text.split() if w.lower() not in stop_words]
+    clean = " ".join(words).strip()
+    return clean if clean else "Трата"
 
 def handle_transaction(user_id, user_text, state, user_states):
     if state != "":
@@ -155,31 +164,38 @@ def handle_transaction(user_id, user_text, state, user_states):
             parsed_data.pop("category", None)
             parsed_data.pop("subcategory", None)
 
+            # Определение типа (Доход/Расход)
             income_triggers = ["приход", "доход", "зарплата", "аванс", "премия", "подарили", "поступление"]
             expense_triggers = ["расход", "трата", "купил", "оплатил"]
 
             if any(word in user_text_lower for word in income_triggers) and not any(word in user_text_lower for word in expense_triggers):
-                parsed_data["type"] = "Доход"
+                op_type = "Доход"
             elif any(word in user_text_lower for word in expense_triggers):
-                parsed_data["type"] = "Расход"
+                op_type = "Расход"
             else:
-                parsed_data["type"] = parsed_data.get("type", "Расход")
+                op_type = parsed_data.get("type", "Расход")
+                if op_type not in ["Расход", "Доход"]:
+                    op_type = "Расход"
 
+            parsed_data["type"] = op_type
+
+            # ЗАЩИТА: Не затираем исходное слово пользователя на "Поступление"
             current_item = parsed_data.get("item", "").strip()
-            if not current_item or current_item.lower() in ["приход", "доход", "расход", "трата"]:
-                current_item = "Поступление" if parsed_data["type"] in ["Доход", "Приход"] else "Трата"
-            parsed_data["item"] = current_item
+            if not current_item or current_item.lower() in ["приход", "доход", "расход", "трата", "поступление"]:
+                # Достаем реальное слово пользователя из текста
+                current_item = clean_fallback_item(user_text)
 
+            parsed_data["item"] = current_item
             amount = float(parsed_data.get("amount", 0))
             comment = parsed_data.get("comment", "")
 
             send_vk_message(user_id, f"⚡ Ищу '{current_item}' в базе...")
-            search_res = smart_search_item(internal_uid, current_item, parsed_data["type"])
+            search_res = smart_search_item(internal_uid, current_item, op_type)
 
             if search_res["status"] == "FOUND":
                 save_transaction(
                     user_id=internal_uid,
-                    op_type=parsed_data["type"],
+                    op_type=op_type,
                     category=search_res["category"],
                     subcategory=search_res["subcategory"],
                     article=search_res["article"],
@@ -191,12 +207,15 @@ def handle_transaction(user_id, user_text, state, user_states):
                 send_vk_message(user_id, f"✅ Успешно записано!\n📂 {search_res['category']} -> {search_res['subcategory']}", get_main_keyboard())
             else:
                 menu_full = get_full_menu(internal_uid)
-                type_menu = menu_full.get(parsed_data["type"], {})
-                menu_str = "\n".join([f"{c}: {', '.join(subs.keys() if isinstance(subs, dict) else subs)}" for c, subs in type_menu.items()])
+                type_menu = menu_full.get(op_type, {})
+                menu_str = f"[{op_type}]\n" + "\n".join([f"{c}: {', '.join(subs.keys() if isinstance(subs, dict) else subs)}" for c, subs in type_menu.items()])
 
                 ai_cat, ai_sub = categorize_with_ai(current_item, menu_str)
 
-                if ai_cat in type_menu and ai_sub in (type_menu[ai_cat].keys() if isinstance(type_menu[ai_cat], dict) else type_menu[ai_cat]):
+                # Проверяем, нашел ли ИИ реальную категорию (не заглушку "Требует проверки")
+                valid_cat = ai_cat in type_menu and ai_sub in (type_menu[ai_cat].keys() if isinstance(type_menu[ai_cat], dict) else type_menu[ai_cat])
+                
+                if valid_cat and ai_sub != "Требует проверки":
                     user_states[user_id] = {
                         "state": "confirm_category",
                         "payload": parsed_data,
@@ -206,7 +225,7 @@ def handle_transaction(user_id, user_text, state, user_states):
                         "ai_sub": ai_sub,
                         "attempts": 1
                     }
-                    send_vk_message(user_id, f"🤖 Думаю, '{current_item}' относится к:\n📂 {ai_cat} -> {ai_sub}\n\nВсё верно?", get_yes_no_keyboard())
+                    send_vk_message(user_id, f"🤖 Думаю, '{current_item}' ({op_type}) относится к:\n📂 {ai_cat} -> {ai_sub}\n\nВсё верно?", get_yes_no_keyboard())
                 else:
                     user_states[user_id] = {
                         "state": "provide_context",
@@ -215,7 +234,7 @@ def handle_transaction(user_id, user_text, state, user_states):
                         "menu_str": menu_str,
                         "attempts": 1
                     }
-                    send_vk_message(user_id, f"🤔 Я пока не знаю статью '{current_item}'.\nПодскажи буквально в двух словах, что это за трата/доход?", get_cancel_keyboard())
+                    send_vk_message(user_id, f"🤔 Я пока не знаю статью '{current_item}'.\nПодскажи в двух словах, к чему это относится (или напиши правильную категорию):", get_cancel_keyboard())
 
         except json.JSONDecodeError:
             send_vk_message(user_id, "❌ Ошибка: ИИ вернул неправильный формат.", get_main_keyboard())
