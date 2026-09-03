@@ -1,41 +1,55 @@
 # -*- coding: utf-8 -*-
 from keyboards import (
-    get_main_keyboard, get_yes_no_keyboard, get_cancel_keyboard, get_queue_review_keyboard, get_numbered_keyboard
+    get_main_keyboard,
+    get_yes_no_keyboard,
+    get_cancel_keyboard,
+    get_queue_review_keyboard,
+    get_numbered_keyboard
 )
 from services import (
-    send_vk_message, send_to_google_sheets, 
-    categorize_with_ai, categorize_batch_with_ai
+    send_vk_message,
+    categorize_with_ai,
+    categorize_batch_with_ai
+)
+from db import (
+    get_or_create_user,
+    save_transaction,
+    learn_user_word,
+    smart_search_item,
+    get_unverified_transactions,
+    resolve_unverified_item
 )
 
 BATCH_SIZE = 7
 
 def _show_batch_items(user_id, batch, total_left):
+    """Выводит пакет статей на проверку пользователю"""
     msg = f"📋 Пакет уникальных статей (осталось разобрать: {total_left + len(batch)}):\n\n"
     for i, item in enumerate(batch):
         msg += f"{i+1}. {item['original_item']} ({item['count']} операций)\n"
         msg += f"   📂 {item.get('category', '?')} -> {item.get('subcategory', '?')}\n\n"
     msg += "Если всё верно, жмите «Сохранить пакет».\nЕсли есть ошибка — отправьте НОМЕР для исправления."
-    
     send_vk_message(user_id, msg, get_queue_review_keyboard(len(batch)))
 
 def _process_next_batch(user_id, user_states):
+    """Берет следующую пачку из очереди завалов и прогоняет через ИИ"""
     state_data = user_states[user_id]
     queue = state_data.get("queue", [])
     
     if not queue:
-        send_vk_message(user_id, "🎉 Ура! Импорт завершен! Журнал чист.", get_main_keyboard())
+        send_vk_message(user_id, "🎉 Ура! Завалы разобраны! Журнал чист.", get_main_keyboard())
         del user_states[user_id]
         return
-        
+
     batch = queue[:BATCH_SIZE]
     state_data["queue"] = queue[BATCH_SIZE:]
     
     menu = state_data["menu"]
     menu_str = "\n".join([f"{c}: {', '.join(subs)}" for c, subs in menu.items()])
-    
+
     send_vk_message(user_id, f"🧠 ИИ анализирует {len(batch)} новых статей...", get_cancel_keyboard())
     ai_results = categorize_batch_with_ai(batch, menu_str)
-    
+
     for item in batch:
         cat, sub = "Разное", "Требует проверки"
         for res in ai_results:
@@ -45,59 +59,75 @@ def _process_next_batch(user_id, user_states):
                 break
         item["category"] = cat
         item["subcategory"] = sub
-        
+
     state_data["current_batch"] = batch
     state_data["state"] = "queue_batch_review"
     _show_batch_items(user_id, batch, len(state_data["queue"]))
 
 def handle_queue_and_learning(user_id, user_text, user_text_lower, state, user_states, MAX_ATTEMPTS):
+    internal_uid = get_or_create_user(user_id)
 
+    # =========================================================
+    # 1. ЗАПУСК РАЗБОРА ЗАВАЛОВ (Из базы PostgreSQL)
+    # =========================================================
     if user_text_lower in ["импорт статистики прошлого", "разобрать завалы", "разобрать"]:
-        send_vk_message(user_id, "⏳ Запрашиваю список нераспознанных операций из Таблицы...")
-        res = send_to_google_sheets({"action": "run_import_and_get_unverified"})
+        send_vk_message(user_id, "⏳ Проверяю нераспознанные операции в базе...")
+        unverified_raw = get_unverified_transactions(internal_uid)
         
-        if res.get("status") == "SUCCESS":
-            unverified_raw = res.get("data", [])
-            if not unverified_raw:
-                send_vk_message(user_id, "🎉 Всё чисто! Нераспознанных операций для импорта нет.", get_main_keyboard())
-            else:
-                unique_items = {}
-                for row in unverified_raw:
-                    key = f"{row['type']}_{row['original_item']}"
-                    if key not in unique_items:
-                        unique_items[key] = {
-                            "type": row["type"], "original_item": row["original_item"],
-                            "count": 1, "amount": row["amount"]
-                        }
-                    else:
-                        unique_items[key]["count"] += 1
-                        
-                unverified_grouped = list(unique_items.values())
-                user_states[user_id] = {"state": "queue_process", "queue": unverified_grouped, "menu": res.get("available_menu", {})}
-                _process_next_batch(user_id, user_states)
+        if not unverified_raw:
+            send_vk_message(user_id, "🎉 Всё чисто! Нераспознанных операций нет.", get_main_keyboard())
         else:
-            send_vk_message(user_id, f"❌ Ошибка: {res.get('message')}", get_main_keyboard())
+            unique_items = {}
+            for row in unverified_raw:
+                key = f"{row['type']}_{row['original_item']}"
+                if key not in unique_items:
+                    unique_items[key] = {
+                        "type": row["type"],
+                        "original_item": row["original_item"],
+                        "count": 1,
+                        "amount": row["amount"]
+                    }
+                else:
+                    unique_items[key]["count"] += 1
+            
+            unverified_grouped = list(unique_items.values())
+            
+            from db import get_full_menu
+            full_menu = get_full_menu(internal_uid)
+            combined_menu = {}
+            for t in ["Расход", "Доход"]:
+                for c, s in full_menu.get(t, {}).items():
+                    combined_menu[c] = s
+
+            user_states[user_id] = {
+                "state": "queue_process",
+                "queue": unverified_grouped,
+                "menu": combined_menu
+            }
+            _process_next_batch(user_id, user_states)
         return True
 
+    # =========================================================
+    # 2. РЕВЬЮ ПАКЕТА ЗАВАЛОВ
+    # =========================================================
     if state == "queue_batch_review":
         if user_text_lower == "сохранить пакет":
             batch = user_states[user_id]["current_batch"]
-            send_vk_message(user_id, f"⏳ Массово обновляю таблицу и обучаю систему...", get_cancel_keyboard())
+            send_vk_message(user_id, "⏳ Сохраняю и обучаю систему...", get_cancel_keyboard())
             
-            success_count = 0
             for item in batch:
-                payload = {
-                    "action": "resolve_unverified", "original_item": item["original_item"],
-                    "type": item["type"], "category": item["category"], "subcategory": item["subcategory"]
-                }
-                res = send_to_google_sheets(payload)
-                if res.get("status") == "SUCCESS":
-                    success_count += 1
-                    
-            send_vk_message(user_id, f"✅ Успешно сохранено {success_count} из {len(batch)} статей!")
+                resolve_unverified_item(
+                    user_id=internal_uid,
+                    original_item=item["original_item"],
+                    op_type=item["type"],
+                    category=item["category"],
+                    subcategory=item["subcategory"]
+                )
+            
+            send_vk_message(user_id, f"✅ Успешно сохранено {len(batch)} статей!")
             _process_next_batch(user_id, user_states)
             return True
-            
+
         elif user_text.isdigit():
             idx = int(user_text) - 1
             batch = user_states[user_id]["current_batch"]
@@ -106,93 +136,122 @@ def handle_queue_and_learning(user_id, user_text, user_text_lower, state, user_s
                 user_states[user_id]["state"] = "queue_batch_edit_hint"
                 sel_item = batch[idx]
                 send_vk_message(user_id, f"✏️ Исправляем: {sel_item['original_item']}\nДайте подсказку:", get_cancel_keyboard())
-            return True
+                return True
 
     if state == "queue_batch_edit_hint":
         idx = user_states[user_id]["edit_idx"]
         batch = user_states[user_id]["current_batch"]
         sel_item = batch[idx]
         menu_str = "\n".join([f"{c}: {', '.join(subs)}" for c, subs in user_states[user_id]["menu"].items()])
-        
         send_vk_message(user_id, "🧠 Думаю...", get_cancel_keyboard())
+        
         ai_cat, ai_sub = categorize_with_ai(sel_item["original_item"], menu_str, context=user_text)
         sel_item["category"] = ai_cat
         sel_item["subcategory"] = ai_sub
-        
         user_states[user_id]["state"] = "queue_batch_review"
         _show_batch_items(user_id, batch, len(user_states[user_id]["queue"]))
         return True
 
     # =========================================================
-    # ОБУЧЕНИЕ ОДИНОЧНОЙ ОПЕРАЦИИ (Для обычного режима)
+    # 3. ОБУЧЕНИЕ ОДИНОЧНОЙ ОПЕРАЦИИ (Подтверждение "Да/Нет")
     # =========================================================
     if state == "confirm_category":
         if user_text_lower in ["да", "верно", "ага", "давай", "ок", "yes", "+"]:
             payload = user_states[user_id]["payload"]
-            payload["category"] = user_states[user_id]["ai_cat"]
-            payload["subcategory"] = user_states[user_id]["ai_sub"]
-            send_vk_message(user_id, "⏳ Записываю...")
-            gs_response = send_to_google_sheets(payload)
-            if gs_response.get("status") == "SUCCESS":
-                send_vk_message(user_id, "✅ Успешно записано и выучено!", get_main_keyboard())
-            else:
-                send_vk_message(user_id, f"❌ Ошибка таблицы: {gs_response.get('message')}", get_main_keyboard())
+            cat = user_states[user_id]["ai_cat"]
+            sub = user_states[user_id]["ai_sub"]
+            item_name = payload["item"]
+            amount = float(payload.get("amount", 0))
+            op_type = payload.get("type", "Расход")
+            comment = payload.get("comment", "")
+
+            send_vk_message(user_id, "⏳ Запоминаю и записываю в базу...")
+            
+            # 1. Сохраняем операцию в PostgreSQL
+            save_transaction(
+                user_id=internal_uid,
+                op_type=op_type,
+                category=cat,
+                subcategory=sub,
+                article=item_name,
+                amount=amount,
+                comment=comment,
+                original_text=item_name,
+                status='verified'
+            )
+            
+            # 2. Учим новое слово в Личный словарь пользователя
+            learn_user_word(
+                user_id=internal_uid,
+                op_type=op_type,
+                category=cat,
+                subcategory=sub,
+                article=item_name,
+                synonym=item_name
+            )
+
+            send_vk_message(user_id, "✅ Успешно записано и выучено!", get_main_keyboard())
             del user_states[user_id]
+            return True
+
         elif user_text_lower in ["нет", "неверно", "не", "no", "-"]:
             if user_states[user_id]["attempts"] < MAX_ATTEMPTS:
                 user_states[user_id]["state"] = "provide_context"
-                user_states[user_id]["context_history"] = "" 
+                user_states[user_id]["context_history"] = ""
                 send_vk_message(user_id, f"Понял, ошибся 😔 (Попытка {user_states[user_id]['attempts']} из {MAX_ATTEMPTS})\nПодскажи другими словами, что это за операция?", get_cancel_keyboard())
             else:
-                # ВМЕСТО РУЧНОГО ВВОДА -> ИНТЕРАКТИВНЫЙ ВЫБОР
+                # Интерактивный выбор вручную
                 user_states[user_id]["state"] = "tx_manual_cat"
-                menu = user_states[user_id]["menu"]
+                menu = user_states[user_id]["menu"].get(user_states[user_id]["payload"].get("type", "Расход"), {})
                 cats = list(menu.keys())
                 cats.sort()
                 msg = "🤷‍♂️ Я сдаюсь. Давайте выберем вручную.\nВыберите КАТЕГОРИЮ:\n\n"
                 for i, c in enumerate(cats):
                     msg += f"{i+1}. {c}\n"
                 send_vk_message(user_id, msg, get_numbered_keyboard(len(cats)))
+            return True
         else:
             send_vk_message(user_id, "Пожалуйста, ответь 'Да' или 'Нет'.", get_yes_no_keyboard())
-        return True
+            return True
 
+    # =========================================================
+    # 4. ОБРАБОТКА ПОДСКАЗКИ ОТ ПОЛЬЗОВАТЕЛЯ
+    # =========================================================
     if state == "provide_context":
         send_vk_message(user_id, "🧠 Думаю...")
         user_states[user_id]["attempts"] += 1
         payload = user_states[user_id]["payload"]
-        menu = user_states[user_id]["menu"]
-        menu_str = "\n".join([f"{c}: {', '.join(subs)}" for c, subs in menu.items()])
-        
+        op_type = payload.get("type", "Расход")
+
         if "доход" in user_text_lower or "приход" in user_text_lower:
+            op_type = "Доход"
             payload["type"] = "Доход"
         elif "расход" in user_text_lower or "трата" in user_text_lower:
+            op_type = "Расход"
             payload["type"] = "Расход"
 
-        prev_context = user_states[user_id].get("context_history", "")
-        current_context = f"{prev_context}\n- {user_text}" if prev_context else f"- {user_text}"
-        user_states[user_id]["context_history"] = current_context
-        
-        check_payload = {"action": "check_item", "item": user_text, "type": payload.get("type", "Расход")}
-        check_res = send_to_google_sheets(check_payload)
+        # Ищем подсказку в PostgreSQL (быстрый поиск)
+        check_res = smart_search_item(internal_uid, user_text, op_type)
         if check_res.get("status") == "FOUND":
             user_states[user_id]["state"] = "confirm_category"
-            user_states[user_id]["ai_cat"] = check_res.get("cat")
-            user_states[user_id]["ai_sub"] = check_res.get("sub")
-            send_vk_message(user_id, f"Ага! Слово '{user_text}' мне знакомо.\n📂 {check_res.get('cat')} -> {check_res.get('sub')}\n\nВсё верно?", get_yes_no_keyboard())
+            user_states[user_id]["ai_cat"] = check_res.get("category")
+            user_states[user_id]["ai_sub"] = check_res.get("subcategory")
+            send_vk_message(user_id, f"Ага! Слово '{user_text}' мне знакомо.\n📂 {check_res.get('category')} -> {check_res.get('subcategory')}\n\nВсё верно?", get_yes_no_keyboard())
             return True
-            
-        ai_cat, ai_sub = categorize_with_ai(payload["item"], menu_str, context=current_context)
+
+        menu = user_states[user_id]["menu"].get(op_type, {})
+        menu_str = "\n".join([f"{c}: {', '.join(subs)}" for c, subs in menu.items()])
+
+        ai_cat, ai_sub = categorize_with_ai(payload["item"], menu_str, context=user_text)
         if ai_cat in menu and ai_sub in menu[ai_cat]:
             user_states[user_id]["state"] = "confirm_category"
             user_states[user_id]["ai_cat"] = ai_cat
             user_states[user_id]["ai_sub"] = ai_sub
-            send_vk_message(user_id, f"Ага! С учетом всех подсказок, думаю это:\n📂 {ai_cat} -> {ai_sub}\n\nВсё верно?", get_yes_no_keyboard())
+            send_vk_message(user_id, f"Ага! С учетом подсказки, думаю это:\n📂 {ai_cat} -> {ai_sub}\n\nВсё верно?", get_yes_no_keyboard())
         else:
             if user_states[user_id]["attempts"] < MAX_ATTEMPTS:
                 send_vk_message(user_id, f"Всё равно не могу сообразить 🤔 (Попытка {user_states[user_id]['attempts']} из {MAX_ATTEMPTS})\nПопробуй объяснить чуть подробнее?", get_cancel_keyboard())
             else:
-                # ВМЕСТО РУЧНОГО ВВОДА -> ИНТЕРАКТИВНЫЙ ВЫБОР
                 user_states[user_id]["state"] = "tx_manual_cat"
                 cats = list(menu.keys())
                 cats.sort()
@@ -203,12 +262,13 @@ def handle_queue_and_learning(user_id, user_text, user_text_lower, state, user_s
         return True
 
     # =========================================================
-    # РУЧНОЙ ВЫБОР (ЕСЛИ ИИ СДАЛСЯ)
+    # 5. РУЧНОЙ ВЫБОР (ЕСЛИ ИИ СДАЛСЯ)
     # =========================================================
     if state == "tx_manual_cat":
         if user_text.isdigit():
             idx = int(user_text) - 1
-            menu = user_states[user_id]["menu"]
+            op_type = user_states[user_id]["payload"].get("type", "Расход")
+            menu = user_states[user_id]["menu"].get(op_type, {})
             cats = list(menu.keys())
             cats.sort()
             if 0 <= idx < len(cats):
@@ -222,7 +282,7 @@ def handle_queue_and_learning(user_id, user_text, user_text_lower, state, user_s
                 for i, s in enumerate(subs):
                     msg += f"{i+1}. {s}\n"
                 send_vk_message(user_id, msg, get_numbered_keyboard(len(subs)))
-        return True
+            return True
 
     if state == "tx_manual_sub":
         if user_text.isdigit():
@@ -231,16 +291,39 @@ def handle_queue_and_learning(user_id, user_text, user_text_lower, state, user_s
             if 0 <= idx < len(subs):
                 sel_sub = subs[idx]
                 payload = user_states[user_id]["payload"]
-                payload["category"] = user_states[user_id]["sel_cat"]
-                payload["subcategory"] = sel_sub
-                
-                send_vk_message(user_id, "⏳ Обучаюсь и записываю...")
-                gs_response = send_to_google_sheets(payload)
-                if gs_response.get("status") == "SUCCESS":
-                    send_vk_message(user_id, f"✅ Успешно! Я запомнил, что '{payload['item']}' — это {payload['category']} -> {sel_sub}.", get_main_keyboard())
-                else:
-                    send_vk_message(user_id, f"❌ Ошибка: {gs_response.get('message')}", get_main_keyboard())
-                del user_states[user_id]
-        return True
+                item_name = payload["item"]
+                amount = float(payload.get("amount", 0))
+                op_type = payload.get("type", "Расход")
+                comment = payload.get("comment", "")
+                cat = user_states[user_id]["sel_cat"]
 
-    return False 
+                send_vk_message(user_id, "⏳ Обучаюсь и записываю в базу...")
+                
+                # 1. Записываем операцию
+                save_transaction(
+                    user_id=internal_uid,
+                    op_type=op_type,
+                    category=cat,
+                    subcategory=sel_sub,
+                    article=item_name,
+                    amount=amount,
+                    comment=comment,
+                    original_text=item_name,
+                    status='verified'
+                )
+                
+                # 2. Обучаем личный словарь
+                learn_user_word(
+                    user_id=internal_uid,
+                    op_type=op_type,
+                    category=cat,
+                    subcategory=sel_sub,
+                    article=item_name,
+                    synonym=item_name
+                )
+
+                send_vk_message(user_id, f"✅ Успешно! Я запомнил, что '{item_name}' — это {cat} -> {sel_sub}.", get_main_keyboard())
+                del user_states[user_id]
+            return True
+
+    return False
