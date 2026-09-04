@@ -607,8 +607,8 @@ def import_parsed_operations(user_id, operations):
 def migrate_dictionary_from_gs(raw_data):
     """
     Умный парсер миграции с авто-детектором сдвига колонок и галочек.
-    Корректно обрабатывает и строки с галочками [TRUE, Расход, ...],
-    и строки без галочек [Расход, Категория, ...].
+    Устранена коллизия синонимов: имя подкатегории добавляется как синоним
+    ТОЛЬКО к статье "Другое <подкатегория>", а не ко всем статьям подряд.
     """
     conn = get_db_connection()
     cur = conn.cursor()
@@ -620,33 +620,31 @@ def migrate_dictionary_from_gs(raw_data):
             if i == 0: continue # Пропускаем шапку
             if not row or len(row) < 3: continue
             
-            # Приводим строку к чистому списку непустых ячеек
             clean_row = [str(cell).strip() for cell in row if str(cell).strip() != ""]
             if len(clean_row) < 3: continue
             
             first_val = clean_row[0].lower()
             
-            # --- СЛУЧАЙ А: Первая колонка - это чекбокс (true/false) ---
+            # 1. Проверяем наличие галочки в первой колонке
             if first_val in ['true', 'false']:
                 is_default = (first_val == 'true')
-                clean_row = clean_row[1:] # Сдвигаем вправо
+                clean_row = clean_row[1:]
             else:
-                # Если явной галочки нет, по умолчанию включаем статью в активные
                 is_default = True
 
             if len(clean_row) < 3: continue
 
-            # --- ОПРЕДЕЛЯЕМ ТИП (Расход / Доход) ---
+            # 2. Определяем тип (Расход / Доход)
             second_val = clean_row[0]
             if second_val in ["Расход", "Доход", "Приход"]:
                 op_type = "Доход" if second_val in ["Доход", "Приход"] else "Расход"
                 clean_row = clean_row[1:]
             else:
-                op_type = "Расход" # По умолчанию Расход
+                op_type = "Расход"
 
             if len(clean_row) < 2: continue
 
-            # --- РАСКЛАДЫВАЕМ ИЕРАРХИЮ ---
+            # 3. Раскладываем иерархию
             if len(clean_row) >= 3:
                 cat = clean_row[0]
                 sub = clean_row[1]
@@ -660,10 +658,13 @@ def migrate_dictionary_from_gs(raw_data):
             else:
                 continue
 
-            # Собираем синонимы: само название статьи + подкатегория + все остальные колонки
+            # 4. Формируем синонимы без коллизий
             synonyms = [article.lower()]
-            if sub.lower() not in synonyms:
-                synonyms.append(sub.lower())
+            
+            # Подкатегорию добавляем как синоним ТОЛЬКО к общей статье "Другое <подкатегория>"
+            if article.lower() == f"другое {sub.lower()}":
+                if sub.lower() not in synonyms:
+                    synonyms.append(sub.lower())
                 
             for syn in synonyms_raw:
                 s_clean = syn.lower().strip()
