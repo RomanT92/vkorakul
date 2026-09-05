@@ -60,6 +60,7 @@ def smart_search_item(user_id, item_name, op_type):
     cur = conn.cursor()
     clean_item = item_name.lower().strip()
     try:
+        # Базовый подзапрос: объединение личного и глобального словарей
         combined_source = """
             SELECT type, category, subcategory, article, LOWER(synonym) AS synonym
             FROM user_dictionary
@@ -74,7 +75,7 @@ def smart_search_item(user_id, item_name, op_type):
             WHERE g.type = %s AND g.is_default = TRUE AND u.id IS NULL
         """
         
-        # Шаг 1: Точное совпадение
+        # Шаг 1: Точное совпадение (мгновенно и без ошибок с регистром)
         exact_query = f"""
             SELECT type, category, subcategory, article
             FROM ({combined_source}) AS combined
@@ -92,14 +93,20 @@ def smart_search_item(user_id, item_name, op_type):
                 "article": exact_match[3]
             }
 
-        # Шаг 2: Триграммный поиск
+        # Шаг 2: Триграммный поиск с опечатками
         fuzzy_query = f"""
-            SELECT type, category, subcategory, article, synonym, 1 - (synonym <-> %s) AS similarity_score
+            SELECT type, category, subcategory, article, synonym, 
+                   1 - (synonym <-> %s) AS similarity_score
             FROM ({combined_source}) AS combined
             ORDER BY synonym <-> %s
             LIMIT 1;
         """
-        cur.execute(fuzzy_query, (user_id, op_type, user_id, op_type, clean_item, clean_item))
+        # Порядок подстановки строго соблюден:
+        # 1-й %s: clean_item (для вычисления score в SELECT)
+        # 2-й и 3-й %s: user_id, op_type (для user_dictionary)
+        # 4-й и 5-й %s: user_id, op_type (для global_dictionary)
+        # 6-й %s: clean_item (для ORDER BY <->)
+        cur.execute(fuzzy_query, (clean_item, user_id, op_type, user_id, op_type, clean_item))
         result = cur.fetchone()
         if result:
             score = result[5]
@@ -666,7 +673,7 @@ def migrate_dictionary_from_gs(raw_data):
             for s in synonyms_raw:
                 s_clean = s.lower().strip()
                 if s_clean and s_clean not in syns:
-                    syns.append(s_clean)  # <- Исправлено: syns вместо synonyms
+                    syns.append(s_clean)
             for syn in syns:
                 data_to_insert.append((op_type, cat, sub, article, syn, is_default))
 
