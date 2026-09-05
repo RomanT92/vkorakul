@@ -1,11 +1,8 @@
 # -*- coding: utf-8 -*-
 from vk_api.longpoll import VkEventType
 from services import (
-    longpoll,
-    vk,
-    send_vk_message,
-    transcribe_audio_with_ai,
-    parse_bank_file_with_ai
+    longpoll, vk, send_vk_message,
+    transcribe_audio_with_ai, parse_bank_file_with_ai
 )
 from keyboards import get_receipt_mode_keyboard, get_main_keyboard
 from handlers_base import handle_base_commands
@@ -14,10 +11,8 @@ from handlers_queue import handle_queue_and_learning
 from handlers_receipt import handle_receipt
 from handlers_transaction import handle_transaction
 from db import (
-    get_or_create_user,
-    import_parsed_operations,
-    get_unverified_transactions,
-    get_full_menu
+    get_or_create_user, import_parsed_operations,
+    get_unverified_transactions, get_full_menu
 )
 
 # ====================================================================
@@ -51,6 +46,7 @@ for event in longpoll.listen():
                         if att['type'] == 'audio_message':
                             audio_url = att['audio_message']['link_ogg']
                             break
+                    
                     if audio_url:
                         transcribed_text = transcribe_audio_with_ai(audio_url)
                         if transcribed_text:
@@ -118,10 +114,8 @@ for event in longpoll.listen():
                         if parse_result.get("status") == "SUCCESS":
                             operations = parse_result.get("operations", [])
                             send_vk_message(user_id, f"✅ Извлек {len(operations)} операций.\n⚡ Анализирую и сохраняю в базу данных...")
-
                             internal_uid = get_or_create_user(user_id)
                             stats = import_parsed_operations(internal_uid, operations)
-
                             send_vk_message(
                                 user_id,
                                 f"📊 Результат загрузки:\n"
@@ -129,13 +123,11 @@ for event in longpoll.listen():
                                 f"• Автоматически распределено: {stats['verified']}\n"
                                 f"• Требует проверки (завалы): {stats['needs_review']}"
                             )
-
                             if stats['needs_review'] == 0:
                                 send_vk_message(user_id, "🎉 Все операции успешно распределены! Завалов нет.", get_main_keyboard())
                             else:
                                 from handlers_queue import _process_next_batch
                                 unverified_raw = get_unverified_transactions(internal_uid)
-                                
                                 unique_items = {}
                                 for row in unverified_raw:
                                     key = f"{row['type']}_{row['original_item']}"
@@ -148,13 +140,14 @@ for event in longpoll.listen():
                                         }
                                     else:
                                         unique_items[key]["count"] += 1
-
+                                
                                 full_menu = get_full_menu(internal_uid)
                                 combined_menu = {}
+                                # Исправлено: извлекаем список подкатегорий, а не вложенный словарь со статьями
                                 for t in ["Расход", "Доход"]:
                                     for c, s in full_menu.get(t, {}).items():
-                                        combined_menu[c] = s
-
+                                        combined_menu[c] = list(s.keys()) if isinstance(s, dict) else s
+                                
                                 user_states[user_id] = {
                                     "state": "queue_process",
                                     "queue": list(unique_items.values()),
