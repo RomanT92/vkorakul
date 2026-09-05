@@ -54,44 +54,66 @@ def get_or_create_user(vk_id):
 
 def smart_search_item(user_id, item_name, op_type):
     """
-    Нечеткий поиск синонима с учетом опечаток через триграммы (pg_trgm).
-    Сначала проверяет личный словарь пользователя, затем глобальный эталон (где стоит галочка).
-    Исключает скрытые пользователем категории/статьи.
+    Нечеткий поиск синонима с регистронезависимостью (LOWER).
+    1. Сначала проверяет точное совпадение без триграмм (100% совпадение).
+    2. Если нет точного — запускает поиск по триграммам (pg_trgm) с порогом 0.7.
     """
     conn = get_db_connection()
     cur = conn.cursor()
+    clean_item = item_name.lower().strip()
     try:
-        query = """
+        # Базовый подзапрос: объединение личного и глобального словарей
+        combined_source = """
+        SELECT type, category, subcategory, article, LOWER(synonym) AS synonym 
+        FROM user_dictionary 
+        WHERE user_id = %s AND type = %s AND is_deleted = FALSE
+        
+        UNION ALL
+        
+        SELECT g.type, g.category, g.subcategory, g.article, LOWER(g.synonym) AS synonym 
+        FROM global_dictionary g
+        LEFT JOIN user_dictionary u ON (
+            u.user_id = %s 
+            AND u.type = g.type 
+            AND u.category = g.category 
+            AND u.subcategory = g.subcategory 
+            AND u.article = g.article 
+            AND u.is_deleted = TRUE
+        )
+        WHERE g.type = %s AND g.is_default = TRUE AND u.id IS NULL
+        """
+
+        # Шаг 1: Точное совпадение (мгновенно и без ошибок с регистром)
+        exact_query = f"""
+        SELECT type, category, subcategory, article 
+        FROM ({combined_source}) AS combined
+        WHERE synonym = %s
+        LIMIT 1;
+        """
+        cur.execute(exact_query, (user_id, op_type, user_id, op_type, clean_item))
+        exact_match = cur.fetchone()
+        if exact_match:
+            return {
+                "status": "FOUND",
+                "type": exact_match[0],
+                "category": exact_match[1],
+                "subcategory": exact_match[2],
+                "article": exact_match[3]
+            }
+
+        # Шаг 2: Триграммный поиск с опечатками
+        fuzzy_query = f"""
         SELECT type, category, subcategory, article, synonym, 
-               1 - (synonym <-> %s) as similarity_score
-        FROM (
-            SELECT type, category, subcategory, article, synonym 
-            FROM user_dictionary 
-            WHERE user_id = %s AND type = %s AND is_deleted = FALSE
-            
-            UNION ALL
-            
-            SELECT g.type, g.category, g.subcategory, g.article, g.synonym 
-            FROM global_dictionary g
-            LEFT JOIN user_dictionary u ON (
-                u.user_id = %s 
-                AND u.type = g.type 
-                AND u.category = g.category 
-                AND u.subcategory = g.subcategory 
-                AND u.article = g.article 
-                AND u.is_deleted = TRUE
-            )
-            WHERE g.type = %s AND g.is_default = TRUE AND u.id IS NULL
-        ) AS combined
+               1 - (synonym <-> %s) AS similarity_score
+        FROM ({combined_source}) AS combined
         ORDER BY synonym <-> %s
         LIMIT 1;
         """
-        cur.execute(query, (item_name, user_id, op_type, user_id, op_type, item_name))
+        cur.execute(fuzzy_query, (user_id, op_type, user_id, op_type, clean_item, clean_item))
         result = cur.fetchone()
         
         if result:
             score = result[5]
-            # Порог соответствия 70%
             if score >= 0.7:
                 return {
                     "status": "FOUND",
@@ -130,13 +152,14 @@ def learn_user_word(user_id, op_type, category, subcategory, article, synonym):
     conn = get_db_connection()
     cur = conn.cursor()
     try:
+        clean_syn = synonym.lower().strip()
         query = """
         INSERT INTO user_dictionary (user_id, type, category, subcategory, article, synonym, is_deleted)
         VALUES (%s, %s, %s, %s, %s, %s, FALSE)
         ON CONFLICT (user_id, type, category, subcategory, article, synonym) 
         DO UPDATE SET is_deleted = FALSE;
         """
-        cur.execute(query, (user_id, op_type, category, subcategory, article, synonym.lower().strip()))
+        cur.execute(query, (user_id, op_type, category, subcategory, article, clean_syn))
         conn.commit()
         return True
     except Exception as e:
@@ -505,11 +528,11 @@ def import_parsed_operations(user_id, operations):
     cur = conn.cursor()
     try:
         cur.execute("""
-            SELECT type, category, subcategory, article, synonym 
+            SELECT type, category, subcategory, article, LOWER(synonym) 
             FROM user_dictionary 
             WHERE user_id = %s AND is_deleted = FALSE
             UNION ALL
-            SELECT type, category, subcategory, article, synonym 
+            SELECT type, category, subcategory, article, LOWER(synonym) 
             FROM global_dictionary 
             WHERE is_default = TRUE;
         """, (user_id,))
@@ -519,7 +542,7 @@ def import_parsed_operations(user_id, operations):
         synonyms_by_type = {"Расход": [], "Доход": []}
         
         for r in dict_rows:
-            t, c, s, a, syn = r[0], r[1], r[2], r[3], r[4].lower().strip()
+            t, c, s, a, syn = r[0], r[1], r[2], r[3], r[4].strip()
             exact_dict[(t, syn)] = (c, s, a)
             if t in synonyms_by_type:
                 synonyms_by_type[t].append(syn)
@@ -609,7 +632,7 @@ def migrate_dictionary_from_gs(raw_data):
     Загружает в PostgreSQL обе базы:
     1. Глобальные Синонимы Категорий (алименты, такси, учеба, гигиена и т.д.)
     2. Глобальная База Синонимов (конкретные товары и статьи)
-    Поддерживает любые форматы передачи данных от Google Таблиц.
+    Все синонимы сохраняются строчными буквами (LOWER).
     """
     conn = get_db_connection()
     cur = conn.cursor()
@@ -617,7 +640,6 @@ def migrate_dictionary_from_gs(raw_data):
         cur.execute("TRUNCATE TABLE global_dictionary RESTART IDENTITY CASCADE;")
         data_to_insert = []
 
-        # Универсальный парсер входящих данных
         if isinstance(raw_data, dict):
             if "data" in raw_data and isinstance(raw_data["data"], dict):
                 art_rows = raw_data["data"].get("articles", [])
@@ -638,9 +660,7 @@ def migrate_dictionary_from_gs(raw_data):
             art_rows = []
             cat_rows = []
 
-        # =========================================================
-        # 1. ЗАГРУЗКА СИНОНИМОВ КАТЕГОРИЙ (алименты, обучение и т.д.)
-        # =========================================================
+        # 1. ЗАГРУЗКА СИНОНИМОВ КАТЕГОРИЙ
         for i, row in enumerate(cat_rows):
             if i == 0: continue
             clean = [str(c).strip() for c in row if str(c).strip() != ""]
@@ -678,9 +698,7 @@ def migrate_dictionary_from_gs(raw_data):
             for syn in syns:
                 data_to_insert.append((op_type, cat, sub, article, syn, is_default))
 
-        # =========================================================
         # 2. ЗАГРУЗКА СТАТЕЙ И ТОВАРОВ
-        # =========================================================
         for i, row in enumerate(art_rows):
             if i == 0: continue
             clean = [str(c).strip() for c in row if str(c).strip() != ""]
