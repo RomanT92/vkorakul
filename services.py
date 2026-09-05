@@ -2,6 +2,7 @@
 import os
 import sys
 import subprocess
+import base64
 
 # ====================================================================
 # АВТОУСТАНОВКА БИБЛИОТЕК (Хак для Bothost)
@@ -21,11 +22,17 @@ import requests
 import json
 import tempfile
 
-# Импортируем настройки и промпты из нашего файла конфигурации (config.py)
 from config import (
-    VK_TOKEN, AI_TUNNEL_KEY, GOOGLE_SHEETS_URL, AI_BASE_URL, 
-    PROMPT_CATEGORIZE, PROMPT_EXTRACT, PROMPT_RECEIPT_TOTAL, PROMPT_RECEIPT_ITEMS,
-    PROMPT_BATCH_CATEGORIZE, PROMPT_FILE_MAPPING
+    VK_TOKEN,
+    AI_TUNNEL_KEY,
+    GOOGLE_SHEETS_URL,
+    AI_BASE_URL,
+    PROMPT_CATEGORIZE,
+    PROMPT_EXTRACT,
+    PROMPT_RECEIPT_TOTAL,
+    PROMPT_RECEIPT_ITEMS,
+    PROMPT_BATCH_CATEGORIZE,
+    PROMPT_FILE_MAPPING
 )
 
 # ====================================================================
@@ -34,13 +41,34 @@ from config import (
 vk_session = vk_api.VkApi(token=VK_TOKEN, api_version='5.131')
 longpoll = VkLongPoll(vk_session)
 vk = vk_session.get_api()
-
 ai_client = OpenAI(api_key=AI_TUNNEL_KEY, base_url=AI_BASE_URL)
+
+# ====================================================================
+# ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ДЛЯ РАБОТЫ С ФОТО
+# ====================================================================
+def get_image_base64_uri(image_url):
+    """
+    Скачивает изображение из ВК через Python и кодирует в Base64.
+    Это защищает от блокировки со стороны VK CDN серверами OpenAI.
+    """
+    try:
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        }
+        res = requests.get(image_url, headers=headers, timeout=25)
+        if res.status_code == 200:
+            b64_data = base64.b64encode(res.content).decode("utf-8")
+            return f"data:image/jpeg;base64,{b64_data}"
+        else:
+            print(f"Ошибка загрузки фото из ВК: HTTP {res.status_code}")
+            return None
+    except Exception as e:
+        print(f"Исключение при скачивании фото: {e}")
+        return None
 
 # ====================================================================
 # ФУНКЦИИ СВЯЗИ
 # ====================================================================
-
 def send_vk_message(user_id, text, keyboard=None):
     """Отправляет сообщение пользователю ВКонтакте."""
     try:
@@ -58,7 +86,7 @@ def send_vk_message(user_id, text, keyboard=None):
 def send_to_google_sheets(payload):
     """Отправляет JSON-данные в Google Таблицу и возвращает ответ."""
     try:
-        response = requests.post(GOOGLE_SHEETS_URL, json=payload)
+        response = requests.post(GOOGLE_SHEETS_URL, json=payload, timeout=20)
         return response.json()
     except Exception as e:
         return {"status": "ERROR", "message": str(e)}
@@ -69,11 +97,11 @@ def categorize_with_ai(item, menu_str, context=""):
     if context:
         prompt += f"Подсказка пользователя: {context}\n"
     prompt += f"\nМеню:\n{menu_str}"
-    
+
     try:
         response = ai_client.chat.completions.create(
             model="gpt-3.5-turbo",
-            temperature=0.2, 
+            temperature=0.2,
             messages=[
                 {"role": "system", "content": PROMPT_CATEGORIZE},
                 {"role": "user", "content": prompt}
@@ -85,7 +113,6 @@ def categorize_with_ai(item, menu_str, context=""):
             return data.get("category", "UNKNOWN"), data.get("subcategory", "UNKNOWN")
     except Exception as e:
         print(f"Ошибка AI при категоризации: {e}")
-    
     return "UNKNOWN", "UNKNOWN"
 
 def extract_transaction_with_ai(user_text):
@@ -93,7 +120,7 @@ def extract_transaction_with_ai(user_text):
     try:
         response = ai_client.chat.completions.create(
             model="gpt-3.5-turbo",
-            temperature=0.3, 
+            temperature=0.3,
             messages=[
                 {"role": "system", "content": PROMPT_EXTRACT},
                 {"role": "user", "content": user_text}
@@ -107,20 +134,20 @@ def extract_transaction_with_ai(user_text):
 def transcribe_audio_with_ai(audio_url):
     """Скачивает голосовое сообщение из ВК и переводит его в текст."""
     try:
-        response = requests.get(audio_url)
+        response = requests.get(audio_url, timeout=20)
         if response.status_code != 200:
             return None
-        
+
         with tempfile.NamedTemporaryFile(delete=False, suffix=".ogg") as temp_audio:
             temp_audio.write(response.content)
             temp_audio_path = temp_audio.name
 
         with open(temp_audio_path, "rb") as audio_file:
             transcript = ai_client.audio.transcriptions.create(
-                model="whisper-1", 
+                model="whisper-1",
                 file=audio_file
             )
-        
+
         os.remove(temp_audio_path)
         return transcript.text.strip()
     except Exception as e:
@@ -130,15 +157,19 @@ def transcribe_audio_with_ai(audio_url):
 def extract_receipt_total_with_ai(image_url):
     """Извлекает только общий итог и магазин из чека (GPT-4o Vision)."""
     try:
+        base64_uri = get_image_base64_uri(image_url)
+        if not base64_uri:
+            return None
+
         response = ai_client.chat.completions.create(
-            model="gpt-4o", 
+            model="gpt-4o",
             temperature=0.0,
             messages=[
                 {
                     "role": "user",
                     "content": [
                         {"type": "text", "text": PROMPT_RECEIPT_TOTAL},
-                        {"type": "image_url", "image_url": {"url": image_url}}
+                        {"type": "image_url", "image_url": {"url": base64_uri}}
                     ]
                 }
             ]
@@ -150,17 +181,21 @@ def extract_receipt_total_with_ai(image_url):
 
 def extract_receipt_items_with_ai(image_url, menu_str):
     """Извлекает все товары из чека и распределяет их по меню."""
-    prompt = PROMPT_RECEIPT_ITEMS.replace("{menu_str}", menu_str)
     try:
+        base64_uri = get_image_base64_uri(image_url)
+        if not base64_uri:
+            return None
+
+        prompt = PROMPT_RECEIPT_ITEMS.replace("{menu_str}", menu_str)
         response = ai_client.chat.completions.create(
-            model="gpt-4o", 
+            model="gpt-4o",
             temperature=0.0,
             messages=[
                 {
                     "role": "user",
                     "content": [
                         {"type": "text", "text": prompt},
-                        {"type": "image_url", "image_url": {"url": image_url}}
+                        {"type": "image_url", "image_url": {"url": base64_uri}}
                     ]
                 }
             ]
@@ -175,7 +210,7 @@ def categorize_batch_with_ai(items_list, menu_str):
     prompt = f"Меню:\n{menu_str}\n\nОперации:\n"
     for item in items_list:
         prompt += f"- {item['original_item']} ({item['amount']} руб.)\n"
-        
+
     try:
         response = ai_client.chat.completions.create(
             model="gpt-3.5-turbo",
@@ -186,26 +221,23 @@ def categorize_batch_with_ai(items_list, menu_str):
             ]
         )
         text = response.choices[0].message.content.strip()
-        
         if text.startswith("```json"):
             text = text[7:-3].strip()
         elif text.startswith("```"):
             text = text[3:-3].strip()
-            
         if text.startswith("[") and text.endswith("]"):
             return json.loads(text)
     except Exception as e:
         print(f"Ошибка AI при пакетной категоризации: {e}")
-        
     return []
 
 def parse_bank_file_with_ai(file_url, file_ext):
     """
-    Скачивает файл, перебирает ВСЕ вкладки, анализирует структуру через ИИ 
+    Скачивает файл, перебирает ВСЕ вкладки, анализирует структуру через ИИ
     и вытаскивает все операции со всех подходящих листов.
     """
     try:
-        response = requests.get(file_url)
+        response = requests.get(file_url, timeout=30)
         if response.status_code != 200:
             return {"status": "ERROR", "message": "Не удалось скачать файл от ВК"}
 
@@ -213,22 +245,19 @@ def parse_bank_file_with_ai(file_url, file_ext):
             temp_file.write(response.content)
             temp_file_path = temp_file.name
 
-        # Читаем все вкладки из файла
         if file_ext == ".csv":
             dfs = {"CSV": pd.read_csv(temp_file_path, header=None, dtype=str)}
         else:
             dfs = pd.read_excel(temp_file_path, sheet_name=None, header=None, dtype=str)
-        
+
         os.remove(temp_file_path)
 
         parsed_operations = []
-        
-        # Проходимся по каждой вкладке по очереди
+
         for sheet_name, df in dfs.items():
             if df.empty:
                 continue
-                
-            # Берем первые 150 строк текущей вкладки для анализа ИИ
+
             sample_df = df.head(150).fillna("")
             csv_sample = sample_df.to_csv(index=False, sep=";")
 
@@ -241,96 +270,80 @@ def parse_bank_file_with_ai(file_url, file_ext):
                         {"role": "user", "content": f"Вкладка: {sheet_name}\nДанные:\n{csv_sample}"}
                     ]
                 )
-                
                 mapping_text = ai_response.choices[0].message.content.strip()
                 if mapping_text.startswith("```json"):
                     mapping_text = mapping_text[7:-3].strip()
                 elif mapping_text.startswith("```"):
                     mapping_text = mapping_text[3:-3].strip()
-                    
+                
                 mapping = json.loads(mapping_text)
                 file_type = mapping.get("file_type")
-                
-                # Если ИИ сказал, что это мусорная вкладка — пропускаем
+
                 if file_type not in ["flat", "matrix"]:
-                    print(f"Пропускаю вкладку '{sheet_name}' (тип: {file_type})")
                     continue
-                    
-                # =========================================================
-                # ТИП 1: ПЛОСКАЯ БАНКОВСКАЯ ВЫПИСКА
-                # =========================================================
+
                 if file_type == "flat":
                     header_idx = mapping.get("header_row_index", 0)
                     date_col = mapping.get("date_col_idx")
                     amount_col = mapping.get("amount_col_idx")
                     desc_col = mapping.get("desc_col_idx")
                     is_signed = mapping.get("is_amount_signed", False)
-                    
+
                     for i in range(header_idx + 1, len(df)):
                         row = df.iloc[i].fillna("")
                         try:
                             date_val = str(row[date_col]).strip()
                             desc_val = str(row[desc_col]).strip()
                             amount_str = str(row[amount_col]).replace(" ", "").replace("\xa0", "").replace(",", ".")
-                            
-                            # СТРОГОЕ ПРАВИЛО: Если нет даты, описания или суммы - пропускаем строку!
+
                             if not amount_str or not desc_val or not date_val or date_val.lower() in ["nan", "none", "nat"]:
                                 continue
-                                
+
                             amount_val = float(amount_str)
                             if amount_val == 0:
                                 continue
-                            
+
                             op_type = "Расход"
                             if is_signed:
                                 if amount_val > 0:
                                     op_type = "Доход"
                                 amount_val = abs(amount_val)
-                                
+
                             parsed_operations.append([date_val, op_type, amount_val, desc_val])
                         except:
                             continue
-                            
-                # =========================================================
-                # ТИП 2: СЛОЖНАЯ МАТРИЦА (ШАБЛОН-КАЛЕНДАРЬ)
-                # =========================================================
+
                 elif file_type == "matrix":
                     header_idx = mapping.get("header_row_index", 0)
                     cat_col = mapping.get("category_col_idx")
                     start_col = mapping.get("date_start_col_idx")
-                    
                     days_row = df.iloc[header_idx].fillna("")
-                    
-                    # РАСШИРЕННЫЙ СПИСОК СТОП-СЛОВ: Беспощадно режем технический мусор
+
                     stop_words = [
-                        "план", "факт", "баланс", "итого", "максимум", "минимум", 
-                        "средне", "почему", "часов", "осталось", "неделя", "месяц", 
-                        "доходы-расходы", "резерв", "корректировка", "капитал", 
-                        "долг", "всего", "отклонение", "в долг", "из резерва"
+                        "план", "факт", "баланс", "итого", "максимум", "минимум", "средне",
+                        "почему", "часов", "осталось", "неделя", "месяц", "доходы-расходы",
+                        "резерв", "корректировка", "капитал", "долг", "всего", "отклонение",
+                        "в долг", "из резерва"
                     ]
-                    
+
                     for i in range(header_idx + 1, len(df)):
                         row = df.iloc[i].fillna("")
                         category_name = str(row[cat_col]).strip()
-                        
-                        # СТРОГОЕ ПРАВИЛО 1: Пропускаем пустые строки
+
                         if not category_name or category_name.lower() in ["nan", "none"]:
                             continue
-                            
-                        # СТРОГОЕ ПРАВИЛО 2: Пропускаем технические строки по стоп-словам
                         if any(word in category_name.lower() for word in stop_words):
                             continue
-                            
+
                         for col_idx in range(start_col, len(df.columns)):
                             day_val = str(days_row[col_idx]).strip()
                             amount_str = str(row[col_idx]).replace(" ", "").replace("\xa0", "").replace(",", ".")
-                            
-                            # СТРОГОЕ ПРАВИЛО 3: Если нет суммы или даты (дня) в столбце - пропускаем ячейку!
+
                             if not amount_str or amount_str.lower() in ["0", "0.0", "none", "nan"]:
                                 continue
                             if not day_val or day_val.lower() in ["nan", "none", "nat"]:
                                 continue
-                                
+
                             try:
                                 amount_val = float(amount_str)
                                 if amount_val == 0:
@@ -338,22 +351,17 @@ def parse_bank_file_with_ai(file_url, file_ext):
                                 parsed_operations.append([f"{day_val} число ({sheet_name})", "Расход", abs(amount_val), category_name])
                             except:
                                 continue
-
             except Exception as e:
                 print(f"Ошибка при анализе вкладки '{sheet_name}': {e}")
-                continue # Если одна вкладка упала, идем к следующей
+                continue
 
-        # =========================================================
-        # ПРЕДОХРАНИТЕЛЬ ОТ ПЕРЕГРУЗКИ (Увеличен до 50 000)
-        # =========================================================
         if len(parsed_operations) > 50000:
             return {
-                "status": "ERROR", 
+                "status": "ERROR",
                 "message": f"Найдено слишком много цифр ({len(parsed_operations)}). Лимит системы - 50 000 за один раз."
             }
 
         return {"status": "SUCCESS", "operations": parsed_operations}
-        
     except Exception as e:
         print(f"Ошибка парсинга файла: {e}")
         return {"status": "ERROR", "message": str(e)}
