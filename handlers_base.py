@@ -15,26 +15,25 @@ def handle_base_commands(user_id, user_text_lower, state, user_states):
         res = send_to_google_sheets({"action": "export_global_dict"})
         if res.get("status") == "SUCCESS":
             send_vk_message(user_id, "✅ Данные получены. Распаковываю синонимы и загружаю в PostgreSQL...")
-            count = migrate_dictionary_from_gs(res.get("data", []))
+            # Исправлено: передаем весь res, содержащий articles и categories
+            count = migrate_dictionary_from_gs(res)
             send_vk_message(user_id, f"🎉 Миграция успешно завершена! В базу загружено {count} синонимов.", get_main_keyboard())
         else:
-            send_vk_message(user_id, "❌ Ошибка при скачивании базы.")
+            send_vk_message(user_id, f"❌ Ошибка при скачивании базы: {res.get('message', 'Неизвестная ошибка')}")
         return True
 
     if user_text_lower == "сбор новых слов":
         send_vk_message(user_id, "⏳ Сканирую базы пользователей на наличие новых слов...")
         new_words = get_new_unharvested_words()
-        
         if not new_words:
             send_vk_message(user_id, "🎉 Новых слов не найдено. Все пользовательские слова уже есть в Глобальной базе!", get_main_keyboard())
             return True
-            
+
         send_vk_message(user_id, f"Найдено {len(new_words)} новых слов. Выгружаю в Google Таблицу...")
         res = send_to_google_sheets({
             "action": "append_harvested_words",
             "rows": new_words
         })
-        
         if res.get("status") == "SUCCESS":
             send_vk_message(
                 user_id,
@@ -53,7 +52,13 @@ def handle_base_commands(user_id, user_text_lower, state, user_states):
         if user_text_lower in ["помощь", "начать", "start"]:
             if user_id in user_states:
                 del user_states[user_id]
-            help_text = "🤖 Привет! Я твой финансовый Оракул.\n\nПросто напиши мне трату или доход, например:\n👉 Такси 500\n👉 Зарплата 50000\n\nИспользуй кнопки меню для управления структурой!"
+            help_text = (
+                "🤖 Привет! Я твой финансовый Оракул.\n\n"
+                "Просто напиши мне трату или доход, например:\n"
+                "👉 Такси 500\n"
+                "👉 Зарплата 50000\n\n"
+                "Используй кнопки меню для управления структурой!"
+            )
             send_vk_message(user_id, help_text, get_main_keyboard())
             return True
 
