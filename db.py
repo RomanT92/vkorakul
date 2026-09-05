@@ -50,9 +50,10 @@ def get_or_create_user(vk_id):
 # ====================================================================
 # 2. ОСНОВНАЯ ЛОГИКА ТРАНЗАКЦИЙ И ПОИСКА
 # ====================================================================
-def smart_search_item(user_id, item_name, op_type):
+def smart_search_item(user_id, item_name, op_type=None):
     """
     Нечеткий поиск синонима с регистронезависимостью (LOWER).
+    Если op_type не указан (None) — ищет по всей базе (и Расход, и Доход).
     1. Сначала проверяет точное совпадение без триграмм (100% совпадение).
     2. Если нет точного — запускает поиск по триграммам (pg_trgm) с порогом 0.7.
     """
@@ -60,29 +61,47 @@ def smart_search_item(user_id, item_name, op_type):
     cur = conn.cursor()
     clean_item = item_name.lower().strip()
     try:
-        # Базовый подзапрос: объединение личного и глобального словарей
-        combined_source = """
-            SELECT type, category, subcategory, article, LOWER(synonym) AS synonym
-            FROM user_dictionary
-            WHERE user_id = %s AND type = %s AND is_deleted = FALSE
-            UNION ALL
-            SELECT g.type, g.category, g.subcategory, g.article, LOWER(g.synonym) AS synonym
-            FROM global_dictionary g
-            LEFT JOIN user_dictionary u ON (
-                u.user_id = %s AND u.type = g.type AND u.category = g.category
-                AND u.subcategory = g.subcategory AND u.article = g.article AND u.is_deleted = TRUE
-            )
-            WHERE g.type = %s AND g.is_default = TRUE AND u.id IS NULL
-        """
-        
-        # Шаг 1: Точное совпадение (мгновенно и без ошибок с регистром)
+        if op_type:
+            combined_source = """
+                SELECT type, category, subcategory, article, LOWER(synonym) AS synonym
+                FROM user_dictionary
+                WHERE user_id = %s AND type = %s AND is_deleted = FALSE
+                UNION ALL
+                SELECT g.type, g.category, g.subcategory, g.article, LOWER(g.synonym) AS synonym
+                FROM global_dictionary g
+                LEFT JOIN user_dictionary u ON (
+                    u.user_id = %s AND u.type = g.type AND u.category = g.category
+                    AND u.subcategory = g.subcategory AND u.article = g.article AND u.is_deleted = TRUE
+                )
+                WHERE g.type = %s AND g.is_default = TRUE AND u.id IS NULL
+            """
+            exact_params = (user_id, op_type, user_id, op_type, clean_item)
+            fuzzy_params = (clean_item, user_id, op_type, user_id, op_type, clean_item)
+        else:
+            combined_source = """
+                SELECT type, category, subcategory, article, LOWER(synonym) AS synonym
+                FROM user_dictionary
+                WHERE user_id = %s AND is_deleted = FALSE
+                UNION ALL
+                SELECT g.type, g.category, g.subcategory, g.article, LOWER(g.synonym) AS synonym
+                FROM global_dictionary g
+                LEFT JOIN user_dictionary u ON (
+                    u.user_id = %s AND u.type = g.type AND u.category = g.category
+                    AND u.subcategory = g.subcategory AND u.article = g.article AND u.is_deleted = TRUE
+                )
+                WHERE g.is_default = TRUE AND u.id IS NULL
+            """
+            exact_params = (user_id, user_id, clean_item)
+            fuzzy_params = (clean_item, user_id, user_id, clean_item)
+
+        # Шаг 1: Точное совпадение
         exact_query = f"""
             SELECT type, category, subcategory, article
             FROM ({combined_source}) AS combined
             WHERE synonym = %s
             LIMIT 1;
         """
-        cur.execute(exact_query, (user_id, op_type, user_id, op_type, clean_item))
+        cur.execute(exact_query, exact_params)
         exact_match = cur.fetchone()
         if exact_match:
             return {
@@ -101,12 +120,7 @@ def smart_search_item(user_id, item_name, op_type):
             ORDER BY synonym <-> %s
             LIMIT 1;
         """
-        # Порядок подстановки строго соблюден:
-        # 1-й %s: clean_item (для вычисления score в SELECT)
-        # 2-й и 3-й %s: user_id, op_type (для user_dictionary)
-        # 4-й и 5-й %s: user_id, op_type (для global_dictionary)
-        # 6-й %s: clean_item (для ORDER BY <->)
-        cur.execute(fuzzy_query, (clean_item, user_id, op_type, user_id, op_type, clean_item))
+        cur.execute(fuzzy_query, fuzzy_params)
         result = cur.fetchone()
         if result:
             score = result[5]
