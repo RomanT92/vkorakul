@@ -24,13 +24,18 @@ from db import (
 
 BATCH_SIZE = 7
 
-def _show_batch_items(user_id, batch, total_left):
+def _show_batch_items(user_id, batch, total_left, show_apply_all=False):
     msg = f"📋 Пакет операций (осталось распределить: {total_left + len(batch)}):\n\n"
     for i, item in enumerate(batch):
         msg += f"{i+1}. {item['original_item']} ({item['count']} шт., ~{item['amount']} руб.)\n"
         msg += f" 📂 {item.get('category', '?')} -> {item.get('subcategory', '?')}\n\n"
-    msg += "Если всё верно, жмите «Сохранить пакет».\nЕсли хотите изменить — отправьте НОМЕР для подсказки."
-    send_vk_message(user_id, msg, get_queue_review_keyboard(len(batch)))
+    
+    msg += "Если всё верно, жмите «Сохранить пакет».\n"
+    if show_apply_all:
+        msg += "Нажмите «Применить для всех оставшихся», чтобы продублировать последнюю категорию.\n"
+    msg += "Если хотите изменить отдельную статью — отправьте её НОМЕР."
+    
+    send_vk_message(user_id, msg, get_queue_review_keyboard(len(batch), show_apply_all=show_apply_all))
 
 def _process_next_batch(user_id, user_states):
     state_data = user_states[user_id]
@@ -44,6 +49,11 @@ def _process_next_batch(user_id, user_states):
     state_data["queue"] = queue[BATCH_SIZE:]
     menu = state_data["menu"]
     menu_str = "\n".join([f"{c}: {', '.join(subs)}" for c, subs in menu.items()])
+
+    # Сбрасываем запомненную подсказку для нового пакета
+    state_data.pop("last_category", None)
+    state_data.pop("last_subcategory", None)
+    state_data.pop("last_edit_idx", None)
 
     send_vk_message(user_id, f"🧠 ИИ анализирует {len(batch)} операций...", get_cancel_keyboard())
     ai_results = categorize_batch_with_ai(batch, menu_str)
@@ -60,7 +70,7 @@ def _process_next_batch(user_id, user_states):
 
     state_data["current_batch"] = batch
     state_data["state"] = "queue_batch_review"
-    _show_batch_items(user_id, batch, len(state_data["queue"]))
+    _show_batch_items(user_id, batch, len(state_data["queue"]), show_apply_all=False)
 
 def handle_queue_and_learning(user_id, user_text, user_text_lower, state, user_states, MAX_ATTEMPTS):
     internal_uid = get_or_create_user(user_id)
@@ -115,8 +125,11 @@ def handle_queue_and_learning(user_id, user_text, user_text_lower, state, user_s
     # 2. РЕВЬЮ ПАКЕТА ОПЕРАЦИЙ
     # =========================================================
     if state == "queue_batch_review":
+        state_data = user_states[user_id]
+        batch = state_data["current_batch"]
+
+        # --- СОХРАНЕНИЕ ПАКЕТА ---
         if user_text_lower == "сохранить пакет":
-            batch = user_states[user_id]["current_batch"]
             send_vk_message(user_id, "⏳ Сохраняю и обучаю систему...", get_cancel_keyboard())
             for item in batch:
                 resolve_unverified_item(
@@ -130,28 +143,67 @@ def handle_queue_and_learning(user_id, user_text, user_text_lower, state, user_s
             _process_next_batch(user_id, user_states)
             return True
 
-        elif user_text.isdigit():
-            idx = int(user_text) - 1
-            batch = user_states[user_id]["current_batch"]
-            if 0 <= idx < len(batch):
-                user_states[user_id]["edit_idx"] = idx
-                user_states[user_id]["state"] = "queue_batch_edit_hint"
-                sel_item = batch[idx]
-                send_vk_message(user_id, f"✏️ Исправляем: {sel_item['original_item']}\nДайте подсказку:", get_cancel_keyboard())
+        # --- ПРИМЕНИТЬ ПОДСКАЗКУ ДЛЯ ВСЕХ ОСТАВШИХСЯ ---
+        elif user_text_lower in ["применить для всех оставшихся", "применить для всех", "применить ко всем"]:
+            last_cat = state_data.get("last_category")
+            last_sub = state_data.get("last_subcategory")
+            start_idx = state_data.get("last_edit_idx", 0) + 1
+
+            if not last_cat or not last_sub:
+                send_vk_message(user_id, "⚠️ Сначала дайте подсказку для какой-нибудь одной операции из списка.")
                 return True
 
+            applied_count = 0
+            # Применяем ко всем статьям после отредактированной (или ко всем оставшимся)
+            for i in range(start_idx, len(batch)):
+                batch[i]["category"] = last_cat
+                batch[i]["subcategory"] = last_sub
+                applied_count += 1
+
+            if applied_count == 0:
+                # Если была отредактирована самая последняя позиция — применяем ко всему пакету
+                for item in batch:
+                    item["category"] = last_cat
+                    item["subcategory"] = last_sub
+                applied_count = len(batch)
+
+            send_vk_message(user_id, f"⚡ Категория «{last_cat} -> {last_sub}» применена к {applied_count} операциям!")
+            _show_batch_items(user_id, batch, len(state_data["queue"]), show_apply_all=True)
+            return True
+
+        # --- ВЫБОР ОПЕРАЦИИ ПО НОМЕРУ ДЛЯ ИСПРАВЛЕНИЯ ---
+        elif user_text.isdigit():
+            idx = int(user_text) - 1
+            if 0 <= idx < len(batch):
+                state_data["edit_idx"] = idx
+                state_data["state"] = "queue_batch_edit_hint"
+                sel_item = batch[idx]
+                send_vk_message(user_id, f"✏️ Исправляем: {sel_item['original_item']}\nДайте подсказку (к чему это относится):", get_cancel_keyboard())
+                return True
+
+    # =========================================================
+    # 2.1 ВВОД ПОДСКАЗКИ ДЛЯ КОНКРЕТНОЙ ОПЕРАЦИИ
+    # =========================================================
     if state == "queue_batch_edit_hint":
-        idx = user_states[user_id]["edit_idx"]
-        batch = user_states[user_id]["current_batch"]
+        state_data = user_states[user_id]
+        idx = state_data["edit_idx"]
+        batch = state_data["current_batch"]
         sel_item = batch[idx]
-        menu_str = "\n".join([f"{c}: {', '.join(subs)}" for c, subs in user_states[user_id]["menu"].items()])
+        menu_str = "\n".join([f"{c}: {', '.join(subs)}" for c, subs in state_data["menu"].items()])
 
         send_vk_message(user_id, "🧠 Думаю...", get_cancel_keyboard())
         ai_cat, ai_sub = categorize_with_ai(sel_item["original_item"], menu_str, context=user_text)
+        
         sel_item["category"] = ai_cat
         sel_item["subcategory"] = ai_sub
-        user_states[user_id]["state"] = "queue_batch_review"
-        _show_batch_items(user_id, batch, len(user_states[user_id]["queue"]))
+
+        # Запоминаем эту категорию как последнюю подсказку для кнопки "Применить для всех"
+        state_data["last_category"] = ai_cat
+        state_data["last_subcategory"] = ai_sub
+        state_data["last_edit_idx"] = idx
+
+        state_data["state"] = "queue_batch_review"
+        _show_batch_items(user_id, batch, len(state_data["queue"]), show_apply_all=True)
         return True
 
     # =========================================================
@@ -205,7 +257,7 @@ def handle_queue_and_learning(user_id, user_text, user_text_lower, state, user_s
             return True
 
     # =========================================================
-    # 4. ОБРАБОТКА ПОДСКАЗКИ ОТ ПОЛЬЗОВАТЕЛЯ
+    # 4. ОБРАБОТКА ПОДСКАЗКИ ОТ ПОЛЬЗОВАТЕЛЯ (ОДИНОЧНЫЙ РЕЖИМ)
     # =========================================================
     if state == "provide_context":
         send_vk_message(user_id, "🧠 Думаю...")
