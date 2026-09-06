@@ -77,10 +77,10 @@ def handle_transaction(user_id, user_text, state, user_states):
                 results = find_entity_in_menu(menu, target_name)
                 
                 if not results:
-                    send_vk_message(user_id, f"❌ Не нашел '{target_name}' в базе. Попробуйте через кнопки меню.", get_main_keyboard())
+                    send_vk_message(user_id, f"❌ Не нашел '{target_name}' в базе. Попробуйте через кнопки меню.", get_main_keyboard(user_id))
                     return True
                 elif len(results) > 1:
-                    send_vk_message(user_id, f"⚠️ Найдено несколько совпадений для '{target_name}'. Воспользуйтесь кнопками меню для выбора.", get_main_keyboard())
+                    send_vk_message(user_id, f"⚠️ Найдено несколько совпадений для '{target_name}'. Воспользуйтесь кнопками меню для выбора.", get_main_keyboard(user_id))
                     return True
 
                 r = results[0]
@@ -94,7 +94,7 @@ def handle_transaction(user_id, user_text, state, user_states):
                         db_rename_subcategory(internal_uid, r["type"], r["cat"], r["sub"], new_name)
                     else:
                         db_rename_article(internal_uid, r["type"], r["cat"], r["sub"], r["art"], new_name)
-                    send_vk_message(user_id, f"✅ Успешно переименовано в '{new_name}'!", get_main_keyboard())
+                    send_vk_message(user_id, f"✅ Успешно переименовано в '{new_name}'!", get_main_keyboard(user_id))
 
                 elif action == "smart_delete":
                     level_ru = {"category": "КАТЕГОРИЮ", "subcategory": "ПОДКАТЕГОРИЮ", "article": "СТАТЬЮ"}[r["level"]]
@@ -110,7 +110,7 @@ def handle_transaction(user_id, user_text, state, user_states):
 
                 elif action == "smart_move":
                     if r["level"] == "category":
-                        send_vk_message(user_id, "❌ Категорию нельзя перенести. Только подкатегорию или статью.", get_main_keyboard())
+                        send_vk_message(user_id, "❌ Категорию нельзя перенести. Только подкатегорию или статью.", get_main_keyboard(user_id))
                         return True
                     
                     cats = sorted(list(menu.get(r["type"], {}).keys()))
@@ -166,7 +166,7 @@ def handle_transaction(user_id, user_text, state, user_states):
             parsed_data.pop("category", None)
             parsed_data.pop("subcategory", None)
 
-            # Проверяем явные триггеры от пользователя
+            # Проверяем явные маркеры от пользователя
             income_triggers = ["приход", "доход", "зарплата", "аванс", "премия", "подарили", "поступление"]
             expense_triggers = ["расход", "трата", "купил", "оплатил"]
             
@@ -180,7 +180,7 @@ def handle_transaction(user_id, user_text, state, user_states):
             if ai_guessed_type not in ["Расход", "Доход"]:
                 ai_guessed_type = "Расход"
 
-            # Не затираем исходное слово пользователя на "Поступление"
+            # Не затираем исходное слово пользователя
             current_item = parsed_data.get("item", "").strip()
             if not current_item or current_item.lower() in ["приход", "доход", "расход", "трата", "поступление"]:
                 current_item = clean_fallback_item(user_text)
@@ -191,10 +191,10 @@ def handle_transaction(user_id, user_text, state, user_states):
 
             send_vk_message(user_id, f"⚡ Ищу '{current_item}' в базе...")
 
-            # 1. Сначала ищем по типу, который предположил ИИ или указал юзер
+            # 1. Сначала ищем по предположенному типу
             search_res = smart_search_item(internal_uid, current_item, op_type=user_explicit_type or ai_guessed_type)
 
-            # 2. Если по угаданному типу не нашлось и юзер явно не писал "доход/расход" — ищем без привязки к типу!
+            # 2. Если не нашлось и пользователь явно не указал расход/доход — ищем по всей базе без привязки к типу
             if search_res["status"] != "FOUND" and not user_explicit_type:
                 search_res = smart_search_item(internal_uid, current_item, op_type=None)
 
@@ -212,7 +212,11 @@ def handle_transaction(user_id, user_text, state, user_states):
                     original_text=current_item,
                     status='verified'
                 )
-                send_vk_message(user_id, f"✅ Успешно записано! ({op_type})\n📂 {search_res['category']} -> {search_res['subcategory']}", get_main_keyboard())
+                send_vk_message(
+                    user_id,
+                    f"✅ Успешно записано! ({op_type})\n📂 {search_res['category']} -> {search_res['subcategory']}",
+                    get_main_keyboard(user_id)
+                )
             else:
                 op_type = user_explicit_type or ai_guessed_type
                 parsed_data["type"] = op_type
@@ -245,12 +249,12 @@ def handle_transaction(user_id, user_text, state, user_states):
                     }
                     send_vk_message(user_id, f"🤔 Я пока не знаю статью '{current_item}'.\nПодскажи в двух словах, к чему это относится (или напиши правильную категорию):", get_cancel_keyboard())
         except json.JSONDecodeError:
-            send_vk_message(user_id, "❌ Ошибка: ИИ вернул неправильный формат.", get_main_keyboard())
+            send_vk_message(user_id, "❌ Ошибка: ИИ вернул неправильный формат.", get_main_keyboard(user_id))
         except Exception as e:
-            send_vk_message(user_id, f"❌ Ошибка базы данных: {e}", get_main_keyboard())
+            send_vk_message(user_id, f"❌ Ошибка базы данных: {e}", get_main_keyboard(user_id))
     else:
         if reply_text:
-            send_vk_message(user_id, reply_text, get_main_keyboard())
+            send_vk_message(user_id, reply_text, get_main_keyboard(user_id))
         else:
-            send_vk_message(user_id, "❌ Ошибка связи с ИИ.", get_main_keyboard())
+            send_vk_message(user_id, "❌ Ошибка связи с ИИ.", get_main_keyboard(user_id))
     return True
