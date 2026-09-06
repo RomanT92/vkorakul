@@ -15,9 +15,8 @@ def handle_base_commands(user_id, user_text_lower, state, user_states):
         res = send_to_google_sheets({"action": "export_global_dict"})
         if res.get("status") == "SUCCESS":
             send_vk_message(user_id, "✅ Данные получены. Распаковываю синонимы и загружаю в PostgreSQL...")
-            # Исправлено: передаем весь res, содержащий articles и categories
             count = migrate_dictionary_from_gs(res)
-            send_vk_message(user_id, f"🎉 Миграция успешно завершена! В базу загружено {count} синонимов.", get_main_keyboard())
+            send_vk_message(user_id, f"🎉 Миграция успешно завершена! В базу загружено {count} синонимов.", get_main_keyboard(user_id))
         else:
             send_vk_message(user_id, f"❌ Ошибка при скачивании базы: {res.get('message', 'Неизвестная ошибка')}")
         return True
@@ -26,7 +25,7 @@ def handle_base_commands(user_id, user_text_lower, state, user_states):
         send_vk_message(user_id, "⏳ Сканирую базы пользователей на наличие новых слов...")
         new_words = get_new_unharvested_words()
         if not new_words:
-            send_vk_message(user_id, "🎉 Новых слов не найдено. Все пользовательские слова уже есть в Глобальной базе!", get_main_keyboard())
+            send_vk_message(user_id, "🎉 Новых слов не найдено. Все пользовательские слова уже есть в Глобальной базе!", get_main_keyboard(user_id))
             return True
 
         send_vk_message(user_id, f"Найдено {len(new_words)} новых слов. Выгружаю в Google Таблицу...")
@@ -39,10 +38,10 @@ def handle_base_commands(user_id, user_text_lower, state, user_states):
                 user_id,
                 f"✅ Успешно выгружено {len(new_words)} строк в лист 'Глобальная База Синонимов'!\n\n"
                 f"Зайдите в таблицу, отметьте нужные галочками и отправьте команду «миграция базы».",
-                get_main_keyboard()
+                get_main_keyboard(user_id)
             )
         else:
-            send_vk_message(user_id, f"❌ Ошибка выгрузки в Google Таблицу: {res.get('message')}", get_main_keyboard())
+            send_vk_message(user_id, f"❌ Ошибка выгрузки в Google Таблицу: {res.get('message')}", get_main_keyboard(user_id))
         return True
 
     # =========================================================
@@ -59,7 +58,7 @@ def handle_base_commands(user_id, user_text_lower, state, user_states):
                 "👉 Зарплата 50000\n\n"
                 "Используй кнопки меню для управления структурой!"
             )
-            send_vk_message(user_id, help_text, get_main_keyboard())
+            send_vk_message(user_id, help_text, get_main_keyboard(user_id))
             return True
 
         if user_text_lower == "назад":
@@ -70,12 +69,12 @@ def handle_base_commands(user_id, user_text_lower, state, user_states):
             elif state == "menu_crud":
                 if user_id in user_states:
                     del user_states[user_id]
-                send_vk_message(user_id, "Главное меню.", get_main_keyboard())
+                send_vk_message(user_id, "Главное меню.", get_main_keyboard(user_id))
                 return True
 
         if user_id in user_states:
             del user_states[user_id]
-        send_vk_message(user_id, "Действие отменено. Главное меню.", get_main_keyboard())
+        send_vk_message(user_id, "Действие отменено. Главное меню.", get_main_keyboard(user_id))
         return True
 
     if user_text_lower == "категории и статьи":
