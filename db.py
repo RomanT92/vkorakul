@@ -62,6 +62,7 @@ def smart_search_item(user_id, item_name, op_type=None):
     clean_item = item_name.lower().strip()
     try:
         if op_type:
+            # Поиск с фильтром по конкретному типу (Расход или Доход)
             combined_source = """
                 SELECT type, category, subcategory, article, LOWER(synonym) AS synonym
                 FROM user_dictionary
@@ -78,6 +79,7 @@ def smart_search_item(user_id, item_name, op_type=None):
             exact_params = (user_id, op_type, user_id, op_type, clean_item)
             fuzzy_params = (clean_item, user_id, op_type, user_id, op_type, clean_item)
         else:
+            # Универсальный поиск по обоим типам сразу (для фраз без явного типа)
             combined_source = """
                 SELECT type, category, subcategory, article, LOWER(synonym) AS synonym
                 FROM user_dictionary
@@ -217,14 +219,18 @@ def get_full_menu(user_id):
         conn.close()
 
 def get_unverified_transactions(user_id):
-    """Возвращает список нераспознанных операций пользователя со статусом 'needs_review'."""
+    """
+    Возвращает список всех нераспознанных операций пользователя:
+    со статусом 'needs_review' ИЛИ находящихся в 'Требует проверки' / 'Разное'.
+    """
     conn = get_db_connection()
     cur = conn.cursor()
     try:
         cur.execute("""
             SELECT id, type, original_text, amount, comment
             FROM transactions
-            WHERE user_id = %s AND status = 'needs_review'
+            WHERE user_id = %s 
+              AND (status = 'needs_review' OR subcategory = 'Требует проверки' OR category = 'Разное')
             ORDER BY id DESC;
         """, (user_id,))
         rows = cur.fetchall()
@@ -253,7 +259,9 @@ def resolve_unverified_item(user_id, original_item, op_type, category, subcatego
         cur.execute("""
             UPDATE transactions
             SET category = %s, subcategory = %s, article = %s, status = 'verified'
-            WHERE user_id = %s AND original_text = %s AND status = 'needs_review';
+            WHERE user_id = %s 
+              AND original_text = %s 
+              AND (status = 'needs_review' OR subcategory = 'Требует проверки' OR category = 'Разное');
         """, (category, subcategory, original_item, user_id, original_item))
         updated_count = cur.rowcount
         conn.commit()
