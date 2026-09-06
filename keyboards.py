@@ -5,15 +5,35 @@ from vk_api.keyboard import VkKeyboard, VkKeyboardColor
 # ГЕНЕРАТОРЫ КЛАВИАТУР (МНОГОУРОВНЕВОЕ МЕНЮ)
 # ====================================================================
 
-def get_main_keyboard():
-    """Главное меню бота с кнопкой разбора операций"""
+def get_main_keyboard(unreviewed_count=0):
+    """
+    Главное меню бота с динамическим счетчиком на кнопке.
+    Если есть неразобранные операции — подсвечивает зелёным и выводит количество.
+    """
     keyboard = VkKeyboard(one_time=False)
-    keyboard.add_button('Разобрать операции', color=VkKeyboardColor.PRIMARY)
+    
+    if unreviewed_count > 0:
+        btn_text = f"Разобрать операции ({unreviewed_count})"
+        btn_color = VkKeyboardColor.POSITIVE
+    else:
+        btn_text = "Разобрать операции"
+        btn_color = VkKeyboardColor.SECONDARY
+        
+    keyboard.add_button(btn_text, color=btn_color)
     keyboard.add_line()
     keyboard.add_button('Категории и статьи', color=VkKeyboardColor.SECONDARY)
     keyboard.add_line()
     keyboard.add_button('Помощь', color=VkKeyboardColor.SECONDARY)
     return keyboard
+
+def get_user_main_keyboard(internal_uid):
+    """Удобный хелпер: сразу считает остаток в БД и выдает клавиатуру"""
+    try:
+        from db import get_unreviewed_count
+        cnt = get_unreviewed_count(internal_uid)
+    except Exception:
+        cnt = 0
+    return get_main_keyboard(cnt)
 
 def get_crud_keyboard():
     """Меню управления структурой"""
