@@ -7,7 +7,7 @@ from services import (
 from keyboards import get_receipt_mode_keyboard, get_main_keyboard
 from handlers_base import handle_base_commands
 from handlers_structure import handle_structure
-from handlers_queue import handle_queue_and_learning
+from handlers_queue import handle_queue_and_learning, _process_next_batch
 from handlers_receipt import handle_receipt
 from handlers_transaction import handle_transaction
 from db import (
@@ -30,6 +30,7 @@ for event in longpoll.listen():
     if event.type == VkEventType.MESSAGE_NEW and event.to_me:
         user_id = event.user_id
         user_text = event.text.strip()
+        internal_uid = get_or_create_user(user_id)
 
         # ==============================================================
         # 1. ПЕРЕХВАТ ГОЛОСОВОГО СООБЩЕНИЯ
@@ -114,20 +115,18 @@ for event in longpoll.listen():
                         if parse_result.get("status") == "SUCCESS":
                             operations = parse_result.get("operations", [])
                             send_vk_message(user_id, f"✅ Извлек {len(operations)} операций.\n⚡ Анализирую и сохраняю в базу данных...")
-                            internal_uid = get_or_create_user(user_id)
                             stats = import_parsed_operations(internal_uid, operations)
                             send_vk_message(
                                 user_id,
                                 f"📊 Результат загрузки:\n"
                                 f"• Всего операций: {stats['total']}\n"
                                 f"• Автоматически распределено: {stats['verified']}\n"
-                                f"• Требует проверки (завалы): {stats['needs_review']}"
+                                f"• Требует проверки: {stats['needs_review']}"
                             )
                             if stats['needs_review'] == 0:
-                                send_vk_message(user_id, "🎉 Все операции успешно распределены! Завалов нет.", get_main_keyboard())
+                                send_vk_message(user_id, "🎉 Все операции успешно распределены! Завалов нет.", get_main_keyboard(user_id))
                             else:
-                                from handlers_queue import _process_next_batch
-                                unverified_raw = get_unverified_transactions(internal_uid)
+                                unverified_raw = get_unverified_transactions(user_id)
                                 unique_items = {}
                                 for row in unverified_raw:
                                     key = f"{row['type']}_{row['original_item']}"
@@ -143,7 +142,6 @@ for event in longpoll.listen():
                                 
                                 full_menu = get_full_menu(internal_uid)
                                 combined_menu = {}
-                                # Исправлено: извлекаем список подкатегорий, а не вложенный словарь со статьями
                                 for t in ["Расход", "Доход"]:
                                     for c, s in full_menu.get(t, {}).items():
                                         combined_menu[c] = list(s.keys()) if isinstance(s, dict) else s
@@ -186,4 +184,4 @@ for event in longpoll.listen():
         if handle_transaction(user_id, user_text, state, user_states):
             continue
 
-        send_vk_message(user_id, "⚠️ Неверный ввод. Пожалуйста, выберите вариант из меню.\nДля выхода нажмите «Отмена».")
+        send_vk_message(user_id, "⚠️ Неверный ввод. Пожалуйста, выберите вариант из меню.\nДля выхода нажмите «Отмена».", get_main_keyboard(user_id))
