@@ -96,7 +96,7 @@ def smart_search_item(user_id, item_name, op_type=None):
             exact_params = (user_id, user_id, clean_item)
             fuzzy_params = (clean_item, user_id, user_id, clean_item)
 
-        # Шаг 1: Точное совпадение (мгновенно и без ошибок с регистром)
+        # Шаг 1: Точное совпадение
         exact_query = f"""
             SELECT type, category, subcategory, article
             FROM ({combined_source}) AS combined
@@ -222,17 +222,23 @@ def get_unverified_transactions(user_id):
     """
     Возвращает список всех нераспознанных операций пользователя:
     со статусом 'needs_review' ИЛИ находящихся в 'Требует проверки' / 'Разное'.
+    Ищет как по внутреннему id, так и по vk_id.
     """
     conn = get_db_connection()
     cur = conn.cursor()
     try:
         cur.execute("""
-            SELECT id, type, original_text, amount, comment
-            FROM transactions
-            WHERE user_id = %s 
-              AND (status = 'needs_review' OR subcategory = 'Требует проверки' OR category = 'Разное')
-            ORDER BY id DESC;
-        """, (user_id,))
+            SELECT t.id, t.type, t.original_text, t.amount, t.comment
+            FROM transactions t
+            JOIN users u ON u.id = t.user_id
+            WHERE (u.id = %s OR u.vk_id = %s)
+              AND (
+                  t.status = 'needs_review' 
+                  OR LOWER(t.subcategory) = 'требует проверки' 
+                  OR LOWER(t.category) = 'разное'
+              )
+            ORDER BY t.id DESC;
+        """, (user_id, user_id))
         rows = cur.fetchall()
         result = []
         for r in rows:
@@ -250,18 +256,26 @@ def get_unverified_transactions(user_id):
 
 def get_unreviewed_count(user_id):
     """
-    Возвращает количество нераспознанных операций для динамического бейджа на кнопке.
+    Возвращает точное количество нераспознанных операций для динамического бейджа на кнопке.
     Работает мгновенно (1-2 мс) благодаря индексам в PostgreSQL.
+    Ищет как по внутреннему id, так и по vk_id.
     """
+    if not user_id:
+        return 0
     conn = get_db_connection()
     cur = conn.cursor()
     try:
         cur.execute("""
             SELECT COUNT(*) 
-            FROM transactions 
-            WHERE user_id = %s 
-              AND (status = 'needs_review' OR subcategory = 'Требует проверки' OR category = 'Разное');
-        """, (user_id,))
+            FROM transactions t
+            JOIN users u ON u.id = t.user_id
+            WHERE (u.id = %s OR u.vk_id = %s)
+              AND (
+                  t.status = 'needs_review' 
+                  OR LOWER(t.subcategory) = 'требует проверки' 
+                  OR LOWER(t.category) = 'разное'
+              );
+        """, (user_id, user_id))
         res = cur.fetchone()
         return res[0] if res else 0
     except Exception as e:
@@ -282,13 +296,22 @@ def resolve_unverified_item(user_id, original_item, op_type, category, subcatego
         cur.execute("""
             UPDATE transactions
             SET category = %s, subcategory = %s, article = %s, status = 'verified'
-            WHERE user_id = %s 
+            WHERE user_id IN (SELECT id FROM users WHERE id = %s OR vk_id = %s)
               AND original_text = %s 
-              AND (status = 'needs_review' OR subcategory = 'Требует проверки' OR category = 'Разное');
-        """, (category, subcategory, original_item, user_id, original_item))
+              AND (
+                  status = 'needs_review' 
+                  OR LOWER(subcategory) = 'требует проверки' 
+                  OR LOWER(category) = 'разное'
+              );
+        """, (category, subcategory, original_item, user_id, user_id, original_item))
         updated_count = cur.rowcount
         conn.commit()
-        learn_user_word(user_id, op_type, category, subcategory, original_item, original_item)
+
+        cur.execute("SELECT id FROM users WHERE id = %s OR vk_id = %s LIMIT 1;", (user_id, user_id))
+        u_row = cur.fetchone()
+        real_uid = u_row[0] if u_row else user_id
+
+        learn_user_word(real_uid, op_type, category, subcategory, original_item, original_item)
         return updated_count
     except Exception as e:
         print(f"Ошибка разрешения завалов: {e}")
