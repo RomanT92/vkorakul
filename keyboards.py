@@ -6,10 +6,9 @@ from vk_api.keyboard import VkKeyboard, VkKeyboardColor
 # ====================================================================
 
 def get_main_keyboard():
-    """Главное меню бота"""
+    """Главное меню бота с кнопкой разбора операций"""
     keyboard = VkKeyboard(one_time=False)
-    # Новое, профессиональное название для разбора завалов
-    keyboard.add_button('Импорт статистики прошлого', color=VkKeyboardColor.PRIMARY)
+    keyboard.add_button('Разобрать операции', color=VkKeyboardColor.PRIMARY)
     keyboard.add_line()
     keyboard.add_button('Категории и статьи', color=VkKeyboardColor.SECONDARY)
     keyboard.add_line()
@@ -59,10 +58,9 @@ def get_move_entity_keyboard():
 def get_numbered_keyboard(count):
     """Универсальная клавиатура с цифрами для выбора из списков"""
     keyboard = VkKeyboard(one_time=False)
-    limit = min(count, 36) # ВК поддерживает максимум 40 кнопок, ставим лимит
+    limit = min(count, 36)
     for i in range(1, limit + 1):
         keyboard.add_button(str(i), color=VkKeyboardColor.SECONDARY)
-        # Перенос на новую строку каждые 4 кнопки
         if i % 4 == 0 and i != limit:
             keyboard.add_line()
     keyboard.add_line()
@@ -88,12 +86,10 @@ def type_keyboard():
     return keyboard
 
 def get_cancel_keyboard():
-    """Просто кнопка Отмена для текстового ввода"""
+    """Кнопка Отмена для выхода из любого диалога"""
     keyboard = VkKeyboard(one_time=False)
     keyboard.add_button('Отмена', color=VkKeyboardColor.NEGATIVE)
     return keyboard
-
-# --- КЛАВИАТУРЫ ДЛЯ ЧЕКОВ И ИМПОРТА ---
 
 def get_receipt_mode_keyboard():
     """Выбор режима обработки чека"""
@@ -105,7 +101,7 @@ def get_receipt_mode_keyboard():
     return keyboard
 
 def get_receipt_review_keyboard(count):
-    """Клавиатура для ревью позиций чека (цифры + Готово)"""
+    """Клавиатура для ревью позиций чека"""
     keyboard = VkKeyboard(one_time=False)
     limit = min(count, 36)
     for i in range(1, limit + 1):
@@ -118,7 +114,7 @@ def get_receipt_review_keyboard(count):
     return keyboard
 
 def get_queue_review_keyboard(count):
-    """Клавиатура для ревью пакета импорта (цифры + Сохранить пакет)"""
+    """Клавиатура для ревью пакета операций"""
     keyboard = VkKeyboard(one_time=False)
     limit = min(count, 36)
     for i in range(1, limit + 1):
