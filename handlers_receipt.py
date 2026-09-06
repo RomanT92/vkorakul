@@ -41,7 +41,9 @@ def _show_receipt_items(user_id, items):
     send_vk_message(user_id, msg, get_receipt_review_keyboard(len(items)))
 
 def handle_receipt(user_id, user_text, user_text_lower, state, user_states):
-    """Обрабатывает логику работы с чеками через PostgreSQL."""
+    """
+    Обрабатывает логику работы с фотографиями чеков через PostgreSQL.
+    """
     internal_uid = get_or_create_user(user_id)
 
     # =========================================================
@@ -82,7 +84,7 @@ def handle_receipt(user_id, user_text, user_text_lower, state, user_states):
                         send_vk_message(
                             user_id,
                             f"✅ Чек успешно записан!\n📂 {search_res['category']} -> {search_res['subcategory']}",
-                            get_main_keyboard()
+                            get_main_keyboard(user_id)
                         )
                     else:
                         menu_full = get_full_menu(internal_uid)
@@ -111,13 +113,13 @@ def handle_receipt(user_id, user_text, user_text_lower, state, user_states):
                                 "menu_str": menu_str,
                                 "attempts": 1
                             }
-                            send_vk_message(user_id, f"🤔 Я пока не знаю магазин '{shop_name}'.\nПодскажи в двух словах, что это?", get_cancel_keyboard())
+                            send_vk_message(user_id, f"🤔 Я пока не знаю магазин '{shop_name}'.\nПодскажи буквально в двух словах, что это?", get_cancel_keyboard())
                 except json.JSONDecodeError:
-                    send_vk_message(user_id, "❌ Ошибка: ИИ вернул некорректный формат ответа.", get_main_keyboard())
+                    send_vk_message(user_id, "❌ Ошибка: ИИ вернул некорректный формат ответа.", get_main_keyboard(user_id))
                 except Exception as e:
-                    send_vk_message(user_id, f"❌ Ошибка базы данных: {e}", get_main_keyboard())
+                    send_vk_message(user_id, f"❌ Ошибка базы данных: {e}", get_main_keyboard(user_id))
             else:
-                send_vk_message(user_id, "❌ Не удалось прочитать чек.", get_main_keyboard())
+                send_vk_message(user_id, "❌ Не удалось прочитать чек.", get_main_keyboard(user_id))
             return True
 
         # --- РЕЖИМ 2: ПО ПОЗИЦИЯМ ---
@@ -147,13 +149,13 @@ def handle_receipt(user_id, user_text, user_text_lower, state, user_states):
                         }
                         _show_receipt_items(user_id, items)
                     else:
-                        send_vk_message(user_id, "❌ Не удалось найти позиции на чеке.", get_main_keyboard())
+                        send_vk_message(user_id, "❌ Не удалось найти позиции на чеке.", get_main_keyboard(user_id))
                         del user_states[user_id]
                 except json.JSONDecodeError:
-                    send_vk_message(user_id, "❌ Ошибка: ИИ вернул неверный формат списка позиций.", get_main_keyboard())
+                    send_vk_message(user_id, "❌ Ошибка: ИИ вернул неверный формат списка позиций.", get_main_keyboard(user_id))
                     del user_states[user_id]
             else:
-                send_vk_message(user_id, "❌ Ошибка связи с ИИ при чтении чека.", get_main_keyboard())
+                send_vk_message(user_id, "❌ Ошибка связи с ИИ при чтении чека.", get_main_keyboard(user_id))
                 del user_states[user_id]
             return True
 
@@ -200,7 +202,7 @@ def handle_receipt(user_id, user_text, user_text_lower, state, user_states):
             if needs_review_count > 0:
                 report_msg += f"\n\n⚠️ {needs_review_count} позиций требуют уточнения. Вы можете распределить их кнопкой «Разобрать операции»."
             
-            send_vk_message(user_id, report_msg, get_main_keyboard())
+            send_vk_message(user_id, report_msg, get_main_keyboard(user_id))
             del user_states[user_id]
             return True
 
