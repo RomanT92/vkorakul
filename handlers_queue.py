@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 from keyboards import (
-    get_main_keyboard,
+    get_user_main_keyboard,
     get_yes_no_keyboard,
     get_cancel_keyboard,
     get_queue_review_keyboard,
@@ -40,8 +40,9 @@ def _show_batch_items(user_id, batch, total_left, show_apply_all=False):
 def _process_next_batch(user_id, user_states):
     state_data = user_states[user_id]
     queue = state_data.get("queue", [])
+    internal_uid = state_data.get("internal_uid")
     if not queue:
-        send_vk_message(user_id, "🎉 Все операции успешно распределены! Журнал чист.", get_main_keyboard())
+        send_vk_message(user_id, "🎉 Все операции успешно распределены! Журнал чист.", get_user_main_keyboard(internal_uid))
         del user_states[user_id]
         return
 
@@ -50,7 +51,6 @@ def _process_next_batch(user_id, user_states):
     menu = state_data["menu"]
     menu_str = "\n".join([f"{c}: {', '.join(subs)}" for c, subs in menu.items()])
 
-    # Сбрасываем запомненную подсказку для нового пакета
     state_data.pop("last_category", None)
     state_data.pop("last_subcategory", None)
     state_data.pop("last_edit_idx", None)
@@ -76,21 +76,16 @@ def handle_queue_and_learning(user_id, user_text, user_text_lower, state, user_s
     internal_uid = get_or_create_user(user_id)
 
     # =========================================================
-    # 1. ЗАПУСК РАЗБОРА ОПЕРАЦИЙ
+    # 1. ЗАПУСК РАЗБОРА ОПЕРАЦИЙ (с динамическим счетчиком на кнопке)
     # =========================================================
-    triggers = [
-        "разобрать операции",
-        "разобрать завалы",
-        "разобрать",
-        "завалы",
-        "импорт статистики прошлого"
-    ]
-    if user_text_lower in triggers:
+    if user_text_lower.startswith("разобрать операции") or user_text_lower in [
+        "разобрать завалы", "разобрать", "завалы", "импорт статистики прошлого"
+    ]:
         send_vk_message(user_id, "⏳ Проверяю нераспознанные операции в базе...")
         unverified_raw = get_unverified_transactions(internal_uid)
 
         if not unverified_raw:
-            send_vk_message(user_id, "🎉 Всё чисто! Нераспределенных операций нет.", get_main_keyboard())
+            send_vk_message(user_id, "🎉 Всё чисто! Нераспределенных операций нет.", get_user_main_keyboard(internal_uid))
             return True
 
         unique_items = {}
@@ -115,6 +110,7 @@ def handle_queue_and_learning(user_id, user_text, user_text_lower, state, user_s
 
         user_states[user_id] = {
             "state": "queue_process",
+            "internal_uid": internal_uid,
             "queue": unverified_grouped,
             "menu": combined_menu
         }
@@ -154,14 +150,12 @@ def handle_queue_and_learning(user_id, user_text, user_text_lower, state, user_s
                 return True
 
             applied_count = 0
-            # Применяем ко всем статьям после отредактированной (или ко всем оставшимся)
             for i in range(start_idx, len(batch)):
                 batch[i]["category"] = last_cat
                 batch[i]["subcategory"] = last_sub
                 applied_count += 1
 
             if applied_count == 0:
-                # Если была отредактирована самая последняя позиция — применяем ко всему пакету
                 for item in batch:
                     item["category"] = last_cat
                     item["subcategory"] = last_sub
@@ -197,7 +191,6 @@ def handle_queue_and_learning(user_id, user_text, user_text_lower, state, user_s
         sel_item["category"] = ai_cat
         sel_item["subcategory"] = ai_sub
 
-        # Запоминаем эту категорию как последнюю подсказку для кнопки "Применить для всех"
         state_data["last_category"] = ai_cat
         state_data["last_subcategory"] = ai_sub
         state_data["last_edit_idx"] = idx
@@ -239,7 +232,7 @@ def handle_queue_and_learning(user_id, user_text, user_text_lower, state, user_s
                 article=item_name,
                 synonym=item_name
             )
-            send_vk_message(user_id, f"✅ Успешно выучено и записано!\n📂 {cat} -> {sub}", get_main_keyboard())
+            send_vk_message(user_id, f"✅ Успешно выучено и записано!\n📂 {cat} -> {sub}", get_user_main_keyboard(internal_uid))
             del user_states[user_id]
             return True
 
@@ -257,7 +250,7 @@ def handle_queue_and_learning(user_id, user_text, user_text_lower, state, user_s
             return True
 
     # =========================================================
-    # 4. ОБРАБОТКА ПОДСКАЗКИ ОТ ПОЛЬЗОВАТЕЛЯ (ОДИНОЧНЫЙ РЕЖИМ)
+    # 4. ОБРАБОТКА ПОДСКАЗКИ ОТ ПОЛЬЗОВАТЕЛЯ
     # =========================================================
     if state == "provide_context":
         send_vk_message(user_id, "🧠 Думаю...")
@@ -311,7 +304,7 @@ def handle_queue_and_learning(user_id, user_text, user_text_lower, state, user_s
             type_menu = menu_full.get(op_type, {})
             cats = sorted(list(type_menu.keys()))
             if not cats:
-                send_vk_message(user_id, f"Категорий типа '{op_type}' пока нет.", get_main_keyboard())
+                send_vk_message(user_id, f"Категорий типа '{op_type}' пока нет.", get_user_main_keyboard(internal_uid))
                 del user_states[user_id]
                 return True
 
@@ -382,7 +375,7 @@ def handle_queue_and_learning(user_id, user_text, user_text_lower, state, user_s
                     article=item_name,
                     synonym=item_name
                 )
-                send_vk_message(user_id, f"✅ Успешно! Я запомнил, что «{item_name}» — это {sel_cat} -> {sel_sub}.", get_main_keyboard())
+                send_vk_message(user_id, f"✅ Успешно! Я запомнил, что «{item_name}» — это {sel_cat} -> {sel_sub}.", get_user_main_keyboard(internal_uid))
                 del user_states[user_id]
                 return True
 
