@@ -45,10 +45,10 @@ def handle_base_commands(user_id, user_text_lower, state, user_states):
         return True
 
     # =========================================================
-    # ПОЛЬЗОВАТЕЛЬСКАЯ НАВИГАЦИЯ
+    # ПОЛЬЗОВАТЕЛЬСКАЯ НАВИГАЦИЯ (ГИБКОЕ СОПОСТАВЛЕНИЕ С ЭМОДЗИ)
     # =========================================================
-    if user_text_lower in ["помощь", "начать", "start", "отмена", "назад"]:
-        if user_text_lower in ["помощь", "начать", "start"]:
+    if any(cmd in user_text_lower for cmd in ["помощь", "начать", "start", "отмена", "назад"]):
+        if any(cmd in user_text_lower for cmd in ["помощь", "начать", "start"]):
             if user_id in user_states:
                 del user_states[user_id]
             help_text = (
@@ -61,7 +61,7 @@ def handle_base_commands(user_id, user_text_lower, state, user_states):
             send_vk_message(user_id, help_text, get_main_keyboard(user_id))
             return True
 
-        if user_text_lower == "назад":
+        if "назад" in user_text_lower:
             if state in ["wait_entity_create", "wait_entity_rename", "wait_del_move_action"]:
                 user_states[user_id] = {"state": "menu_crud"}
                 send_vk_message(user_id, "Управление структурой. Что хотите сделать?", get_crud_keyboard())
@@ -77,22 +77,22 @@ def handle_base_commands(user_id, user_text_lower, state, user_states):
         send_vk_message(user_id, "Действие отменено. Главное меню.", get_main_keyboard(user_id))
         return True
 
-    if user_text_lower == "категории и статьи":
+    if "категории и статьи" in user_text_lower:
         user_states[user_id] = {"state": "menu_crud"}
         send_vk_message(user_id, "Управление структурой. Что хотите сделать?", get_crud_keyboard())
         return True
 
     if state == "menu_crud":
         from keyboards import get_entity_keyboard, get_del_move_keyboard
-        if user_text_lower == "создать":
+        if "создать" in user_text_lower:
             user_states[user_id]["state"] = "wait_entity_create"
             send_vk_message(user_id, "Что именно вы хотите создать?", get_entity_keyboard())
             return True
-        elif user_text_lower == "переименовать":
+        elif "переименовать" in user_text_lower:
             user_states[user_id]["state"] = "wait_entity_rename"
             send_vk_message(user_id, "Что именно вы хотите переименовать?", get_entity_keyboard())
             return True
-        elif user_text_lower == "удалить / перенести":
+        elif "удалить" in user_text_lower or "перенести" in user_text_lower:
             user_states[user_id]["state"] = "wait_del_move_action"
             send_vk_message(user_id, "Что вы хотите сделать?", get_del_move_keyboard())
             return True
