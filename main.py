@@ -184,4 +184,4 @@ for event in longpoll.listen():
         if handle_transaction(user_id, user_text, state, user_states):
             continue
 
-        send_vk_message(user_id, "⚠️ Неверный ввод. Пожалуйста, выберите вариант из меню.\nДля выхода нажмите «Отмена».", get_main_keyboard(user_id))
+        send_vk_message(user_id, "⚠️ Неверный ввод. Пожалуйста, выберите вариант из меню.\nДля выхода нажмите «🚫 Отмена».", get_main_keyboard(user_id))
