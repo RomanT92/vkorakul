@@ -31,9 +31,9 @@ def _show_batch_items(user_id, batch, total_left, show_apply_all=False):
         msg += f"{i+1}. {item['original_item']} ({item['count']} шт., ~{item['amount']} руб.)\n"
         msg += f" 📂 {item.get('category', '?')} -> {item.get('subcategory', '?')}\n\n"
     
-    msg += "Если всё верно, жмите «Сохранить пакет».\n"
+    msg += "Если всё верно, жмите «💾 Сохранить пакет».\n"
     if show_apply_all:
-        msg += "Нажмите «Применить для всех оставшихся», чтобы продублировать последнюю категорию.\n"
+        msg += "Нажмите «⚡ Применить для всех оставшихся», чтобы продублировать последнюю категорию.\n"
     msg += "Если хотите изменить отдельную статью — отправьте её НОМЕР."
     
     send_vk_message(user_id, msg, get_queue_review_keyboard(len(batch), show_apply_all=show_apply_all))
@@ -81,11 +81,17 @@ def handle_queue_and_learning(user_id, user_text, user_text_lower, state, user_s
     internal_uid = get_or_create_user(user_id)
 
     # =========================================================
-    # 1. ЗАПУСК РАЗБОРА ОПЕРАЦИЙ (с динамическим счетчиком на кнопке)
+    # 1. ЗАПУСК РАЗБОРА ОПЕРАЦИЙ (с поддержкой эмодзи 📥 и счетчика)
     # =========================================================
-    if user_text_lower.startswith("разобрать операции") or user_text_lower in [
-        "разобрать завалы", "разобрать", "завалы", "импорт статистики прошлого"
-    ]:
+    triggers = [
+        "разобрать операции",
+        "разобрать завалы",
+        "разобрать",
+        "завалы",
+        "импорт статистики прошлого"
+    ]
+    # Используем проверку вхождения (любой текст кнопки с эмодзи 📥 или числом в скобках сработает)
+    if state == "" and any(trigger in user_text_lower for trigger in triggers):
         send_vk_message(user_id, "⏳ Проверяю нераспознанные операции в базе...")
         unverified_raw = get_unverified_transactions(user_id)
 
@@ -129,7 +135,7 @@ def handle_queue_and_learning(user_id, user_text, user_text_lower, state, user_s
         batch = state_data["current_batch"]
 
         # --- СОХРАНЕНИЕ ПАКЕТА ---
-        if user_text_lower == "сохранить пакет":
+        if "сохранить пакет" in user_text_lower:
             send_vk_message(user_id, "⏳ Сохраняю и обучаю систему...", get_cancel_keyboard())
             for item in batch:
                 resolve_unverified_item(
@@ -144,7 +150,7 @@ def handle_queue_and_learning(user_id, user_text, user_text_lower, state, user_s
             return True
 
         # --- ПРИМЕНИТЬ ПОДСКАЗКУ ДЛЯ ВСЕХ ОСТАВШИХСЯ ---
-        elif user_text_lower in ["применить для всех оставшихся", "применить для всех", "применить ко всем"]:
+        elif any(phrase in user_text_lower for phrase in ["применить для всех", "применить ко всем"]):
             last_cat = state_data.get("last_category")
             last_sub = state_data.get("last_subcategory")
             start_idx = state_data.get("last_edit_idx", 0) + 1
@@ -207,7 +213,7 @@ def handle_queue_and_learning(user_id, user_text, user_text_lower, state, user_s
     # 3. ОДИНОЧНОЕ ОБУЧЕНИЕ: ПОДТВЕРЖДЕНИЕ "ДА / НЕТ"
     # =========================================================
     if state == "confirm_category":
-        if user_text_lower in ["да", "верно", "ага", "давай", "ок", "yes", "+"]:
+        if any(w in user_text_lower for w in ["да", "верно", "ага", "давай", "ок", "yes", "+"]):
             payload = user_states[user_id]["payload"]
             cat = user_states[user_id]["ai_cat"]
             sub = user_states[user_id]["ai_sub"]
@@ -240,7 +246,7 @@ def handle_queue_and_learning(user_id, user_text, user_text_lower, state, user_s
             del user_states[user_id]
             return True
 
-        elif user_text_lower in ["нет", "неверно", "не", "no", "-"]:
+        elif any(w in user_text_lower for w in ["нет", "неверно", "не", "no", "-"]):
             if user_states[user_id]["attempts"] < MAX_ATTEMPTS:
                 user_states[user_id]["state"] = "provide_context"
                 user_states[user_id]["context_history"] = ""
@@ -250,11 +256,11 @@ def handle_queue_and_learning(user_id, user_text, user_text_lower, state, user_s
                 send_vk_message(user_id, "🤷‍♂️ Я сдаюсь. Давайте выберем вручную!\n\nЭто Расход или Доход?", type_keyboard())
             return True
         else:
-            send_vk_message(user_id, "Пожалуйста, ответь 'Да' или 'Нет'.", get_yes_no_keyboard())
+            send_vk_message(user_id, "Пожалуйста, ответьте «✅ Да» или «❌ Нет».", get_yes_no_keyboard())
             return True
 
     # =========================================================
-    # 4. ОБРАБОТКА ПОДСКАЗКИ ОТ ПОЛЬЗОВАТЕЛЯ
+    # 4. ОБРАБОТКА ПОДСКАЗКИ ОТ ПОЛЬЗОВАТЕЛЯ (ОДИНОЧНЫЙ РЕЖИМ)
     # =========================================================
     if state == "provide_context":
         send_vk_message(user_id, "🧠 Думаю...")
@@ -322,7 +328,7 @@ def handle_queue_and_learning(user_id, user_text, user_text_lower, state, user_s
             send_vk_message(user_id, msg, get_numbered_keyboard(len(cats)))
             return True
         else:
-            send_vk_message(user_id, "Пожалуйста, выберите 'Расход' или 'Доход' кнопками внизу.", type_keyboard())
+            send_vk_message(user_id, "Пожалуйста, выберите «📉 Расход» или «📈 Доход» кнопками внизу.", type_keyboard())
             return True
 
     if state == "tx_manual_cat":
