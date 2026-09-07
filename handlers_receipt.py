@@ -37,13 +37,11 @@ def _show_receipt_items(user_id, items):
     for i, item in enumerate(items):
         msg += f"{i+1}. {item.get('item')} — {item.get('amount')} руб.\n"
         msg += f" 📂 {item.get('category', '?')} -> {item.get('subcategory', '?')}\n\n"
-    msg += "Если всё верно, жмите «Готово».\nЕсли есть ошибка — отправьте НОМЕР товара, чтобы дать подсказку."
+    msg += "Если всё верно, жмите «✅ Готово».\nЕсли есть ошибка — отправьте НОМЕР товара, чтобы дать подсказку."
     send_vk_message(user_id, msg, get_receipt_review_keyboard(len(items)))
 
 def handle_receipt(user_id, user_text, user_text_lower, state, user_states):
-    """
-    Обрабатывает логику работы с фотографиями чеков через PostgreSQL.
-    """
+    """Обрабатывает логику работы с фотографиями чеков через PostgreSQL."""
     internal_uid = get_or_create_user(user_id)
 
     # =========================================================
@@ -53,7 +51,7 @@ def handle_receipt(user_id, user_text, user_text_lower, state, user_states):
         photo_url = user_states[user_id].get("photo_url")
 
         # --- РЕЖИМ 1: ОБЩИЙ ИТОГ ---
-        if user_text_lower == "общий итог":
+        if "общий итог" in user_text_lower:
             send_vk_message(user_id, "👀 Изучаю чек (общий итог)...", get_cancel_keyboard())
             reply_text = extract_receipt_total_with_ai(photo_url)
             del user_states[user_id]
@@ -123,7 +121,7 @@ def handle_receipt(user_id, user_text, user_text_lower, state, user_states):
             return True
 
         # --- РЕЖИМ 2: ПО ПОЗИЦИЯМ ---
-        elif user_text_lower == "по позициям":
+        elif "по позициям" in user_text_lower:
             send_vk_message(user_id, "⏳ Загружаю структуру категорий...", get_cancel_keyboard())
             menu_full = get_full_menu(internal_uid)
             
@@ -163,7 +161,7 @@ def handle_receipt(user_id, user_text, user_text_lower, state, user_states):
     # 2. РЕВЬЮ ПОЗИЦИЙ (Кнопка "Готово" или выбор номера)
     # =========================================================
     if state == "receipt_review":
-        if user_text_lower == "готово":
+        if "готово" in user_text_lower:
             items = user_states[user_id]["items"]
             send_vk_message(user_id, "⏳ Сохраняю товары в базу данных...", get_cancel_keyboard())
             success_count = 0
