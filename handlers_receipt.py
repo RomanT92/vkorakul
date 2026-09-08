@@ -5,6 +5,7 @@ from keyboards import (
     get_main_keyboard,
     get_cancel_keyboard,
     get_receipt_review_keyboard,
+    get_receipt_mode_keyboard,
     get_yes_no_keyboard
 )
 from services import (
@@ -38,11 +39,28 @@ def _show_receipt_items(user_id, items):
         msg += f"{i+1}. {item.get('item')} — {item.get('amount')} руб.\n"
         msg += f" 📂 {item.get('category', '?')} -> {item.get('subcategory', '?')}\n\n"
     msg += "Если всё верно, жмите «✅ Готово».\nЕсли есть ошибка — отправьте НОМЕР товара, чтобы дать подсказку."
-    send_vk_message(user_id, msg, get_receipt_review_keyboard(len(items)))
+    send_vk_message(user_id, msg, get_receipt_review_keyboard(len(items), show_back=True))
 
 def handle_receipt(user_id, user_text, user_text_lower, state, user_states):
     """Обрабатывает логику работы с фотографиями чеков через PostgreSQL."""
     internal_uid = get_or_create_user(user_id)
+
+    # =========================================================
+    # ОБРАБОТКА «НАЗАД» В ЧЕКАХ
+    # =========================================================
+    if "назад" in user_text_lower:
+        if state == "receipt_mode_select":
+            del user_states[user_id]
+            send_vk_message(user_id, "Главное меню.", get_main_keyboard(user_id))
+            return True
+        elif state == "receipt_review":
+            user_states[user_id]["state"] = "receipt_mode_select"
+            send_vk_message(user_id, "👀 Выберите режим записи чека:", get_receipt_mode_keyboard(show_back=True))
+            return True
+        elif state == "receipt_edit_hint":
+            user_states[user_id]["state"] = "receipt_review"
+            _show_receipt_items(user_id, user_states[user_id]["items"])
+            return True
 
     # =========================================================
     # 1. ВЫБОР РЕЖИМА (Общий итог или По позициям)
@@ -52,7 +70,7 @@ def handle_receipt(user_id, user_text, user_text_lower, state, user_states):
 
         # --- РЕЖИМ 1: ОБЩИЙ ИТОГ ---
         if "общий итог" in user_text_lower:
-            send_vk_message(user_id, "👀 Изучаю чек (общий итог)...", get_cancel_keyboard())
+            send_vk_message(user_id, "👀 Изучаю чек (общий итог)...", get_cancel_keyboard(show_back=True))
             reply_text = extract_receipt_total_with_ai(photo_url)
             del user_states[user_id]
 
@@ -102,7 +120,7 @@ def handle_receipt(user_id, user_text, user_text_lower, state, user_states):
                                 "ai_sub": ai_sub,
                                 "attempts": 1
                             }
-                            send_vk_message(user_id, f"🤖 Думаю, '{shop_name}' относится к:\n📂 {ai_cat} -> {ai_sub}\n\nВсё верно?", get_yes_no_keyboard())
+                            send_vk_message(user_id, f"🤖 Думаю, '{shop_name}' относится к:\n📂 {ai_cat} -> {ai_sub}\n\nВсё верно?", get_yes_no_keyboard(show_back=True))
                         else:
                             user_states[user_id] = {
                                 "state": "provide_context",
@@ -111,7 +129,7 @@ def handle_receipt(user_id, user_text, user_text_lower, state, user_states):
                                 "menu_str": menu_str,
                                 "attempts": 1
                             }
-                            send_vk_message(user_id, f"🤔 Я пока не знаю магазин '{shop_name}'.\nПодскажи буквально в двух словах, что это?", get_cancel_keyboard())
+                            send_vk_message(user_id, f"🤔 Я пока не знаю магазин '{shop_name}'.\nПодскажи буквально в двух словах, что это?", get_cancel_keyboard(show_back=True))
                 except json.JSONDecodeError:
                     send_vk_message(user_id, "❌ Ошибка: ИИ вернул некорректный формат ответа.", get_main_keyboard(user_id))
                 except Exception as e:
@@ -122,7 +140,7 @@ def handle_receipt(user_id, user_text, user_text_lower, state, user_states):
 
         # --- РЕЖИМ 2: ПО ПОЗИЦИЯМ ---
         elif "по позициям" in user_text_lower:
-            send_vk_message(user_id, "⏳ Загружаю структуру категорий...", get_cancel_keyboard())
+            send_vk_message(user_id, "⏳ Загружаю структуру категорий...", get_cancel_keyboard(show_back=True))
             menu_full = get_full_menu(internal_uid)
             
             exp_menu = menu_full.get("Расход", {})
@@ -163,7 +181,7 @@ def handle_receipt(user_id, user_text, user_text_lower, state, user_states):
     if state == "receipt_review":
         if "готово" in user_text_lower:
             items = user_states[user_id]["items"]
-            send_vk_message(user_id, "⏳ Сохраняю товары в базу данных...", get_cancel_keyboard())
+            send_vk_message(user_id, "⏳ Сохраняю товары в базу данных...", get_cancel_keyboard(show_back=False))
             success_count = 0
             needs_review_count = 0
 
@@ -198,7 +216,7 @@ def handle_receipt(user_id, user_text, user_text_lower, state, user_states):
 
             report_msg = f"🎉 Успешно сохранено {success_count} позиций!"
             if needs_review_count > 0:
-                report_msg += f"\n\n⚠️ {needs_review_count} позиций требуют уточнения. Вы можете распределить их кнопкой «Разобрать операции»."
+                report_msg += f"\n\n⚠️ {needs_review_count} позиций требуют уточнения. Вы можете распределить их кнопкой «📥 Разобрать операции»."
             
             send_vk_message(user_id, report_msg, get_main_keyboard(user_id))
             del user_states[user_id]
@@ -211,7 +229,7 @@ def handle_receipt(user_id, user_text, user_text_lower, state, user_states):
                 user_states[user_id]["edit_idx"] = idx
                 user_states[user_id]["state"] = "receipt_edit_hint"
                 sel_item = items[idx]
-                send_vk_message(user_id, f"✏️ Исправляем: {sel_item.get('item')}\nНапишите правильную категорию или дайте подсказку:", get_cancel_keyboard())
+                send_vk_message(user_id, f"✏️ Исправляем: {sel_item.get('item')}\nНапишите правильную категорию или дайте подсказку:", get_cancel_keyboard(show_back=True))
             return True
 
     # =========================================================
@@ -221,7 +239,7 @@ def handle_receipt(user_id, user_text, user_text_lower, state, user_states):
         idx = user_states[user_id]["edit_idx"]
         items = user_states[user_id]["items"]
         sel_item = items[idx]
-        send_vk_message(user_id, "🧠 Думаю...", get_cancel_keyboard())
+        send_vk_message(user_id, "🧠 Думаю...", get_cancel_keyboard(show_back=True))
         menu_str = user_states[user_id]["menu_str"]
         ai_cat, ai_sub = categorize_with_ai(sel_item.get("item"), menu_str, context=user_text)
         sel_item["category"] = ai_cat
