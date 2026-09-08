@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
-from keyboards import get_main_keyboard, get_crud_keyboard
+from keyboards import get_main_keyboard, get_crud_keyboard, get_cancel_keyboard
 from services import send_vk_message, send_to_google_sheets
 from db import migrate_dictionary_from_gs, get_new_unharvested_words
 
 def handle_base_commands(user_id, user_text_lower, state, user_states):
     """
-    Обработчик базовой навигации, команд отмены и служебных команд администратора.
+    Обработчик базовой навигации, команд отмены, помощи и импорта статистики.
     """
     # =========================================================
     # СЛУЖЕБНЫЕ КОМАНДЫ АДМИНИСТРАТОРА
@@ -61,20 +61,25 @@ def handle_base_commands(user_id, user_text_lower, state, user_states):
             del user_states[user_id]
         help_text = (
             "🤖 Привет! Я твой финансовый Оракул.\n\n"
-            "Просто напиши мне трату или доход, например:\n"
+            "Просто напиши или надиктуй мне трату или доход, например:\n"
             "👉 Такси 500\n"
             "👉 Зарплата 50000\n"
             "👉 Кофе 250, бензин 2000, в магните 1400\n\n"
-            "Используй кнопки меню для управления структурой и разбора трат!"
+            "💡 Чтобы загрузить прошлые выписки банков — нажмите «📊 Импорт статистики прошлого»!\n"
+            "Используйте кнопки меню для управления структурой и разбора трат."
         )
         send_vk_message(user_id, help_text, get_main_keyboard(user_id))
         return True
 
     # =========================================================
-    # НАЗАД ИЗ КОРНЕВЫХ МЕНЮ
+    # НАЗАД ИЗ РАЗНЫХ МЕНЮ
     # =========================================================
     if "назад" in user_text_lower:
-        if state in ["wait_entity_create", "wait_entity_rename", "wait_del_move_action"]:
+        if state == "wait_import_file":
+            del user_states[user_id]
+            send_vk_message(user_id, "Главное меню.", get_main_keyboard(user_id))
+            return True
+        elif state in ["wait_entity_create", "wait_entity_rename", "wait_del_move_action"]:
             user_states[user_id] = {"state": "menu_crud"}
             send_vk_message(user_id, "Управление структурой. Что хотите сделать?", get_crud_keyboard())
             return True
@@ -83,6 +88,24 @@ def handle_base_commands(user_id, user_text_lower, state, user_states):
                 del user_states[user_id]
             send_vk_message(user_id, "Главное меню.", get_main_keyboard(user_id))
             return True
+
+    # =========================================================
+    # ЗАПУСК «ИМПОРТ СТАТИСТИКИ ПРОШЛОГО»
+    # =========================================================
+    if "импорт статистики прошлого" in user_text_lower:
+        user_states[user_id] = {"state": "wait_import_file"}
+        import_instruction = (
+            "📊 **Импорт статистики прошлого**\n\n"
+            "Отправьте мне файл вашей банковской выписки или таблицу с историей трат.\n\n"
+            "📄 **Поддерживаемые форматы:**\n"
+            "• .CSV (выписки из Сбера, Т-Банка, Альфы, ВТБ)\n"
+            "• .XLSX / .XLS (Excel-таблицы любого банка или личные шаблоны)\n\n"
+            "💡 **Как получить выписку в банке:**\n"
+            "Зайдите в мобильное приложение банка ➔ выберите карту ➔ «Выписка по счету» ➔ период (месяц/год) ➔ формат CSV или Excel ➔ отправьте файл сюда в чат.\n\n"
+            "⚡ *ИИ самостоятельно определит даты, суммы, получателей и распределит всё по категориям!*"
+        )
+        send_vk_message(user_id, import_instruction, get_cancel_keyboard(show_back=True))
+        return True
 
     # =========================================================
     # ВХОД В УПРАВЛЕНИЕ СТРУКТУРОЙ
