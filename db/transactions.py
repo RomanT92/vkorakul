@@ -1,51 +1,79 @@
 # -*- coding: utf-8 -*-
 from .connection import get_db_connection
 
+def _resolve_internal_user_id(cur, user_id):
+    """
+    Гарантирует получение первичного ключа id (BIGINT) из таблицы users,
+    даже если передан vk_id.
+    """
+    cur.execute("SELECT id FROM users WHERE id = %s OR vk_id = %s LIMIT 1;", (user_id, user_id))
+    row = cur.fetchone()
+    return row[0] if row else user_id
+
 def smart_search_item(user_id, item_name, op_type=None):
     """
-    Нечеткий поиск синонима с регистронезависимостью (LOWER).
-    Если op_type не указан (None) — ищет по всей базе (и Расход, и Доход).
-    1. Сначала проверяет точное совпадение без триграмм (100% совпадение).
-    2. Если нет точного — запускает поиск по триграммам (pg_trgm) с порогом 0.7.
+    Поиск синонима с регистронезависимостью (LOWER).
+    Объединяет глобальную базу и личные слова пользователя с учетом меток удаления.
     """
     conn = get_db_connection()
     cur = conn.cursor()
     clean_item = item_name.lower().strip()
     try:
+        uid = _resolve_internal_user_id(cur, user_id)
+
         if op_type:
             combined_source = """
+                -- 1. Личные слова пользователя (активные)
                 SELECT type, category, subcategory, article, LOWER(synonym) AS synonym
                 FROM user_dictionary
                 WHERE user_id = %s AND type = %s AND is_deleted = FALSE
+
                 UNION ALL
+
+                -- 2. Глобальная база (исключая те, которые пользователь удалил у себя)
                 SELECT g.type, g.category, g.subcategory, g.article, LOWER(g.synonym) AS synonym
                 FROM global_dictionary g
-                LEFT JOIN user_dictionary u ON (
-                    u.user_id = %s AND u.type = g.type AND u.category = g.category
-                    AND u.subcategory = g.subcategory AND u.article = g.article AND u.is_deleted = TRUE
-                )
-                WHERE g.type = %s AND g.is_default = TRUE AND u.id IS NULL
+                WHERE g.type = %s
+                  AND NOT EXISTS (
+                      SELECT 1 FROM user_dictionary u
+                      WHERE u.user_id = %s
+                        AND u.type = g.type
+                        AND (
+                            (u.category = g.category AND (u.subcategory = '' OR u.subcategory IS NULL) AND u.is_deleted = TRUE)
+                            OR (u.category = g.category AND u.subcategory = g.subcategory AND (u.article = '' OR u.article IS NULL) AND u.is_deleted = TRUE)
+                            OR (u.category = g.category AND u.subcategory = g.subcategory AND u.article = g.article AND u.is_deleted = TRUE)
+                            OR (LOWER(u.synonym) = LOWER(g.synonym) AND u.is_deleted = TRUE)
+                        )
+                  )
             """
-            exact_params = (user_id, op_type, user_id, op_type, clean_item)
-            fuzzy_params = (clean_item, user_id, op_type, user_id, op_type, clean_item)
+            exact_params = (uid, op_type, op_type, uid, clean_item)
+            fuzzy_params = (clean_item, uid, op_type, op_type, uid, clean_item)
         else:
             combined_source = """
                 SELECT type, category, subcategory, article, LOWER(synonym) AS synonym
                 FROM user_dictionary
                 WHERE user_id = %s AND is_deleted = FALSE
+
                 UNION ALL
+
                 SELECT g.type, g.category, g.subcategory, g.article, LOWER(g.synonym) AS synonym
                 FROM global_dictionary g
-                LEFT JOIN user_dictionary u ON (
-                    u.user_id = %s AND u.type = g.type AND u.category = g.category
-                    AND u.subcategory = g.subcategory AND u.article = g.article AND u.is_deleted = TRUE
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM user_dictionary u
+                    WHERE u.user_id = %s
+                      AND u.type = g.type
+                      AND (
+                          (u.category = g.category AND (u.subcategory = '' OR u.subcategory IS NULL) AND u.is_deleted = TRUE)
+                          OR (u.category = g.category AND u.subcategory = g.subcategory AND (u.article = '' OR u.article IS NULL) AND u.is_deleted = TRUE)
+                          OR (u.category = g.category AND u.subcategory = g.subcategory AND u.article = g.article AND u.is_deleted = TRUE)
+                          OR (LOWER(u.synonym) = LOWER(g.synonym) AND u.is_deleted = TRUE)
+                      )
                 )
-                WHERE g.is_default = TRUE AND u.id IS NULL
             """
-            exact_params = (user_id, user_id, clean_item)
-            fuzzy_params = (clean_item, user_id, user_id, clean_item)
+            exact_params = (uid, uid, clean_item)
+            fuzzy_params = (clean_item, uid, uid, clean_item)
 
-        # Шаг 1: Точное совпадение
+        # Шаг 1: Точное совпадение (1-2 мс)
         exact_query = f"""
             SELECT type, category, subcategory, article
             FROM ({combined_source}) AS combined
@@ -63,7 +91,7 @@ def smart_search_item(user_id, item_name, op_type=None):
                 "article": exact_match[3]
             }
 
-        # Шаг 2: Триграммный поиск с опечатками
+        # Шаг 2: Триграммный поиск опечаток (pg_trgm)
         fuzzy_query = f"""
             SELECT type, category, subcategory, article, synonym, 
                    1 - (synonym <-> %s) AS similarity_score
@@ -73,31 +101,31 @@ def smart_search_item(user_id, item_name, op_type=None):
         """
         cur.execute(fuzzy_query, fuzzy_params)
         result = cur.fetchone()
-        if result:
-            score = result[5]
-            if score >= 0.7:
-                return {
-                    "status": "FOUND",
-                    "type": result[0],
-                    "category": result[1],
-                    "subcategory": result[2],
-                    "article": result[3]
-                }
+        if result and result[5] >= 0.7:
+            return {
+                "status": "FOUND",
+                "type": result[0],
+                "category": result[1],
+                "subcategory": result[2],
+                "article": result[3]
+            }
+
         return {"status": "NOT_FOUND"}
     finally:
         cur.close()
         conn.close()
 
 def save_transaction(user_id, op_type, category, subcategory, article, amount, comment, original_text, status='verified'):
-    """Записывает операцию дохода или расхода в таблицу transactions."""
+    """Записывает операцию в таблицу transactions."""
     conn = get_db_connection()
     cur = conn.cursor()
     try:
+        uid = _resolve_internal_user_id(cur, user_id)
         query = """
             INSERT INTO transactions (user_id, operation_date, type, category, subcategory, article, amount, comment, original_text, status)
             VALUES (%s, CURRENT_TIMESTAMP, %s, %s, %s, %s, %s, %s, %s, %s)
         """
-        cur.execute(query, (user_id, op_type, category, subcategory, article, amount, comment, original_text, status))
+        cur.execute(query, (uid, op_type, category, subcategory, article, amount, comment, original_text, status))
         conn.commit()
         return True
     except Exception as e:
@@ -112,6 +140,7 @@ def learn_user_word(user_id, op_type, category, subcategory, article, synonym):
     conn = get_db_connection()
     cur = conn.cursor()
     try:
+        uid = _resolve_internal_user_id(cur, user_id)
         clean_syn = synonym.lower().strip()
         query = """
             INSERT INTO user_dictionary (user_id, type, category, subcategory, article, synonym, is_deleted)
@@ -119,7 +148,7 @@ def learn_user_word(user_id, op_type, category, subcategory, article, synonym):
             ON CONFLICT (user_id, type, category, subcategory, article, synonym)
             DO UPDATE SET is_deleted = FALSE;
         """
-        cur.execute(query, (user_id, op_type, category, subcategory, article, clean_syn))
+        cur.execute(query, (uid, op_type, category, subcategory, article, clean_syn))
         conn.commit()
         return True
     except Exception as e:
@@ -131,27 +160,38 @@ def learn_user_word(user_id, op_type, category, subcategory, article, synonym):
 
 def get_full_menu(user_id):
     """
-    Строит актуальное трехуровневое дерево структуры для пользователя:
-    menu[Тип][Категория][Подкатегория] = [Статья1, Статья2, ...]
+    Строит актуальное дерево структуры для пользователя:
+    Глобальные категории + Личные категории МИНУС Удаленные пользователем.
     """
     conn = get_db_connection()
     cur = conn.cursor()
     menu = {"Расход": {}, "Доход": {}}
     try:
+        uid = _resolve_internal_user_id(cur, user_id)
+
         query = """
+            -- 1. Берем глобальные статьи, если пользователь не удалил их у себя
             SELECT g.type, g.category, g.subcategory, g.article
             FROM global_dictionary g
-            LEFT JOIN user_dictionary u ON (
-                u.user_id = %s AND u.type = g.type AND u.category = g.category
-                AND u.subcategory = g.subcategory AND u.article = g.article AND u.is_deleted = TRUE
+            WHERE NOT EXISTS (
+                SELECT 1 FROM user_dictionary u
+                WHERE u.user_id = %s
+                  AND u.type = g.type
+                  AND (
+                      (u.category = g.category AND (u.subcategory = '' OR u.subcategory IS NULL) AND u.is_deleted = TRUE)
+                      OR (u.category = g.category AND u.subcategory = g.subcategory AND (u.article = '' OR u.article IS NULL) AND u.is_deleted = TRUE)
+                      OR (u.category = g.category AND u.subcategory = g.subcategory AND u.article = g.article AND u.is_deleted = TRUE)
+                  )
             )
-            WHERE g.is_default = TRUE AND u.id IS NULL
+
             UNION
+
+            -- 2. Берем личные статьи пользователя
             SELECT type, category, subcategory, article
             FROM user_dictionary
             WHERE user_id = %s AND is_deleted = FALSE
         """
-        cur.execute(query, (user_id, user_id))
+        cur.execute(query, (uid, uid))
         for row in cur.fetchall():
             t, c, s, a = row[0], row[1], row[2], row[3]
             if t not in menu:
@@ -168,11 +208,7 @@ def get_full_menu(user_id):
         conn.close()
 
 def get_unverified_transactions(user_id):
-    """
-    Возвращает список всех нераспознанных операций пользователя:
-    со статусом 'needs_review' ИЛИ находящихся в 'Требует проверки' / 'Разное'.
-    Ищет как по внутреннему id, так и по vk_id.
-    """
+    """Возвращает нераспознанные операции."""
     conn = get_db_connection()
     cur = conn.cursor()
     try:
@@ -204,11 +240,7 @@ def get_unverified_transactions(user_id):
         conn.close()
 
 def get_unreviewed_count(user_id):
-    """
-    Возвращает точное количество нераспознанных операций для динамического бейджа на кнопке.
-    Работает мгновенно (1-2 мс) благодаря индексам в PostgreSQL.
-    Ищет как по внутреннему id, так и по vk_id.
-    """
+    """Счетчик неразобранных операций для кнопки."""
     if not user_id:
         return 0
     conn = get_db_connection()
@@ -235,10 +267,7 @@ def get_unreviewed_count(user_id):
         conn.close()
 
 def resolve_unverified_item(user_id, original_item, op_type, category, subcategory):
-    """
-    Массово подтверждает операции из завалов, устанавливая категорию,
-    и одновременно вносит термин в личный словарь.
-    """
+    """Подтверждает операцию и обучает личный словарь."""
     conn = get_db_connection()
     cur = conn.cursor()
     try:
@@ -256,11 +285,7 @@ def resolve_unverified_item(user_id, original_item, op_type, category, subcatego
         updated_count = cur.rowcount
         conn.commit()
 
-        cur.execute("SELECT id FROM users WHERE id = %s OR vk_id = %s LIMIT 1;", (user_id, user_id))
-        u_row = cur.fetchone()
-        real_uid = u_row[0] if u_row else user_id
-
-        learn_user_word(real_uid, op_type, category, subcategory, original_item, original_item)
+        learn_user_word(user_id, op_type, category, subcategory, original_item, original_item)
         return updated_count
     except Exception as e:
         print(f"Ошибка разрешения завалов: {e}")
