@@ -91,12 +91,12 @@ for event in longpoll.listen():
                 continue
 
         # ==============================================================
-        # 1.6 ПЕРЕХВАТ ДОКУМЕНТА (CSV ИЛИ XLSX ВЫПИСКИ)
+        # 1.6 ПЕРЕХВАТ ДОКУМЕНТА (ИМПОРТ ВЫПИСОК CSV / XLSX / XLS)
         # ==============================================================
         if not user_text and event.attachments:
             is_doc = any(val == 'doc' for val in event.attachments.values())
             if is_doc:
-                send_vk_message(user_id, "📁 Вижу файл. Изучаю его структуру...")
+                send_vk_message(user_id, "📁 Вижу файл выписки. Изучаю его структуру...")
                 try:
                     msg_data = vk.messages.getById(message_ids=event.message_id)['items'][0]
                     attachments = msg_data.get('attachments', [])
@@ -116,46 +116,30 @@ for event in longpoll.listen():
                             operations = parse_result.get("operations", [])
                             send_vk_message(user_id, f"✅ Извлек {len(operations)} операций.\n⚡ Анализирую и сохраняю в базу данных...")
                             stats = import_parsed_operations(internal_uid, operations)
-                            send_vk_message(
-                                user_id,
-                                f"📊 Результат загрузки:\n"
+                            
+                            report_msg = (
+                                f"📊 **Результат импорта:**\n"
                                 f"• Всего операций: {stats['total']}\n"
                                 f"• Автоматически распределено: {stats['verified']}\n"
                                 f"• Требует проверки: {stats['needs_review']}"
                             )
+                            
+                            # Очищаем состояние ожидания файла
+                            if user_id in user_states and user_states[user_id].get("state") == "wait_import_file":
+                                del user_states[user_id]
+                            
                             if stats['needs_review'] == 0:
-                                send_vk_message(user_id, "🎉 Все операции успешно распределены! Завалов нет.", get_main_keyboard(user_id))
+                                send_vk_message(user_id, report_msg + "\n\n🎉 Все операции распределены идеально!", get_main_keyboard(user_id))
                             else:
-                                unverified_raw = get_unverified_transactions(user_id)
-                                unique_items = {}
-                                for row in unverified_raw:
-                                    key = f"{row['type']}_{row['original_item']}"
-                                    if key not in unique_items:
-                                        unique_items[key] = {
-                                            "type": row["type"],
-                                            "original_item": row["original_item"],
-                                            "count": 1,
-                                            "amount": row["amount"]
-                                        }
-                                    else:
-                                        unique_items[key]["count"] += 1
-                                
-                                full_menu = get_full_menu(internal_uid)
-                                combined_menu = {}
-                                for t in ["Расход", "Доход"]:
-                                    for c, s in full_menu.get(t, {}).items():
-                                        combined_menu[c] = list(s.keys()) if isinstance(s, dict) else s
-                                
-                                user_states[user_id] = {
-                                    "state": "queue_process",
-                                    "queue": list(unique_items.values()),
-                                    "menu": combined_menu
-                                }
-                                _process_next_batch(user_id, user_states)
+                                report_msg += (
+                                    f"\n\n📥 Нажмите кнопку «Разобрать операции ({stats['needs_review']})», "
+                                    f"чтобы распределить оставшиеся статьи пакетами по 7 штук!"
+                                )
+                                send_vk_message(user_id, report_msg, get_main_keyboard(user_id))
                         else:
                             send_vk_message(user_id, f"❌ Не удалось разобрать файл: {parse_result.get('message')}")
                     else:
-                        send_vk_message(user_id, "⚠️ Пожалуйста, отправьте файл в формате .CSV или .XLSX")
+                        send_vk_message(user_id, "⚠️ Пожалуйста, отправьте файл в формате .CSV, .XLSX или .XLS")
                 except Exception as e:
                     print(f"Ошибка при обработке документа: {e}")
                     send_vk_message(user_id, "❌ Произошла ошибка при загрузке файла.")
@@ -169,6 +153,15 @@ for event in longpoll.listen():
 
         user_text_lower = user_text.lower()
         state = user_states.get(user_id, {}).get("state", "")
+
+        # Если бот ждал файл импорта, но пользователь написал текст
+        if state == "wait_import_file" and not any(cmd in user_text_lower for cmd in ["отмена", "назад"]):
+            send_vk_message(
+                user_id,
+                "⚠️ Пожалуйста, прикрепите файл выписки (.CSV или .XLSX) как документ к сообщению.\n"
+                "Для выхода нажмите «🚫 Отмена» или «🔙 Назад»."
+            )
+            continue
 
         # ==============================================================
         # 3. МАРШРУТИЗАЦИЯ (STATE MACHINE / РОУТЕР)
