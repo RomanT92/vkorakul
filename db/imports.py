@@ -4,11 +4,23 @@ import difflib
 from psycopg2.extras import execute_values
 from .connection import get_db_connection
 
+def _resolve_internal_user_id(cur, user_id):
+    """Гарантирует получение первичного ключа id (BIGINT) пользователя."""
+    cur.execute("SELECT id FROM users WHERE id = %s OR vk_id = %s LIMIT 1;", (user_id, user_id))
+    row = cur.fetchone()
+    return row[0] if row else user_id
+
 def import_parsed_operations(user_id, operations):
-    """Массовая запись операций из выписок в PostgreSQL за один запрос."""
+    """
+    Массовая запись операций из выписок в PostgreSQL за один сетевой запрос.
+    Поддерживает парсинг дат российских банков (dayfirst=True).
+    """
     conn = get_db_connection()
     cur = conn.cursor()
     try:
+        uid = _resolve_internal_user_id(cur, user_id)
+
+        # 1. Загружаем активный словарь (глобальный + личный)
         cur.execute("""
             SELECT type, category, subcategory, article, LOWER(synonym)
             FROM user_dictionary
@@ -17,7 +29,7 @@ def import_parsed_operations(user_id, operations):
             SELECT type, category, subcategory, article, LOWER(synonym)
             FROM global_dictionary
             WHERE is_default = TRUE;
-        """, (user_id,))
+        """, (uid,))
         dict_rows = cur.fetchall()
         
         exact_dict = {}
@@ -46,13 +58,14 @@ def import_parsed_operations(user_id, operations):
             if not desc or amount <= 0:
                 continue
             
-            op_type = "Доход" if ("доход" in raw_type.lower() or "приход" in raw_type.lower()) else "Расход"
+            op_type = "Доход" if ("доход" in str(raw_type).lower() or "приход" in str(raw_type).lower()) else "Расход"
             desc_lower = desc.lower()
             op_date = now
             comment = ""
             
             if has_pd:
-                parsed_ts = pd.to_datetime(raw_date, errors='coerce')
+                # dayfirst=True гарантирует корректный парсинг ДД.ММ.ГГГГ для банков РФ
+                parsed_ts = pd.to_datetime(raw_date, errors='coerce', dayfirst=True)
                 if pd.notnull(parsed_ts):
                     op_date = parsed_ts.to_pydatetime()
                 else:
@@ -81,7 +94,7 @@ def import_parsed_operations(user_id, operations):
                 needs_review_count += 1
 
             records_to_insert.append((
-                user_id, op_date, op_type, cat, sub, art, amount, comment, desc, status
+                uid, op_date, op_type, cat, sub, art, amount, comment, desc, status
             ))
 
         if records_to_insert:
