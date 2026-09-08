@@ -67,7 +67,7 @@ def _clean_json_string(text):
 def _show_multi_tx_items(user_id, items, show_apply_all=False):
     """Выводит красивый пронумерованный список распознанных операций."""
     msg = f"📋 Распознанные операции (всего {len(items)}):\n\n"
-    for i, item in enumerate(items):
+    for i, item in enumerate(batch := items):
         item_name = item.get("item", "Операция")
         amount = item.get("amount", 0)
         op_type = item.get("type", "Расход")
@@ -188,27 +188,68 @@ def handle_transaction(user_id, user_text, state, user_states):
                 send_vk_message(
                     user_id,
                     f"✏️ Исправляем: «{sel_item.get('item')}» ({sel_item.get('amount')} руб.)\n"
-                    f"Напишите правильную категорию или дайте подсказку (например: «это продукты» или «спорт»):",
+                    f"Напишите правильную категорию или точное название статьи (например: «Детский сад» или «Образование»):",
                     get_cancel_keyboard(show_back=True)
                 )
                 return True
 
     # =========================================================
-    # ЭТАП 2.1: ОБРАБОТКА ПОДСКАЗКИ К КОНКРЕТНОМУ ПУНКТУ СПИСКА
+    # ЭТАП 2.1: ОБРАБОТКА ПОДСКАЗКИ К КОНКРЕТНОМУ ПУНКТУ СПИСКА (ПОИСК В БД ПЕРВЫМ!)
     # =========================================================
     if state == "multi_tx_edit_hint":
         state_data = user_states[user_id]
         idx = state_data["edit_idx"]
         items = state_data["items"]
         sel_item = items[idx]
-
-        send_vk_message(user_id, "🧠 Подбираю категорию с учетом подсказки...", get_cancel_keyboard(show_back=True))
-        menu_full = state_data["menu"]
         op_type = sel_item.get("type", "Расход")
-        type_menu = menu_full.get(op_type, {})
-        menu_str = f"[{op_type}]\n" + "\n".join([f"{c}: {', '.join(subs.keys() if isinstance(subs, dict) else subs)}" for c, subs in type_menu.items()])
 
-        ai_cat, ai_sub = categorize_with_ai(sel_item.get("item"), menu_str, context=user_text)
+        # 1. Поиск по базе данных
+        db_match = smart_search_item(internal_uid, user_text, op_type=op_type)
+        if db_match["status"] != "FOUND":
+            db_match = smart_search_item(internal_uid, user_text, op_type=None)
+
+        if db_match["status"] == "FOUND":
+            ai_cat = db_match["category"]
+            ai_sub = db_match["subcategory"]
+            if db_match.get("type"):
+                sel_item["type"] = db_match["type"]
+        else:
+            # 2. Проверка точного совпадения по дереву категорий
+            menu_full = get_full_menu(internal_uid)
+            u_clean = user_text.lower().strip()
+            found_in_tree = False
+
+            for m_type in ["Расход", "Доход"]:
+                type_cats = menu_full.get(m_type, {})
+                for m_cat, m_subs in type_cats.items():
+                    if m_cat.lower() == u_clean:
+                        ai_cat = m_cat
+                        sub_keys = list(m_subs.keys()) if isinstance(m_subs, dict) else (m_subs if m_subs else [])
+                        ai_sub = sub_keys[0] if sub_keys else "Разное"
+                        sel_item["type"] = m_type
+                        found_in_tree = True
+                        break
+                    sub_keys = list(m_subs.keys()) if isinstance(m_subs, dict) else (m_subs if m_subs else [])
+                    for s_name in sub_keys:
+                        if s_name.lower() == u_clean:
+                            ai_cat = m_cat
+                            ai_sub = s_name
+                            sel_item["type"] = m_type
+                            found_in_tree = True
+                            break
+                    if found_in_tree:
+                        break
+                if found_in_tree:
+                    break
+
+            # 3. Резервный поиск через нейросеть
+            if not found_in_tree:
+                send_vk_message(user_id, "🧠 Подбираю категорию с помощью ИИ...", get_cancel_keyboard(show_back=True))
+                menu_full = state_data["menu"]
+                type_menu = menu_full.get(op_type, {})
+                menu_str = f"[{op_type}]\n" + "\n".join([f"{c}: {', '.join(subs.keys() if isinstance(subs, dict) else subs)}" for c, subs in type_menu.items()])
+                ai_cat, ai_sub = categorize_with_ai(sel_item.get("item"), menu_str, context=user_text)
+
         sel_item["category"] = ai_cat
         sel_item["subcategory"] = ai_sub
 
