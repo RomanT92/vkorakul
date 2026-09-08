@@ -7,13 +7,15 @@ from keyboards import (
     get_yes_no_keyboard,
     get_cancel_keyboard,
     type_keyboard,
-    get_numbered_keyboard
+    get_numbered_keyboard,
+    get_multi_tx_review_keyboard
 )
 from services import send_vk_message, extract_transaction_with_ai, categorize_with_ai
 from db import (
     get_or_create_user,
     smart_search_item,
     save_transaction,
+    learn_user_word,
     get_full_menu,
     db_rename_category,
     db_rename_subcategory,
@@ -53,23 +55,182 @@ def clean_fallback_item(user_text):
     clean = " ".join(words).strip()
     return clean if clean else "Трата"
 
-def handle_transaction(user_id, user_text, state, user_states):
-    if state != "":
-        return False
+def _clean_json_string(text):
+    """Очищает строку от маркдауна ```json ... ``` если ИИ его добавил"""
+    text = text.strip()
+    if text.startswith("```json"):
+        text = text[7:-3].strip()
+    elif text.startswith("```"):
+        text = text[3:-3].strip()
+    return text
 
+def _show_multi_tx_items(user_id, items, show_apply_all=False):
+    """Выводит красивый пронумерованный список распознанных операций."""
+    msg = f"📋 Распознанные операции (всего {len(items)}):\n\n"
+    for i, item in enumerate(items):
+        item_name = item.get("item", "Операция")
+        amount = item.get("amount", 0)
+        op_type = item.get("type", "Расход")
+        cat = item.get("category", "?")
+        sub = item.get("subcategory", "?")
+        comm = f" ({item['comment']})" if item.get("comment") else ""
+
+        type_icon = "📉" if op_type == "Расход" else "📈"
+        msg += f"{i+1}. {item_name} — {amount} руб. {type_icon}{comm}\n"
+        msg += f"   📂 {cat} -> {sub}\n\n"
+
+    msg += "Если всё верно, жмите «✅ Готово».\n"
+    if show_apply_all:
+        msg += "Нажмите «⚡ Применить для всех оставшихся», чтобы продублировать категорию.\n"
+    msg += "Если хотите изменить категорию статьи — отправьте её НОМЕР."
+
+    send_vk_message(user_id, msg, get_multi_tx_review_keyboard(len(items), show_apply_all=show_apply_all))
+
+def handle_transaction(user_id, user_text, state, user_states):
     user_text_lower = user_text.lower()
     internal_uid = get_or_create_user(user_id)
 
-    reply_text = extract_transaction_with_ai(user_text)
+    # =========================================================
+    # ЭТАП 2: РЕВЬЮ СПИСКА ОПЕРАЦИЙ (КНОПКА "ГОТОВО", НОМЕР, ПРИМЕНИТЬ ДЛЯ ВСЕХ)
+    # =========================================================
+    if state == "multi_tx_review":
+        state_data = user_states[user_id]
+        items = state_data["items"]
 
-    if reply_text and reply_text.startswith("{") and reply_text.endswith("}"):
+        # 1. Завершение и сохранение всех операций
+        if "готово" in user_text_lower:
+            send_vk_message(user_id, "⏳ Сохраняю операции в базу данных...", get_cancel_keyboard())
+            saved_count = 0
+            needs_review_count = 0
+
+            for item in items:
+                cat = item.get("category", "Разное")
+                sub = item.get("subcategory", "Требует проверки")
+                art = item.get("item", "Трата")
+                amount = float(item.get("amount", 0))
+                op_type = item.get("type", "Расход")
+                comment = item.get("comment", "")
+
+                if cat == "Разное" or sub == "Требует проверки":
+                    op_status = 'needs_review'
+                    needs_review_count += 1
+                else:
+                    op_status = 'verified'
+
+                ok = save_transaction(
+                    user_id=internal_uid,
+                    op_type=op_type,
+                    category=cat,
+                    subcategory=sub,
+                    article=art,
+                    amount=amount,
+                    comment=comment,
+                    original_text=art,
+                    status=op_status
+                )
+                if ok:
+                    saved_count += 1
+
+                if op_status == 'verified':
+                    learn_user_word(internal_uid, op_type, cat, sub, art, art)
+
+            report_msg = f"🎉 Успешно сохранено {saved_count} операций!\nЖурнал обновлен."
+            if needs_review_count > 0:
+                report_msg += f"\n\n⚠️ {needs_review_count} позиций требуют проверки. Вы можете распределить их кнопкой «📥 Разобрать операции»."
+
+            send_vk_message(user_id, report_msg, get_main_keyboard(user_id))
+            del user_states[user_id]
+            return True
+
+        # 2. Кнопка "Применить для всех оставшихся"
+        elif any(w in user_text_lower for w in ["применить для всех", "применить ко всем"]):
+            last_cat = state_data.get("last_category")
+            last_sub = state_data.get("last_subcategory")
+            start_idx = state_data.get("last_edit_idx", 0) + 1
+
+            if not last_cat or not last_sub:
+                send_vk_message(user_id, "⚠️ Сначала измените какую-нибудь одну операцию из списка.")
+                return True
+
+            applied = 0
+            for i in range(start_idx, len(items)):
+                items[i]["category"] = last_cat
+                items[i]["subcategory"] = last_sub
+                applied += 1
+
+            if applied == 0:
+                for it in items:
+                    it["category"] = last_cat
+                    it["subcategory"] = last_sub
+                applied = len(items)
+
+            send_vk_message(user_id, f"⚡ Категория «{last_cat} -> {last_sub}» применена к {applied} операциям!")
+            _show_multi_tx_items(user_id, items, show_apply_all=True)
+            return True
+
+        # 3. Выбор номера для редактирования
+        elif user_text.isdigit():
+            idx = int(user_text) - 1
+            if 0 <= idx < len(items):
+                state_data["edit_idx"] = idx
+                state_data["state"] = "multi_tx_edit_hint"
+                sel_item = items[idx]
+                send_vk_message(
+                    user_id,
+                    f"✏️ Исправляем: «{sel_item.get('item')}» ({sel_item.get('amount')} руб.)\n"
+                    f"Напишите правильную категорию или дайте подсказку (например: «это продукты» или «спорт»):",
+                    get_cancel_keyboard()
+                )
+                return True
+
+    # =========================================================
+    # ЭТАП 2.1: ОБРАБОТКА ПОДСКАЗКИ К КОНКРЕТНОМУ ПУНКТУ СПИСКА
+    # =========================================================
+    if state == "multi_tx_edit_hint":
+        state_data = user_states[user_id]
+        idx = state_data["edit_idx"]
+        items = state_data["items"]
+        sel_item = items[idx]
+
+        send_vk_message(user_id, "🧠 Подбираю категорию с учетом подсказки...", get_cancel_keyboard())
+        menu_full = state_data["menu"]
+        op_type = sel_item.get("type", "Расход")
+        type_menu = menu_full.get(op_type, {})
+        menu_str = f"[{op_type}]\n" + "\n".join([f"{c}: {', '.join(subs.keys() if isinstance(subs, dict) else subs)}" for c, subs in type_menu.items()])
+
+        ai_cat, ai_sub = categorize_with_ai(sel_item.get("item"), menu_str, context=user_text)
+        sel_item["category"] = ai_cat
+        sel_item["subcategory"] = ai_sub
+
+        state_data["last_category"] = ai_cat
+        state_data["last_subcategory"] = ai_sub
+        state_data["last_edit_idx"] = idx
+
+        state_data["state"] = "multi_tx_review"
+        _show_multi_tx_items(user_id, items, show_apply_all=True)
+        return True
+
+    # Если бот уже находится в каком-то другом режиме (CRUD, подтверждение и т.д.), пропускаем
+    if state != "":
+        return False
+
+    # =========================================================
+    # ЭТАП 1: ПЕРВИЧНЫЙ АНАЛИЗ ВВОДА (ГОЛОС ИЛИ ТЕКСТ) ЧЕРЕЗ ИИ
+    # =========================================================
+    reply_text = extract_transaction_with_ai(user_text)
+    if not reply_text:
+        return False
+
+    clean_text = _clean_json_string(reply_text)
+
+    if clean_text.startswith("{") and clean_text.endswith("}"):
         try:
-            parsed_data = json.loads(reply_text)
+            parsed_data = json.loads(clean_text)
             action = parsed_data.get("action")
 
-            # =========================================================
-            # ТЕКСТОВОЕ УПРАВЛЕНИЕ СТРУКТУРОЙ (CRUD) ЧЕРЕЗ ИИ
-            # =========================================================
+            # ---------------------------------------------------------
+            # 1. ТЕКСТОВОЕ УПРАВЛЕНИЕ СТРУКТУРОЙ (CRUD) ЧЕРЕЗ ИИ
+            # ---------------------------------------------------------
             if action in ["smart_rename", "smart_delete", "smart_move"]:
                 target_name = parsed_data.get("old_name") if action == "smart_rename" else parsed_data.get("item", "")
                 send_vk_message(user_id, f"⏳ Ищу '{target_name}' в структуре...")
@@ -160,101 +321,111 @@ def handle_transaction(user_id, user_text, state, user_states):
                     send_vk_message(user_id, f"Создаем категорию {f'«{item}»' if item else ''}.\nЭто категория Расходов или Доходов?", type_keyboard())
                     return True
 
-            # =========================================================
-            # ОБРАБОТКА ОБЫЧНЫХ ОПЕРАЦИЙ (ТРАТЫ / ДОХОДЫ)
-            # =========================================================
-            parsed_data.pop("category", None)
-            parsed_data.pop("subcategory", None)
+            # ---------------------------------------------------------
+            # 2. МАССОВОЕ ИЛИ ОДИНОЧНОЕ РАСПОЗНАВАНИЕ ОПЕРАЦИЙ
+            # ---------------------------------------------------------
+            raw_ops = parsed_data.get("operations", [])
+            if not raw_ops and "item" in parsed_data:
+                # Если ИИ вернул одиночный объект старого формата
+                raw_ops = [parsed_data]
 
-            # Проверяем явные маркеры от пользователя
-            income_triggers = ["приход", "доход", "зарплата", "аванс", "премия", "подарили", "поступление"]
-            expense_triggers = ["расход", "трата", "купил", "оплатил"]
-            
-            user_explicit_type = None
-            if any(word in user_text_lower for word in income_triggers) and not any(word in user_text_lower for word in expense_triggers):
-                user_explicit_type = "Доход"
-            elif any(word in user_text_lower for word in expense_triggers):
-                user_explicit_type = "Расход"
+            if not raw_ops:
+                return False
 
-            ai_guessed_type = parsed_data.get("type", "Расход")
-            if ai_guessed_type not in ["Расход", "Доход"]:
-                ai_guessed_type = "Расход"
+            menu_full = get_full_menu(internal_uid)
+            processed_items = []
+            all_known = True
 
-            # Не затираем исходное слово пользователя
-            current_item = parsed_data.get("item", "").strip()
-            if not current_item or current_item.lower() in ["приход", "доход", "расход", "трата", "поступление"]:
-                current_item = clean_fallback_item(user_text)
-                parsed_data["item"] = current_item
+            send_vk_message(user_id, f"⚡ Распознаю {len(raw_ops)} операций и сопоставляю с базой...")
 
-            amount = float(parsed_data.get("amount", 0))
-            comment = parsed_data.get("comment", "")
+            for op in raw_ops:
+                current_item = op.get("item", "").strip()
+                if not current_item or current_item.lower() in ["приход", "доход", "расход", "трата", "поступление"]:
+                    current_item = clean_fallback_item(user_text)
 
-            send_vk_message(user_id, f"⚡ Ищу '{current_item}' в базе...")
+                amount = float(op.get("amount", 0))
+                op_type = op.get("type", "Расход")
+                if op_type not in ["Расход", "Доход"]:
+                    op_type = "Расход"
+                comment = op.get("comment", "")
 
-            # 1. Сначала ищем по предположенному типу
-            search_res = smart_search_item(internal_uid, current_item, op_type=user_explicit_type or ai_guessed_type)
+                # 1. Ищем слово в базе данных
+                search_res = smart_search_item(internal_uid, current_item, op_type=op_type)
+                if search_res["status"] != "FOUND":
+                    search_res = smart_search_item(internal_uid, current_item, op_type=None)
 
-            # 2. Если не нашлось и пользователь явно не указал расход/доход — ищем по всей базе без привязки к типу
-            if search_res["status"] != "FOUND" and not user_explicit_type:
-                search_res = smart_search_item(internal_uid, current_item, op_type=None)
+                if search_res["status"] == "FOUND":
+                    processed_items.append({
+                        "item": current_item,
+                        "amount": amount,
+                        "type": search_res["type"],
+                        "category": search_res["category"],
+                        "subcategory": search_res["subcategory"],
+                        "comment": comment,
+                        "is_known": True
+                    })
+                else:
+                    all_known = False
+                    # Подбираем категорию через ИИ
+                    type_menu = menu_full.get(op_type, {})
+                    menu_str = f"[{op_type}]\n" + "\n".join([f"{c}: {', '.join(subs.keys() if isinstance(subs, dict) else subs)}" for c, subs in type_menu.items()])
+                    ai_cat, ai_sub = categorize_with_ai(current_item, menu_str)
 
-            if search_res["status"] == "FOUND":
-                op_type = search_res["type"]
-                parsed_data["type"] = op_type
+                    valid_cat = ai_cat in type_menu and ai_sub in (type_menu[ai_cat].keys() if isinstance(type_menu[ai_cat], dict) else type_menu[ai_cat])
+
+                    if valid_cat and ai_sub != "Требует проверки":
+                        cat_res, sub_res = ai_cat, ai_sub
+                    else:
+                        cat_res, sub_res = "Разное", "Требует проверки"
+
+                    processed_items.append({
+                        "item": current_item,
+                        "amount": amount,
+                        "type": op_type,
+                        "category": cat_res,
+                        "subcategory": sub_res,
+                        "comment": comment,
+                        "is_known": False
+                    })
+
+            # СЦЕНАРИЙ А: Если была ТОЛЬКО 1 операция И она уже известна в базе — мгновенная запись!
+            if len(processed_items) == 1 and all_known:
+                single = processed_items[0]
                 save_transaction(
                     user_id=internal_uid,
-                    op_type=op_type,
-                    category=search_res["category"],
-                    subcategory=search_res["subcategory"],
-                    article=search_res["article"],
-                    amount=amount,
-                    comment=comment,
-                    original_text=current_item,
+                    op_type=single["type"],
+                    category=single["category"],
+                    subcategory=single["subcategory"],
+                    article=single["item"],
+                    amount=single["amount"],
+                    comment=single["comment"],
+                    original_text=single["item"],
                     status='verified'
                 )
                 send_vk_message(
                     user_id,
-                    f"✅ Успешно записано! ({op_type})\n📂 {search_res['category']} -> {search_res['subcategory']}",
+                    f"✅ Успешно записано! ({single['type']})\n📂 {single['category']} -> {single['subcategory']}\n💰 {single['amount']} руб.",
                     get_main_keyboard(user_id)
                 )
-            else:
-                op_type = user_explicit_type or ai_guessed_type
-                parsed_data["type"] = op_type
-                menu_full = get_full_menu(internal_uid)
-                type_menu = menu_full.get(op_type, {})
-                menu_str = f"[{op_type}]\n" + "\n".join([f"{c}: {', '.join(subs.keys() if isinstance(subs, dict) else subs)}" for c, subs in type_menu.items()])
-                
-                ai_cat, ai_sub = categorize_with_ai(current_item, menu_str)
+                return True
 
-                valid_cat = ai_cat in type_menu and ai_sub in (type_menu[ai_cat].keys() if isinstance(type_menu[ai_cat], dict) else type_menu[ai_cat])
+            # СЦЕНАРИЙ Б: МАССОВЫЙ ВВОД (2+ операции) или неизвестная статья -> интерактивное ревью!
+            user_states[user_id] = {
+                "state": "multi_tx_review",
+                "items": processed_items,
+                "menu": menu_full
+            }
+            _show_multi_tx_items(user_id, processed_items, show_apply_all=False)
+            return True
 
-                if valid_cat and ai_sub != "Требует проверки":
-                    user_states[user_id] = {
-                        "state": "confirm_category",
-                        "payload": parsed_data,
-                        "menu": menu_full,
-                        "menu_str": menu_str,
-                        "ai_cat": ai_cat,
-                        "ai_sub": ai_sub,
-                        "attempts": 1
-                    }
-                    send_vk_message(user_id, f"🤖 Думаю, '{current_item}' ({op_type}) относится к:\n📂 {ai_cat} -> {ai_sub}\n\nВсё верно?", get_yes_no_keyboard())
-                else:
-                    user_states[user_id] = {
-                        "state": "provide_context",
-                        "payload": parsed_data,
-                        "menu": menu_full,
-                        "menu_str": menu_str,
-                        "attempts": 1
-                    }
-                    send_vk_message(user_id, f"🤔 Я пока не знаю статью '{current_item}'.\nПодскажи в двух словах, к чему это относится (или напиши правильную категорию):", get_cancel_keyboard())
         except json.JSONDecodeError:
-            send_vk_message(user_id, "❌ Ошибка: ИИ вернул неправильный формат.", get_main_keyboard(user_id))
+            send_vk_message(user_id, "❌ Ошибка: ИИ вернул некорректный формат ответа.", get_main_keyboard(user_id))
         except Exception as e:
             send_vk_message(user_id, f"❌ Ошибка базы данных: {e}", get_main_keyboard(user_id))
     else:
+        # Если ИИ ответил обычным текстом (вопрос или приветствие)
         if reply_text:
             send_vk_message(user_id, reply_text, get_main_keyboard(user_id))
-        else:
-            send_vk_message(user_id, "❌ Ошибка связи с ИИ.", get_main_keyboard(user_id))
-    return True
+            return True
+
+    return False
