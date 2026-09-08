@@ -36,7 +36,7 @@ def _show_batch_items(user_id, batch, total_left, show_apply_all=False):
         msg += "Нажмите «⚡ Применить для всех оставшихся», чтобы продублировать последнюю категорию.\n"
     msg += "Если хотите изменить отдельную статью — отправьте её НОМЕР."
     
-    send_vk_message(user_id, msg, get_queue_review_keyboard(len(batch), show_apply_all=show_apply_all))
+    send_vk_message(user_id, msg, get_queue_review_keyboard(len(batch), show_apply_all=show_apply_all, show_back=True))
 
 def _process_next_batch(user_id, user_states):
     """Запускает ИИ-анализ следующего пакета нераспознанных операций."""
@@ -52,12 +52,11 @@ def _process_next_batch(user_id, user_states):
     menu = state_data["menu"]
     menu_str = "\n".join([f"{c}: {', '.join(subs)}" for c, subs in menu.items()])
 
-    # Сбрасываем запомненную подсказку для нового пакета
     state_data.pop("last_category", None)
     state_data.pop("last_subcategory", None)
     state_data.pop("last_edit_idx", None)
 
-    send_vk_message(user_id, f"🧠 ИИ анализирует {len(batch)} операций...", get_cancel_keyboard())
+    send_vk_message(user_id, f"🧠 ИИ анализирует {len(batch)} операций...", get_cancel_keyboard(show_back=False))
     ai_results = categorize_batch_with_ai(batch, menu_str)
 
     for item in batch:
@@ -75,13 +74,36 @@ def _process_next_batch(user_id, user_states):
     _show_batch_items(user_id, batch, len(state_data["queue"]), show_apply_all=False)
 
 def handle_queue_and_learning(user_id, user_text, user_text_lower, state, user_states, MAX_ATTEMPTS):
-    """
-    Обработчик очереди распределения операций и пошагового обучения системы.
-    """
     internal_uid = get_or_create_user(user_id)
 
     # =========================================================
-    # 1. ЗАПУСК РАЗБОРА ОПЕРАЦИЙ (с поддержкой эмодзи 📥 и счетчика)
+    # ОБРАБОТКА «НАЗАД» В ОЧЕРЕДИ
+    # =========================================================
+    if "назад" in user_text_lower:
+        if state == "queue_batch_edit_hint":
+            user_states[user_id]["state"] = "queue_batch_review"
+            _show_batch_items(user_id, user_states[user_id]["current_batch"], len(user_states[user_id]["queue"]), show_apply_all=False)
+            return True
+        elif state == "queue_batch_review":
+            del user_states[user_id]
+            send_vk_message(user_id, "Главное меню.", get_main_keyboard(user_id))
+            return True
+        elif state == "tx_manual_cat":
+            user_states[user_id]["state"] = "tx_manual_type"
+            send_vk_message(user_id, "Это Расход или Доход?", type_keyboard(show_back=True))
+            return True
+        elif state == "tx_manual_sub":
+            cats = user_states[user_id].get("cats", [])
+            op_type = user_states[user_id]["payload"].get("type", "Расход")
+            user_states[user_id]["state"] = "tx_manual_cat"
+            msg = f"Выберите КАТЕГОРИЮ ({op_type}):\n\n"
+            for i, c in enumerate(cats):
+                msg += f"{i+1}. {c}\n"
+            send_vk_message(user_id, msg, get_numbered_keyboard(len(cats), show_back=True))
+            return True
+
+    # =========================================================
+    # 1. ЗАПУСК РАЗБОРА ОПЕРАЦИЙ
     # =========================================================
     triggers = [
         "разобрать операции",
@@ -90,7 +112,6 @@ def handle_queue_and_learning(user_id, user_text, user_text_lower, state, user_s
         "завалы",
         "импорт статистики прошлого"
     ]
-    # Используем проверку вхождения (любой текст кнопки с эмодзи 📥 или числом в скобках сработает)
     if state == "" and any(trigger in user_text_lower for trigger in triggers):
         send_vk_message(user_id, "⏳ Проверяю нераспознанные операции в базе...")
         unverified_raw = get_unverified_transactions(user_id)
@@ -136,7 +157,7 @@ def handle_queue_and_learning(user_id, user_text, user_text_lower, state, user_s
 
         # --- СОХРАНЕНИЕ ПАКЕТА ---
         if "сохранить пакет" in user_text_lower:
-            send_vk_message(user_id, "⏳ Сохраняю и обучаю систему...", get_cancel_keyboard())
+            send_vk_message(user_id, "⏳ Сохраняю и обучаю систему...", get_cancel_keyboard(show_back=False))
             for item in batch:
                 resolve_unverified_item(
                     user_id=internal_uid,
@@ -182,7 +203,7 @@ def handle_queue_and_learning(user_id, user_text, user_text_lower, state, user_s
                 state_data["edit_idx"] = idx
                 state_data["state"] = "queue_batch_edit_hint"
                 sel_item = batch[idx]
-                send_vk_message(user_id, f"✏️ Исправляем: {sel_item['original_item']}\nДайте подсказку (к чему это относится):", get_cancel_keyboard())
+                send_vk_message(user_id, f"✏️ Исправляем: {sel_item['original_item']}\nДайте подсказку (к чему это относится):", get_cancel_keyboard(show_back=True))
                 return True
 
     # =========================================================
@@ -195,7 +216,7 @@ def handle_queue_and_learning(user_id, user_text, user_text_lower, state, user_s
         sel_item = batch[idx]
         menu_str = "\n".join([f"{c}: {', '.join(subs)}" for c, subs in state_data["menu"].items()])
 
-        send_vk_message(user_id, "🧠 Думаю...", get_cancel_keyboard())
+        send_vk_message(user_id, "🧠 Думаю...", get_cancel_keyboard(show_back=True))
         ai_cat, ai_sub = categorize_with_ai(sel_item["original_item"], menu_str, context=user_text)
         
         sel_item["category"] = ai_cat
@@ -250,17 +271,17 @@ def handle_queue_and_learning(user_id, user_text, user_text_lower, state, user_s
             if user_states[user_id]["attempts"] < MAX_ATTEMPTS:
                 user_states[user_id]["state"] = "provide_context"
                 user_states[user_id]["context_history"] = ""
-                send_vk_message(user_id, f"Понял, ошибся 😔 (Попытка {user_states[user_id]['attempts']} из {MAX_ATTEMPTS})\nПодскажи другими словами, к чему относится «{user_states[user_id]['payload']['item']}»?", get_cancel_keyboard())
+                send_vk_message(user_id, f"Понял, ошибся 😔 (Попытка {user_states[user_id]['attempts']} из {MAX_ATTEMPTS})\nПодскажи другими словами, к чему относится «{user_states[user_id]['payload']['item']}»?", get_cancel_keyboard(show_back=True))
             else:
                 user_states[user_id]["state"] = "tx_manual_type"
-                send_vk_message(user_id, "🤷‍♂️ Я сдаюсь. Давайте выберем вручную!\n\nЭто Расход или Доход?", type_keyboard())
+                send_vk_message(user_id, "🤷‍♂️ Я сдаюсь. Давайте выберем вручную!\n\nЭто Расход или Доход?", type_keyboard(show_back=True))
             return True
         else:
-            send_vk_message(user_id, "Пожалуйста, ответьте «✅ Да» или «❌ Нет».", get_yes_no_keyboard())
+            send_vk_message(user_id, "Пожалуйста, ответьте «✅ Да» или «❌ Нет».", get_yes_no_keyboard(show_back=True))
             return True
 
     # =========================================================
-    # 4. ОБРАБОТКА ПОДСКАЗКИ ОТ ПОЛЬЗОВАТЕЛЯ (ОДИНОЧНЫЙ РЕЖИМ)
+    # 4. ОБРАБОТКА ПОДСКАЗКИ ОТ ПОЛЬЗОВАТЕЛЯ
     # =========================================================
     if state == "provide_context":
         send_vk_message(user_id, "🧠 Думаю...")
@@ -279,7 +300,7 @@ def handle_queue_and_learning(user_id, user_text, user_text_lower, state, user_s
             user_states[user_id]["state"] = "confirm_category"
             user_states[user_id]["ai_cat"] = check_res.get("category")
             user_states[user_id]["ai_sub"] = check_res.get("subcategory")
-            send_vk_message(user_id, f"Ага! «{user_text}» — это знакомая категория:\n📂 {check_res.get('category')} -> {check_res.get('subcategory')}\n\nПривязать «{payload['item']}» сюда?", get_yes_no_keyboard())
+            send_vk_message(user_id, f"Ага! «{user_text}» — это знакомая категория:\n📂 {check_res.get('category')} -> {check_res.get('subcategory')}\n\nПривязать «{payload['item']}» сюда?", get_yes_no_keyboard(show_back=True))
             return True
 
         menu_full = get_full_menu(internal_uid)
@@ -294,13 +315,13 @@ def handle_queue_and_learning(user_id, user_text, user_text_lower, state, user_s
             user_states[user_id]["state"] = "confirm_category"
             user_states[user_id]["ai_cat"] = ai_cat
             user_states[user_id]["ai_sub"] = ai_sub
-            send_vk_message(user_id, f"Ага! С учетом подсказки, думаю «{payload['item']}» относится к:\n📂 {ai_cat} -> {ai_sub}\n\nВсё верно?", get_yes_no_keyboard())
+            send_vk_message(user_id, f"Ага! С учетом подсказки, думаю «{payload['item']}» относится к:\n📂 {ai_cat} -> {ai_sub}\n\nВсё верно?", get_yes_no_keyboard(show_back=True))
         else:
             if user_states[user_id]["attempts"] < MAX_ATTEMPTS:
-                send_vk_message(user_id, f"Всё равно не могу сообразить 🤔 (Попытка {user_states[user_id]['attempts']} из {MAX_ATTEMPTS})\nПопробуй назвать точную категорию из твоего меню?", get_cancel_keyboard())
+                send_vk_message(user_id, f"Всё равно не могу сообразить 🤔 (Попытка {user_states[user_id]['attempts']} из {MAX_ATTEMPTS})\nПопробуй назвать точную категорию из твоего меню?", get_cancel_keyboard(show_back=True))
             else:
                 user_states[user_id]["state"] = "tx_manual_type"
-                send_vk_message(user_id, "🤷‍♂️ Я сдаюсь. Давайте выберем вручную!\n\nЭто Расход или Доход?", type_keyboard())
+                send_vk_message(user_id, "🤷‍♂️ Я сдаюсь. Давайте выберем вручную!\n\nЭто Расход или Доход?", type_keyboard(show_back=True))
         return True
 
     # =========================================================
@@ -325,10 +346,10 @@ def handle_queue_and_learning(user_id, user_text, user_text_lower, state, user_s
             msg = f"Выберите КАТЕГОРИЮ ({op_type}):\n\n"
             for i, c in enumerate(cats):
                 msg += f"{i+1}. {c}\n"
-            send_vk_message(user_id, msg, get_numbered_keyboard(len(cats)))
+            send_vk_message(user_id, msg, get_numbered_keyboard(len(cats), show_back=True))
             return True
         else:
-            send_vk_message(user_id, "Пожалуйста, выберите «📉 Расход» или «📈 Доход» кнопками внизу.", type_keyboard())
+            send_vk_message(user_id, "Пожалуйста, выберите «📉 Расход» или «📈 Доход» кнопками внизу.", type_keyboard(show_back=True))
             return True
 
     if state == "tx_manual_cat":
@@ -349,7 +370,7 @@ def handle_queue_and_learning(user_id, user_text, user_text_lower, state, user_s
                 msg = f"Категория: {sel_cat}\nВыберите ПОДКАТЕГОРИЮ:\n\n"
                 for i, s in enumerate(subs):
                     msg += f"{i+1}. {s}\n"
-                send_vk_message(user_id, msg, get_numbered_keyboard(len(subs)))
+                send_vk_message(user_id, msg, get_numbered_keyboard(len(subs), show_back=True))
                 return True
 
     if state == "tx_manual_sub":
