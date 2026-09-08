@@ -39,7 +39,7 @@ def _show_batch_items(user_id, batch, total_left, show_apply_all=False):
     send_vk_message(user_id, msg, get_queue_review_keyboard(len(batch), show_apply_all=show_apply_all, show_back=True))
 
 def _process_next_batch(user_id, user_states):
-    """Запускает ИИ-анализ следующего пакета нераспознанных операций."""
+    """Запускает первичный анализ следующего пакета нераспознанных операций."""
     state_data = user_states[user_id]
     queue = state_data.get("queue", [])
     if not queue:
@@ -56,7 +56,7 @@ def _process_next_batch(user_id, user_states):
     state_data.pop("last_subcategory", None)
     state_data.pop("last_edit_idx", None)
 
-    send_vk_message(user_id, f"🧠 ИИ анализирует {len(batch)} операций...", get_cancel_keyboard(show_back=False))
+    send_vk_message(user_id, f"🧠 Анализирую {len(batch)} операций...", get_cancel_keyboard(show_back=False))
     ai_results = categorize_batch_with_ai(batch, menu_str)
 
     for item in batch:
@@ -203,22 +203,75 @@ def handle_queue_and_learning(user_id, user_text, user_text_lower, state, user_s
                 state_data["edit_idx"] = idx
                 state_data["state"] = "queue_batch_edit_hint"
                 sel_item = batch[idx]
-                send_vk_message(user_id, f"✏️ Исправляем: {sel_item['original_item']}\nДайте подсказку (к чему это относится):", get_cancel_keyboard(show_back=True))
+                send_vk_message(
+                    user_id,
+                    f"✏️ Исправляем: «{sel_item['original_item']}»\n"
+                    f"Напишите правильную категорию или точное название статьи (например: «Детский сад» или «Образование»):",
+                    get_cancel_keyboard(show_back=True)
+                )
                 return True
 
     # =========================================================
-    # 2.1 ВВОД ПОДСКАЗКИ ДЛЯ КОНКРЕТНОЙ ОПЕРАЦИИ
+    # 2.1 ВВОД ПОДСКАЗКИ ДЛЯ КОНКРЕТНОЙ ОПЕРАЦИИ (ПОИСК В БАЗЕ ПЕРВЫМ!)
     # =========================================================
     if state == "queue_batch_edit_hint":
         state_data = user_states[user_id]
         idx = state_data["edit_idx"]
         batch = state_data["current_batch"]
         sel_item = batch[idx]
-        menu_str = "\n".join([f"{c}: {', '.join(subs)}" for c, subs in state_data["menu"].items()])
+        op_type = sel_item.get("type", "Расход")
 
-        send_vk_message(user_id, "🧠 Думаю...", get_cancel_keyboard(show_back=True))
-        ai_cat, ai_sub = categorize_with_ai(sel_item["original_item"], menu_str, context=user_text)
-        
+        # ------------------------------------------------------------------
+        # ШАГ 1: ПРОВЕРКА ПОДСКАЗКИ ПО БАЗЕ ДАННЫХ (ВЫСШИЙ ПРИОРИТЕТ)
+        # ------------------------------------------------------------------
+        db_match = smart_search_item(internal_uid, user_text, op_type=op_type)
+        if db_match["status"] != "FOUND":
+            db_match = smart_search_item(internal_uid, user_text, op_type=None)
+
+        if db_match["status"] == "FOUND":
+            ai_cat = db_match["category"]
+            ai_sub = db_match["subcategory"]
+            if db_match.get("type"):
+                sel_item["type"] = db_match["type"]
+        else:
+            # --------------------------------------------------------------
+            # ШАГ 2: ПРОВЕРКА ТОЧНОГО СОВПАДЕНИЯ С ИМЕНЕМ КАТЕГОРИИ/ПОДКАТЕГОРИИ
+            # --------------------------------------------------------------
+            full_menu = get_full_menu(internal_uid)
+            u_clean = user_text.lower().strip()
+            found_in_tree = False
+
+            for m_type in ["Расход", "Доход"]:
+                type_cats = full_menu.get(m_type, {})
+                for m_cat, m_subs in type_cats.items():
+                    if m_cat.lower() == u_clean:
+                        ai_cat = m_cat
+                        sub_keys = list(m_subs.keys()) if isinstance(m_subs, dict) else (m_subs if m_subs else [])
+                        ai_sub = sub_keys[0] if sub_keys else "Разное"
+                        sel_item["type"] = m_type
+                        found_in_tree = True
+                        break
+                    sub_keys = list(m_subs.keys()) if isinstance(m_subs, dict) else (m_subs if m_subs else [])
+                    for s_name in sub_keys:
+                        if s_name.lower() == u_clean:
+                            ai_cat = m_cat
+                            ai_sub = s_name
+                            sel_item["type"] = m_type
+                            found_in_tree = True
+                            break
+                    if found_in_tree:
+                        break
+                if found_in_tree:
+                    break
+
+            # --------------------------------------------------------------
+            # ШАГ 3: ЕСЛИ В БАЗЕ И ДЕРЕВЕ СОВПАДЕНИЙ НЕТ — СПРАШИВАЕМ ИИ
+            # --------------------------------------------------------------
+            if not found_in_tree:
+                send_vk_message(user_id, "🧠 Подбираю категорию с помощью ИИ...", get_cancel_keyboard(show_back=True))
+                menu_str = "\n".join([f"{c}: {', '.join(subs)}" for c, subs in state_data["menu"].items()])
+                ai_cat, ai_sub = categorize_with_ai(sel_item["original_item"], menu_str, context=user_text)
+
         sel_item["category"] = ai_cat
         sel_item["subcategory"] = ai_sub
 
@@ -281,10 +334,9 @@ def handle_queue_and_learning(user_id, user_text, user_text_lower, state, user_s
             return True
 
     # =========================================================
-    # 4. ОБРАБОТКА ПОДСКАЗКИ ОТ ПОЛЬЗОВАТЕЛЯ
+    # 4. ОБРАБОТКА ПОДСКАЗКИ ОТ ПОЛЬЗОВАТЕЛЯ (ОДИНОЧНЫЙ РЕЖИМ)
     # =========================================================
     if state == "provide_context":
-        send_vk_message(user_id, "🧠 Думаю...")
         user_states[user_id]["attempts"] += 1
         payload = user_states[user_id]["payload"]
 
@@ -295,20 +347,27 @@ def handle_queue_and_learning(user_id, user_text, user_text_lower, state, user_s
 
         op_type = payload.get("type", "Расход")
 
-        check_res = smart_search_item(internal_uid, user_text, op_type)
+        # 1. Поиск в БД
+        check_res = smart_search_item(internal_uid, user_text, op_type=op_type)
+        if check_res.get("status") != "FOUND":
+            check_res = smart_search_item(internal_uid, user_text, op_type=None)
+
         if check_res.get("status") == "FOUND":
             user_states[user_id]["state"] = "confirm_category"
             user_states[user_id]["ai_cat"] = check_res.get("category")
             user_states[user_id]["ai_sub"] = check_res.get("subcategory")
+            if check_res.get("type"):
+                payload["type"] = check_res["type"]
             send_vk_message(user_id, f"Ага! «{user_text}» — это знакомая категория:\n📂 {check_res.get('category')} -> {check_res.get('subcategory')}\n\nПривязать «{payload['item']}» сюда?", get_yes_no_keyboard(show_back=True))
             return True
 
+        # 2. Поиск через ИИ
+        send_vk_message(user_id, "🧠 Думаю...")
         menu_full = get_full_menu(internal_uid)
         type_menu = menu_full.get(op_type, {})
         menu_str = f"[{op_type}]\n" + "\n".join([f"{c}: {', '.join(subs.keys() if isinstance(subs, dict) else subs)}" for c, subs in type_menu.items()])
 
         ai_cat, ai_sub = categorize_with_ai(payload["item"], menu_str, context=user_text)
-
         valid_cat = ai_cat in type_menu and ai_sub in (type_menu[ai_cat].keys() if isinstance(type_menu[ai_cat], dict) else type_menu[ai_cat])
 
         if valid_cat and ai_sub != "Требует проверки":
