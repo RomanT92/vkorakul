@@ -84,22 +84,34 @@ def _show_multi_tx_items(user_id, items, show_apply_all=False):
         msg += "Нажмите «⚡ Применить для всех оставшихся», чтобы продублировать категорию.\n"
     msg += "Если хотите изменить категорию статьи — отправьте её НОМЕР."
 
-    send_vk_message(user_id, msg, get_multi_tx_review_keyboard(len(items), show_apply_all=show_apply_all))
+    send_vk_message(user_id, msg, get_multi_tx_review_keyboard(len(items), show_apply_all=show_apply_all, show_back=True))
 
 def handle_transaction(user_id, user_text, state, user_states):
     user_text_lower = user_text.lower()
     internal_uid = get_or_create_user(user_id)
 
     # =========================================================
-    # ЭТАП 2: РЕВЬЮ СПИСКА ОПЕРАЦИЙ (КНОПКА "ГОТОВО", НОМЕР, ПРИМЕНИТЬ ДЛЯ ВСЕХ)
+    # ОБРАБОТКА «НАЗАД» В МАССОВОМ ВВОДЕ ОПЕРАЦИЙ
+    # =========================================================
+    if "назад" in user_text_lower:
+        if state == "multi_tx_edit_hint":
+            user_states[user_id]["state"] = "multi_tx_review"
+            _show_multi_tx_items(user_id, user_states[user_id]["items"], show_apply_all=False)
+            return True
+        elif state == "multi_tx_review":
+            del user_states[user_id]
+            send_vk_message(user_id, "Главное меню.", get_main_keyboard(user_id))
+            return True
+
+    # =========================================================
+    # ЭТАП 2: РЕВЬЮ СПИСКА ОПЕРАЦИЙ (ГОТОВО, НОМЕР, ПРИМЕНИТЬ ДЛЯ ВСЕХ)
     # =========================================================
     if state == "multi_tx_review":
         state_data = user_states[user_id]
         items = state_data["items"]
 
-        # 1. Завершение и сохранение всех операций
         if "готово" in user_text_lower:
-            send_vk_message(user_id, "⏳ Сохраняю операции в базу данных...", get_cancel_keyboard())
+            send_vk_message(user_id, "⏳ Сохраняю операции в базу данных...", get_cancel_keyboard(show_back=False))
             saved_count = 0
             needs_review_count = 0
 
@@ -142,7 +154,6 @@ def handle_transaction(user_id, user_text, state, user_states):
             del user_states[user_id]
             return True
 
-        # 2. Кнопка "Применить для всех оставшихся"
         elif any(w in user_text_lower for w in ["применить для всех", "применить ко всем"]):
             last_cat = state_data.get("last_category")
             last_sub = state_data.get("last_subcategory")
@@ -168,7 +179,6 @@ def handle_transaction(user_id, user_text, state, user_states):
             _show_multi_tx_items(user_id, items, show_apply_all=True)
             return True
 
-        # 3. Выбор номера для редактирования
         elif user_text.isdigit():
             idx = int(user_text) - 1
             if 0 <= idx < len(items):
@@ -179,7 +189,7 @@ def handle_transaction(user_id, user_text, state, user_states):
                     user_id,
                     f"✏️ Исправляем: «{sel_item.get('item')}» ({sel_item.get('amount')} руб.)\n"
                     f"Напишите правильную категорию или дайте подсказку (например: «это продукты» или «спорт»):",
-                    get_cancel_keyboard()
+                    get_cancel_keyboard(show_back=True)
                 )
                 return True
 
@@ -192,7 +202,7 @@ def handle_transaction(user_id, user_text, state, user_states):
         items = state_data["items"]
         sel_item = items[idx]
 
-        send_vk_message(user_id, "🧠 Подбираю категорию с учетом подсказки...", get_cancel_keyboard())
+        send_vk_message(user_id, "🧠 Подбираю категорию с учетом подсказки...", get_cancel_keyboard(show_back=True))
         menu_full = state_data["menu"]
         op_type = sel_item.get("type", "Расход")
         type_menu = menu_full.get(op_type, {})
@@ -210,7 +220,6 @@ def handle_transaction(user_id, user_text, state, user_states):
         _show_multi_tx_items(user_id, items, show_apply_all=True)
         return True
 
-    # Если бот уже находится в каком-то другом режиме (CRUD, подтверждение и т.д.), пропускаем
     if state != "":
         return False
 
@@ -228,9 +237,6 @@ def handle_transaction(user_id, user_text, state, user_states):
             parsed_data = json.loads(clean_text)
             action = parsed_data.get("action")
 
-            # ---------------------------------------------------------
-            # 1. ТЕКСТОВОЕ УПРАВЛЕНИЕ СТРУКТУРОЙ (CRUD) ЧЕРЕЗ ИИ
-            # ---------------------------------------------------------
             if action in ["smart_rename", "smart_delete", "smart_move"]:
                 target_name = parsed_data.get("old_name") if action == "smart_rename" else parsed_data.get("item", "")
                 send_vk_message(user_id, f"⏳ Ищу '{target_name}' в структуре...")
@@ -267,7 +273,7 @@ def handle_transaction(user_id, user_text, state, user_states):
                         "sel_sub": r["sub"],
                         "sel_art": r["art"]
                     }
-                    send_vk_message(user_id, f"⚠️ Вы уверены, что хотите удалить {level_ru} '{found_name}'?", get_yes_no_keyboard())
+                    send_vk_message(user_id, f"⚠️ Вы уверены, что хотите удалить {level_ru} '{found_name}'?", get_yes_no_keyboard(show_back=True))
 
                 elif action == "smart_move":
                     if r["level"] == "category":
@@ -288,7 +294,7 @@ def handle_transaction(user_id, user_text, state, user_states):
                         msg = f"В какую КАТЕГОРИЮ перенести статью '{found_name}'?\n\n"
                         for i, c in enumerate(cats):
                             msg += f"{i+1}. {c}\n"
-                        send_vk_message(user_id, msg, get_numbered_keyboard(len(cats)))
+                        send_vk_message(user_id, msg, get_numbered_keyboard(len(cats), show_back=True))
 
                     elif r["level"] == "subcategory":
                         user_states[user_id] = {
@@ -302,7 +308,7 @@ def handle_transaction(user_id, user_text, state, user_states):
                         msg = f"В какую КАТЕГОРИЮ перенести подкатегорию '{found_name}'?\n\n"
                         for i, c in enumerate(cats):
                             msg += f"{i+1}. {c}\n"
-                        send_vk_message(user_id, msg, get_numbered_keyboard(len(cats)))
+                        send_vk_message(user_id, msg, get_numbered_keyboard(len(cats), show_back=True))
                 return True
 
             if action == "start_interactive":
@@ -310,23 +316,19 @@ def handle_transaction(user_id, user_text, state, user_states):
                 item = parsed_data.get("item", "")
                 if op == "create_article":
                     user_states[user_id] = {"state": "create_art_type", "pending_name": item}
-                    send_vk_message(user_id, f"Создаем статью {f'«{item}»' if item else ''}.\nЭто статья Расходов или Доходов?", type_keyboard())
+                    send_vk_message(user_id, f"Создаем статью {f'«{item}»' if item else ''}.\nЭто статья Расходов или Доходов?", type_keyboard(show_back=True))
                     return True
                 elif op == "create_subcategory":
                     user_states[user_id] = {"state": "create_sub_type", "pending_name": item}
-                    send_vk_message(user_id, f"Создаем подкатегорию {f'«{item}»' if item else ''}.\nЭто подкатегория Расходов или Доходов?", type_keyboard())
+                    send_vk_message(user_id, f"Создаем подкатегорию {f'«{item}»' if item else ''}.\nЭто подкатегория Расходов или Доходов?", type_keyboard(show_back=True))
                     return True
                 elif op == "create_category":
                     user_states[user_id] = {"state": "create_cat_type", "pending_name": item}
-                    send_vk_message(user_id, f"Создаем категорию {f'«{item}»' if item else ''}.\nЭто категория Расходов или Доходов?", type_keyboard())
+                    send_vk_message(user_id, f"Создаем категорию {f'«{item}»' if item else ''}.\nЭто категория Расходов или Доходов?", type_keyboard(show_back=True))
                     return True
 
-            # ---------------------------------------------------------
-            # 2. МАССОВОЕ ИЛИ ОДИНОЧНОЕ РАСПОЗНАВАНИЕ ОПЕРАЦИЙ
-            # ---------------------------------------------------------
             raw_ops = parsed_data.get("operations", [])
             if not raw_ops and "item" in parsed_data:
-                # Если ИИ вернул одиночный объект старого формата
                 raw_ops = [parsed_data]
 
             if not raw_ops:
@@ -349,7 +351,6 @@ def handle_transaction(user_id, user_text, state, user_states):
                     op_type = "Расход"
                 comment = op.get("comment", "")
 
-                # 1. Ищем слово в базе данных
                 search_res = smart_search_item(internal_uid, current_item, op_type=op_type)
                 if search_res["status"] != "FOUND":
                     search_res = smart_search_item(internal_uid, current_item, op_type=None)
@@ -366,7 +367,6 @@ def handle_transaction(user_id, user_text, state, user_states):
                     })
                 else:
                     all_known = False
-                    # Подбираем категорию через ИИ
                     type_menu = menu_full.get(op_type, {})
                     menu_str = f"[{op_type}]\n" + "\n".join([f"{c}: {', '.join(subs.keys() if isinstance(subs, dict) else subs)}" for c, subs in type_menu.items()])
                     ai_cat, ai_sub = categorize_with_ai(current_item, menu_str)
@@ -388,7 +388,6 @@ def handle_transaction(user_id, user_text, state, user_states):
                         "is_known": False
                     })
 
-            # СЦЕНАРИЙ А: Если была ТОЛЬКО 1 операция И она уже известна в базе — мгновенная запись!
             if len(processed_items) == 1 and all_known:
                 single = processed_items[0]
                 save_transaction(
@@ -409,7 +408,6 @@ def handle_transaction(user_id, user_text, state, user_states):
                 )
                 return True
 
-            # СЦЕНАРИЙ Б: МАССОВЫЙ ВВОД (2+ операции) или неизвестная статья -> интерактивное ревью!
             user_states[user_id] = {
                 "state": "multi_tx_review",
                 "items": processed_items,
@@ -423,7 +421,6 @@ def handle_transaction(user_id, user_text, state, user_states):
         except Exception as e:
             send_vk_message(user_id, f"❌ Ошибка базы данных: {e}", get_main_keyboard(user_id))
     else:
-        # Если ИИ ответил обычным текстом (вопрос или приветствие)
         if reply_text:
             send_vk_message(user_id, reply_text, get_main_keyboard(user_id))
             return True
