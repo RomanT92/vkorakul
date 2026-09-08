@@ -45,39 +45,49 @@ def handle_base_commands(user_id, user_text_lower, state, user_states):
         return True
 
     # =========================================================
-    # ПОЛЬЗОВАТЕЛЬСКАЯ НАВИГАЦИЯ (ГИБКОЕ СОПОСТАВЛЕНИЕ С ЭМОДЗИ)
+    # ПОЛНЫЙ СБРОС (ОТМЕНА)
     # =========================================================
-    if any(cmd in user_text_lower for cmd in ["помощь", "начать", "start", "отмена", "назад"]):
-        if any(cmd in user_text_lower for cmd in ["помощь", "начать", "start"]):
-            if user_id in user_states:
-                del user_states[user_id]
-            help_text = (
-                "🤖 Привет! Я твой финансовый Оракул.\n\n"
-                "Просто напиши мне трату или доход, например:\n"
-                "👉 Такси 500\n"
-                "👉 Зарплата 50000\n\n"
-                "Используй кнопки меню для управления структурой!"
-            )
-            send_vk_message(user_id, help_text, get_main_keyboard(user_id))
-            return True
-
-        if "назад" in user_text_lower:
-            if state in ["wait_entity_create", "wait_entity_rename", "wait_del_move_action"]:
-                user_states[user_id] = {"state": "menu_crud"}
-                send_vk_message(user_id, "Управление структурой. Что хотите сделать?", get_crud_keyboard())
-                return True
-            elif state == "menu_crud":
-                if user_id in user_states:
-                    del user_states[user_id]
-                send_vk_message(user_id, "Главное меню.", get_main_keyboard(user_id))
-                return True
-
+    if "отмена" in user_text_lower:
         if user_id in user_states:
             del user_states[user_id]
         send_vk_message(user_id, "Действие отменено. Главное меню.", get_main_keyboard(user_id))
         return True
 
-    if "категории и статьи" in user_text_lower:
+    # =========================================================
+    # ПОМОЩЬ / СТАРТ
+    # =========================================================
+    if any(cmd in user_text_lower for cmd in ["помощь", "начать", "start"]):
+        if user_id in user_states:
+            del user_states[user_id]
+        help_text = (
+            "🤖 Привет! Я твой финансовый Оракул.\n\n"
+            "Просто напиши мне трату или доход, например:\n"
+            "👉 Такси 500\n"
+            "👉 Зарплата 50000\n"
+            "👉 Кофе 250, бензин 2000, в магните 1400\n\n"
+            "Используй кнопки меню для управления структурой и разбора трат!"
+        )
+        send_vk_message(user_id, help_text, get_main_keyboard(user_id))
+        return True
+
+    # =========================================================
+    # НАЗАД ИЗ КОРНЕВЫХ МЕНЮ
+    # =========================================================
+    if "назад" in user_text_lower:
+        if state in ["wait_entity_create", "wait_entity_rename", "wait_del_move_action"]:
+            user_states[user_id] = {"state": "menu_crud"}
+            send_vk_message(user_id, "Управление структурой. Что хотите сделать?", get_crud_keyboard())
+            return True
+        elif state in ["menu_crud", ""]:
+            if user_id in user_states:
+                del user_states[user_id]
+            send_vk_message(user_id, "Главное меню.", get_main_keyboard(user_id))
+            return True
+
+    # =========================================================
+    # ВХОД В УПРАВЛЕНИЕ СТРУКТУРОЙ
+    # =========================================================
+    if "категории и статьи" in user_text_lower and state == "":
         user_states[user_id] = {"state": "menu_crud"}
         send_vk_message(user_id, "Управление структурой. Что хотите сделать?", get_crud_keyboard())
         return True
