@@ -229,19 +229,60 @@ def handle_receipt(user_id, user_text, user_text_lower, state, user_states):
                 user_states[user_id]["edit_idx"] = idx
                 user_states[user_id]["state"] = "receipt_edit_hint"
                 sel_item = items[idx]
-                send_vk_message(user_id, f"✏️ Исправляем: {sel_item.get('item')}\nНапишите правильную категорию или дайте подсказку:", get_cancel_keyboard(show_back=True))
+                send_vk_message(
+                    user_id,
+                    f"✏️ Исправляем: «{sel_item.get('item')}»\n"
+                    f"Напишите правильную категорию или точное название статьи (например: «Хлеб», «Молоко»):",
+                    get_cancel_keyboard(show_back=True)
+                )
             return True
 
     # =========================================================
-    # 3. ИСПРАВЛЕНИЕ КАТЕГОРИИ У КОНКРЕТНОГО ТОВАРА
+    # 3. ИСПРАВЛЕНИЕ КАТЕГОРИИ У КОНКРЕТНОГО ТОВАРА (ПОИСК В БД ПЕРВЫМ!)
     # =========================================================
     if state == "receipt_edit_hint":
         idx = user_states[user_id]["edit_idx"]
         items = user_states[user_id]["items"]
         sel_item = items[idx]
-        send_vk_message(user_id, "🧠 Думаю...", get_cancel_keyboard(show_back=True))
-        menu_str = user_states[user_id]["menu_str"]
-        ai_cat, ai_sub = categorize_with_ai(sel_item.get("item"), menu_str, context=user_text)
+
+        # 1. Поиск подсказки по БД
+        db_match = smart_search_item(internal_uid, user_text, op_type="Расход")
+        if db_match["status"] != "FOUND":
+            db_match = smart_search_item(internal_uid, user_text, op_type=None)
+
+        if db_match["status"] == "FOUND":
+            ai_cat = db_match["category"]
+            ai_sub = db_match["subcategory"]
+        else:
+            # 2. Поиск по дереву категорий
+            menu_full = get_full_menu(internal_uid)
+            u_clean = user_text.lower().strip()
+            found_in_tree = False
+
+            type_cats = menu_full.get("Расход", {})
+            for m_cat, m_subs in type_cats.items():
+                if m_cat.lower() == u_clean:
+                    ai_cat = m_cat
+                    sub_keys = list(m_subs.keys()) if isinstance(m_subs, dict) else (m_subs if m_subs else [])
+                    ai_sub = sub_keys[0] if sub_keys else "Разное"
+                    found_in_tree = True
+                    break
+                sub_keys = list(m_subs.keys()) if isinstance(m_subs, dict) else (m_subs if m_subs else [])
+                for s_name in sub_keys:
+                    if s_name.lower() == u_clean:
+                        ai_cat = m_cat
+                        ai_sub = s_name
+                        found_in_tree = True
+                        break
+                if found_in_tree:
+                    break
+
+            # 3. Резерв через ИИ
+            if not found_in_tree:
+                send_vk_message(user_id, "🧠 Подбираю категорию с помощью ИИ...", get_cancel_keyboard(show_back=True))
+                menu_str = user_states[user_id]["menu_str"]
+                ai_cat, ai_sub = categorize_with_ai(sel_item.get("item"), menu_str, context=user_text)
+
         sel_item["category"] = ai_cat
         sel_item["subcategory"] = ai_sub
         user_states[user_id]["state"] = "receipt_review"
