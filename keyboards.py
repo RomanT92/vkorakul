@@ -10,7 +10,13 @@ from vk_api.keyboard import VkKeyboard, VkKeyboardColor
 # ====================================================================
 
 def get_main_keyboard(user_id=None, count=None):
-    """Главное меню бота с динамическим счетчиком на кнопке"""
+    """
+    Главное меню бота:
+    1 строка: 📥 Разобрать операции (с динамическим счетчиком)
+    2 строка: 📊 Импорт статистики прошлого
+    3 строка: 📂 Категории и статьи
+    4 строка: ❓ Помощь
+    """
     unreviewed_count = 0
     if count is not None:
         unreviewed_count = count
@@ -24,6 +30,7 @@ def get_main_keyboard(user_id=None, count=None):
 
     keyboard = VkKeyboard(one_time=False)
     
+    # 1. Кнопка разбора операций
     if unreviewed_count > 0:
         btn_text = f"📥 Разобрать операции ({unreviewed_count})"
     else:
@@ -31,8 +38,16 @@ def get_main_keyboard(user_id=None, count=None):
         
     keyboard.add_button(btn_text, color=VkKeyboardColor.SECONDARY)
     keyboard.add_line()
+    
+    # 2. Кнопка импорта прошлого (синяя/акцентная)
+    keyboard.add_button('📊 Импорт статистики прошлого', color=VkKeyboardColor.PRIMARY)
+    keyboard.add_line()
+    
+    # 3. Управление структурой
     keyboard.add_button('📂 Категории и статьи', color=VkKeyboardColor.SECONDARY)
     keyboard.add_line()
+    
+    # 4. Помощь
     keyboard.add_button('❓ Помощь', color=VkKeyboardColor.SECONDARY)
     return keyboard
 
