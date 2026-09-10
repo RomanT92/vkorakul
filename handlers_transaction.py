@@ -25,6 +25,7 @@ from db import (
     db_move_entity,
     get_user_history,
     delete_transaction_by_id,
+    delete_all_user_transactions,
     get_last_transaction,
     update_transaction_amount,
     update_transaction_category
@@ -61,11 +62,19 @@ def clean_fallback_item(user_text):
     clean = " ".join(words).strip()
     return clean if clean else "Трата"
 
+def _clean_json_string(text):
+    """Очищает строку от маркдауна ```json ... ``` если ИИ его добавил"""
+    text = text.strip()
+    if text.startswith("```json"):
+        text = text[7:-3].strip()
+    elif text.startswith("```"):
+        text = text[3:-3].strip()
+    return text
+
 def _extract_json_data(text):
     """Надежно извлекает JSON объект или массив из текста с помощью регулярных выражений."""
     if not text:
         return None
-    # Ищем самый широкий JSON блок {...} или [...]
     match = re.search(r'(\{.*\}|\[.*\])', text, re.DOTALL)
     if match:
         raw_json = match.group(0).strip()
@@ -133,7 +142,7 @@ def _save_items_batch(internal_uid, items):
             learn_user_word(internal_uid, op_type, cat, sub, art, art)
     return saved_count, needs_review_count
 
-def _show_history_screen(user_id, items, title_period, total_expense, total_income):
+def _show_history_screen(user_id, items, title_period, total_expense, total_income, total_count=None):
     """Выводит список истории операций с клавиатурой выбора номера."""
     msg = f"📜 История операций ({title_period}):\n\n"
     for i, it in enumerate(items):
@@ -146,10 +155,13 @@ def _show_history_screen(user_id, items, title_period, total_expense, total_inco
     msg += (
         f"💰 Итого за период:\n"
         f"• Расходы: {total_expense:g} руб.\n"
-        f"• Доходы: {total_income:g} руб.\n\n"
-        f"👉 Чтобы изменить сумму, категорию или удалить операцию — отправьте её НОМЕР или нажмите кнопку внизу."
+        f"• Доходы: {total_income:g} руб.\n"
     )
-    send_vk_message(user_id, msg, get_numbered_keyboard(len(items), show_back=True))
+    if total_count and total_count > len(items):
+        msg += f"ℹ️ Показано {len(items)} из {total_count} последних операций.\n"
+
+    msg += "\n👉 Чтобы изменить сумму, категорию или удалить операцию — нажмите НОМЕР операции или скажите (например: «Удали вторую и третью»):"
+    send_vk_message(user_id, msg, get_numbered_keyboard(min(len(items), 15), show_back=True))
 
 def handle_transaction(user_id, user_text, state, user_states):
     user_text_lower = user_text.lower()
@@ -171,7 +183,7 @@ def handle_transaction(user_id, user_text, state, user_states):
             hist = user_states[user_id].get("history_data", {})
             items = hist.get("items", [])
             user_states[user_id]["state"] = "history_view"
-            _show_history_screen(user_id, items, hist.get("title_period", "список"), hist.get("total_expense", 0), hist.get("total_income", 0))
+            _show_history_screen(user_id, items, hist.get("title_period", "список"), hist.get("total_expense", 0), hist.get("total_income", 0), hist.get("count"))
             return True
         elif state in ["history_edit_amount", "history_edit_category"]:
             user_states[user_id]["state"] = "history_action_select"
@@ -346,12 +358,11 @@ def handle_transaction(user_id, user_text, state, user_states):
                 send_vk_message(user_id, msg, get_tx_action_keyboard())
                 return True
         else:
-            # Если пользователь при просмотре истории надиктовал новую трату, сбрасываем состояние истории
             del user_states[user_id]
             state = ""
 
     # =========================================================
-    # ПОДТВЕРЖДЕНИЕ УДАЛЕНИЯ ОПЕРАЦИИ
+    # ПОДТВЕРЖДЕНИЕ УДАЛЕНИЯ ОДНОЙ ОПЕРАЦИИ
     # =========================================================
     if state == "confirm_delete_tx":
         if any(w in user_text_lower for w in ["да", "верно", "ага", "yes", "+", "удалить"]):
@@ -369,13 +380,27 @@ def handle_transaction(user_id, user_text, state, user_states):
             return True
 
     # =========================================================
+    # ПОДТВЕРЖДЕНИЕ МАССОВОГО УДАЛЕНИЯ ОПЕРАЦИЙ (DELETE ALL)
+    # =========================================================
+    if state == "confirm_delete_all_tx":
+        if any(w in user_text_lower for w in ["да", "верно", "ага", "yes", "+", "удалить", "очисти"]):
+            period = user_states[user_id].get("period", "all")
+            cnt = delete_all_user_transactions(internal_uid, period=period)
+            send_vk_message(user_id, f"🗑 Успешно удалено операций: {cnt} из базы данных.", get_main_keyboard(user_id))
+            del user_states[user_id]
+            return True
+        elif any(w in user_text_lower for w in ["нет", "неверно", "отмена", "назад"]):
+            del user_states[user_id]
+            send_vk_message(user_id, "Массовое удаление отменено.", get_main_keyboard(user_id))
+            return True
+
+    # =========================================================
     # РЕВЬЮ ПАКЕТА ОПЕРАЦИЙ (МАССОВЫЙ ВВОД)
     # =========================================================
     if state == "multi_tx_review":
         state_data = user_states[user_id]
         items = state_data["items"]
 
-        # 1. Подтверждение сохранения (любые синонимы согласия)
         if any(w in user_text_lower for w in ["готово", "сохранить", "сохрани", "да", "ок", "+", "верно", "ага"]):
             send_vk_message(user_id, "⏳ Сохраняю операции в базу данных...", get_cancel_keyboard(show_back=False))
             saved_count, needs_review_count = _save_items_batch(internal_uid, items)
@@ -388,7 +413,6 @@ def handle_transaction(user_id, user_text, state, user_states):
             del user_states[user_id]
             return True
 
-        # 2. Кнопка "Применить для всех оставшихся"
         elif any(w in user_text_lower for w in ["применить для всех", "применить ко всем"]):
             last_cat = state_data.get("last_category")
             last_sub = state_data.get("last_subcategory")
@@ -414,7 +438,6 @@ def handle_transaction(user_id, user_text, state, user_states):
             _show_multi_tx_items(user_id, items, show_apply_all=True)
             return True
 
-        # 3. Выбор номера для редактирования
         elif user_text.isdigit():
             idx = int(user_text) - 1
             if 0 <= idx < len(items):
@@ -429,13 +452,11 @@ def handle_transaction(user_id, user_text, state, user_states):
                 )
                 return True
 
-        # 4. АВТОМАТИЧЕСКИЙ ВЫХОД ИЗ РЕВЬЮ: если пользователь прислал новую трату с цифрами
         elif re.search(r'\d+', user_text):
-            # Автоматически сохраняем текущие элементы из списка
             saved_count, _ = _save_items_batch(internal_uid, items)
             send_vk_message(user_id, f"💾 Предыдущие операции ({saved_count} шт.) сохранены.")
             del user_states[user_id]
-            state = "" # Сбрасываем стейт и продолжаем обработку нового ввода ниже!
+            state = ""
 
     # =========================================================
     # ПОДСКАЗКА ДЛЯ КОНКРЕТНОГО ПУНКТА ИЗ МАССОВОГО ВВОДА
@@ -502,7 +523,6 @@ def handle_transaction(user_id, user_text, state, user_states):
         _show_multi_tx_items(user_id, items, show_apply_all=True)
         return True
 
-    # Если в активном стейте другой сценарий (CRUD, регистрация), пропускаем
     if state != "":
         return False
 
@@ -517,7 +537,6 @@ def handle_transaction(user_id, user_text, state, user_states):
 
     if parsed_data:
         try:
-            # Если ИИ вернул прямой список объектов: [{"item":...}, {...}]
             if isinstance(parsed_data, list):
                 parsed_data = {"operations": parsed_data}
 
@@ -527,7 +546,9 @@ def handle_transaction(user_id, user_text, state, user_states):
             # 1. ЗАПРОС НА ПРОСМОТР ИСТОРИИ (ГОЛОС ИЛИ ТЕКСТ)
             # ---------------------------------------------------------
             if action == "show_history":
-                limit = int(parsed_data.get("limit") or 10)
+                raw_limit = parsed_data.get("limit")
+                limit = int(raw_limit) if raw_limit else 10
+                limit = min(max(limit, 1), 15)
                 period = parsed_data.get("period")
                 
                 send_vk_message(user_id, "⏳ Загружаю историю операций...")
@@ -551,11 +572,52 @@ def handle_transaction(user_id, user_text, state, user_states):
                     "state": "history_view",
                     "history_data": history_data
                 }
-                _show_history_screen(user_id, items, title_period, history_data["total_expense"], history_data["total_income"])
+                _show_history_screen(
+                    user_id, 
+                    items, 
+                    title_period, 
+                    history_data["total_expense"], 
+                    history_data["total_income"],
+                    total_count=history_data.get("count")
+                )
                 return True
 
             # ---------------------------------------------------------
-            # 2. БЫСТРОЕ УДАЛЕНИЕ ПОСЛЕДНЕЙ ОПЕРАЦИИ
+            # 2. МАССОВОЕ УДАЛЕНИЕ ОПЕРАЦИЙ (DELETE ALL TX)
+            # ---------------------------------------------------------
+            if action == "delete_all_tx":
+                period = parsed_data.get("period") or "all"
+                # Проверяем, есть ли операции
+                check_hist = get_user_history(internal_uid, limit=50, period=None if period == "all" else period)
+                total_ops = check_hist.get("count", 0)
+
+                if total_ops == 0:
+                    send_vk_message(user_id, "📭 В журнале пока нет операций для удаления.", get_main_keyboard(user_id))
+                    return True
+
+                period_desc = {
+                    "today": "за сегодня",
+                    "yesterday": "за вчера",
+                    "week": "за последнюю неделю",
+                    "month": "за месяц",
+                    "all": "за всё время"
+                }.get(period, "")
+
+                user_states[user_id] = {
+                    "state": "confirm_delete_all_tx",
+                    "period": period
+                }
+                send_vk_message(
+                    user_id,
+                    f"⚠️ ВНИМАНИЕ: Вы уверены, что хотите удалить ВСЕ операции {period_desc}?\n\n"
+                    f"• Найдено операций: {total_ops} шт.\n"
+                    f"• Данные будут удалены безвозвратно!",
+                    get_yes_no_keyboard(show_back=True)
+                )
+                return True
+
+            # ---------------------------------------------------------
+            # 3. БЫСТРОЕ УДАЛЕНИЕ ОДНОЙ ПОСЛЕДНЕЙ ОПЕРАЦИИ
             # ---------------------------------------------------------
             if action == "delete_last_tx":
                 last_op = get_last_transaction(internal_uid)
@@ -578,7 +640,7 @@ def handle_transaction(user_id, user_text, state, user_states):
                 return True
 
             # ---------------------------------------------------------
-            # 3. ТЕКСТОВОЕ УПРАВЛЕНИЕ СТРУКТУРОЙ
+            # 4. ТЕКСТОВОЕ УПРАВЛЕНИЕ СТРУКТУРОЙ (CRUD)
             # ---------------------------------------------------------
             if action in ["smart_rename", "smart_delete", "smart_move"]:
                 target_name = parsed_data.get("old_name") if action == "smart_rename" else parsed_data.get("item", "")
@@ -671,7 +733,7 @@ def handle_transaction(user_id, user_text, state, user_states):
                     return True
 
             # ---------------------------------------------------------
-            # 4. ОБЫЧНЫЙ ИЛИ МАССОВЫЙ ВВОД ТРАТ/ДОХОДОВ
+            # 5. ОБЫЧНЫЙ ИЛИ МАССОВЫЙ ВВОД ТРАТ/ДОХОДОВ
             # ---------------------------------------------------------
             raw_ops = parsed_data.get("operations", [])
             if not raw_ops and "item" in parsed_data:
@@ -697,12 +759,10 @@ def handle_transaction(user_id, user_text, state, user_states):
                     op_type = "Расход"
                 comment = op.get("comment", "").strip()
 
-                # 1. Поиск по чистому наименованию
                 search_res = smart_search_item(internal_uid, current_item, op_type=op_type)
                 if search_res["status"] != "FOUND":
                     search_res = smart_search_item(internal_uid, current_item, op_type=None)
 
-                # 2. Комбинированная проверка с комментарием
                 if search_res["status"] != "FOUND" and comment:
                     full_phrase = f"{current_item} {comment}".strip()
                     phrase_res = smart_search_item(internal_uid, full_phrase, op_type=op_type)
@@ -746,7 +806,6 @@ def handle_transaction(user_id, user_text, state, user_states):
                         "is_known": False
                     })
 
-            # СЦЕНАРИЙ А: 1 операция и она известна в базе -> мгновенная запись без лишних кликов
             if len(processed_items) == 1 and all_known:
                 single = processed_items[0]
                 save_transaction(
@@ -767,7 +826,6 @@ def handle_transaction(user_id, user_text, state, user_states):
                 )
                 return True
 
-            # СЦЕНАРИЙ Б: Несколько операций или неизвестная статья -> интерактивное ревью
             user_states[user_id] = {
                 "state": "multi_tx_review",
                 "items": processed_items,
@@ -784,4 +842,4 @@ def handle_transaction(user_id, user_text, state, user_states):
             send_vk_message(user_id, reply_text, get_main_keyboard(user_id))
             return True
 
-    return False
+    return False 
