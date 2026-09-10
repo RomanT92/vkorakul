@@ -8,7 +8,8 @@ from keyboards import (
     get_cancel_keyboard,
     type_keyboard,
     get_numbered_keyboard,
-    get_multi_tx_review_keyboard
+    get_multi_tx_review_keyboard,
+    get_tx_action_keyboard
 )
 from services import send_vk_message, extract_transaction_with_ai, categorize_with_ai
 from db import (
@@ -21,7 +22,12 @@ from db import (
     db_rename_subcategory,
     db_rename_article,
     db_delete_entity,
-    db_move_entity
+    db_move_entity,
+    get_user_history,
+    delete_transaction_by_id,
+    get_last_transaction,
+    update_transaction_amount,
+    update_transaction_category
 )
 
 def find_entity_in_menu(menu, target_name):
@@ -86,12 +92,30 @@ def _show_multi_tx_items(user_id, items, show_apply_all=False):
 
     send_vk_message(user_id, msg, get_multi_tx_review_keyboard(len(items), show_apply_all=show_apply_all, show_back=True))
 
+def _show_history_screen(user_id, items, title_period, total_expense, total_income):
+    """Выводит список истории операций с клавиатурой выбора номера."""
+    msg = f"📜 История операций ({title_period}):\n\n"
+    for i, it in enumerate(items):
+        t_icon = "📈" if it["type"] == "Доход" else "📉"
+        date_str = it["date"].strftime("%d.%m %H:%M") if it.get("date") else ""
+        comm = f" ({it['comment']})" if it.get("comment") else ""
+        msg += f"{i+1}. {t_icon} {it['article']} — {it['amount']:g} руб. [{date_str}]{comm}\n"
+        msg += f"   📂 {it['category']} -> {it['subcategory']}\n\n"
+
+    msg += (
+        f"💰 Итого за период:\n"
+        f"• Расходы: {total_expense:g} руб.\n"
+        f"• Доходы: {total_income:g} руб.\n\n"
+        f"👉 Чтобы изменить сумму, категорию или удалить операцию — отправьте её НОМЕР или нажмите кнопку внизу."
+    )
+    send_vk_message(user_id, msg, get_numbered_keyboard(len(items), show_back=True))
+
 def handle_transaction(user_id, user_text, state, user_states):
     user_text_lower = user_text.lower()
     internal_uid = get_or_create_user(user_id)
 
     # =========================================================
-    # ОБРАБОТКА «НАЗАД» В МАССОВОМ ВВОДЕ ОПЕРАЦИЙ
+    # ОБРАБОТКА «НАЗАД»
     # =========================================================
     if "назад" in user_text_lower:
         if state == "multi_tx_edit_hint":
@@ -102,9 +126,218 @@ def handle_transaction(user_id, user_text, state, user_states):
             del user_states[user_id]
             send_vk_message(user_id, "Главное меню.", get_main_keyboard(user_id))
             return True
+        elif state in ["history_action_select", "confirm_delete_tx"]:
+            # Возврат к просмотру списка истории
+            hist = user_states[user_id].get("history_data", {})
+            items = hist.get("items", [])
+            user_states[user_id]["state"] = "history_view"
+            _show_history_screen(user_id, items, hist.get("title_period", "список"), hist.get("total_expense", 0), hist.get("total_income", 0))
+            return True
+        elif state in ["history_edit_amount", "history_edit_category"]:
+            # Возврат к меню действий над конкретной операцией
+            user_states[user_id]["state"] = "history_action_select"
+            sel_op = user_states[user_id]["sel_op"]
+            idx = user_states[user_id]["idx"]
+            date_str = sel_op["date"].strftime("%d.%m.%Y %H:%M") if sel_op.get("date") else ""
+            t_icon = "📈" if sel_op["type"] == "Доход" else "📉"
+            msg = (
+                f"📌 Операция №{idx+1}:\n"
+                f"• {t_icon} {sel_op['article']} — {sel_op['amount']:g} руб.\n"
+                f"• Категория: {sel_op['category']} -> {sel_op['subcategory']}\n"
+                f"• Дата: {date_str}\n\n"
+                f"Что вы хотите сделать с этой операцией?"
+            )
+            send_vk_message(user_id, msg, get_tx_action_keyboard())
+            return True
+        elif state == "history_view":
+            del user_states[user_id]
+            send_vk_message(user_id, "Главное меню.", get_main_keyboard(user_id))
+            return True
 
     # =========================================================
-    # ЭТАП 2: РЕВЬЮ СПИСКА ОПЕРАЦИЙ (ГОТОВО, НОМЕР, ПРИМЕНИТЬ ДЛЯ ВСЕХ)
+    # ВЫБОР ДЕЙСТВИЯ НАД ОПЕРАЦИЕЙ ИЗ ИСТОРИИ (УДАЛИТЬ / СУММА / КАТЕГОРИЯ)
+    # =========================================================
+    if state == "history_action_select":
+        sel_op = user_states[user_id].get("sel_op")
+        
+        # 1. Действие: Удалить операцию
+        if "удалить" in user_text_lower:
+            user_states[user_id]["state"] = "confirm_delete_tx"
+            send_vk_message(
+                user_id,
+                f"⚠️ Вы уверены, что хотите безвозвратно удалить операцию?\n\n"
+                f"• {sel_op['article']} — {sel_op['amount']:g} руб.\n"
+                f"• Категория: {sel_op['category']} -> {sel_op['subcategory']}",
+                get_yes_no_keyboard(show_back=True)
+            )
+            return True
+
+        # 2. Действие: Изменить сумму
+        elif "сумму" in user_text_lower:
+            user_states[user_id]["state"] = "history_edit_amount"
+            send_vk_message(
+                user_id,
+                f"✏️ Текущая сумма: {sel_op['amount']:g} руб.\n"
+                f"Введите или надиктуйте новую сумму (например: 550):",
+                get_cancel_keyboard(show_back=True)
+            )
+            return True
+
+        # 3. Действие: Изменить категорию
+        elif "категорию" in user_text_lower:
+            user_states[user_id]["state"] = "history_edit_category"
+            send_vk_message(
+                user_id,
+                f"📂 Текущая категория: {sel_op['category']} -> {sel_op['subcategory']}\n"
+                f"Напишите или надиктуйте правильную категорию или статью (например: «Кафе» или «Продукты»):",
+                get_cancel_keyboard(show_back=True)
+            )
+            return True
+
+    # =========================================================
+    # ВВОД НОВОЙ СУММЫ ДЛЯ ОПЕРАЦИИ
+    # =========================================================
+    if state == "history_edit_amount":
+        sel_op = user_states[user_id].get("sel_op")
+        # Выделяем число из текста пользователя
+        raw_num = re.sub(r'[^\d.,]', '', user_text).replace(',', '.')
+        try:
+            new_amount = float(raw_num)
+            if new_amount > 0:
+                ok = update_transaction_amount(internal_uid, sel_op["id"], new_amount)
+                if ok:
+                    send_vk_message(
+                        user_id,
+                        f"✅ Сумма операции «{sel_op['article']}» успешно изменена:\n"
+                        f"💰 {sel_op['amount']:g} руб. ➔ {new_amount:g} руб.",
+                        get_main_keyboard(user_id)
+                    )
+                else:
+                    send_vk_message(user_id, "❌ Не удалось обновить сумму в базе данных.", get_main_keyboard(user_id))
+                del user_states[user_id]
+                return True
+            else:
+                send_vk_message(user_id, "⚠️ Сумма должна быть больше 0. Попробуйте еще раз:", get_cancel_keyboard(show_back=True))
+                return True
+        except ValueError:
+            send_vk_message(user_id, "⚠️ Пожалуйста, укажите сумму числом (например: 450).", get_cancel_keyboard(show_back=True))
+            return True
+
+    # =========================================================
+    # ВВОД НОВОЙ КАТЕГОРИИ ДЛЯ ОПЕРАЦИИ
+    # =========================================================
+    if state == "history_edit_category":
+        sel_op = user_states[user_id].get("sel_op")
+        op_type = sel_op.get("type", "Расход")
+
+        # 1. Поиск подсказки по базе данных
+        db_match = smart_search_item(internal_uid, user_text, op_type=op_type)
+        if db_match["status"] != "FOUND":
+            db_match = smart_search_item(internal_uid, user_text, op_type=None)
+
+        if db_match["status"] == "FOUND":
+            target_cat = db_match["category"]
+            target_sub = db_match["subcategory"]
+            target_art = db_match["article"]
+        else:
+            # 2. Поиск по дереву категорий
+            menu_full = get_full_menu(internal_uid)
+            u_clean = user_text.lower().strip()
+            found_in_tree = False
+            target_cat, target_sub, target_art = "Разное", "Требует проверки", sel_op["article"]
+
+            for m_type in ["Расход", "Доход"]:
+                type_cats = menu_full.get(m_type, {})
+                for m_cat, m_subs in type_cats.items():
+                    if m_cat.lower() == u_clean:
+                        target_cat = m_cat
+                        sub_keys = list(m_subs.keys()) if isinstance(m_subs, dict) else (m_subs if m_subs else [])
+                        target_sub = sub_keys[0] if sub_keys else "Разное"
+                        found_in_tree = True
+                        break
+                    sub_keys = list(m_subs.keys()) if isinstance(m_subs, dict) else (m_subs if m_subs else [])
+                    for s_name in sub_keys:
+                        if s_name.lower() == u_clean:
+                            target_cat = m_cat
+                            target_sub = s_name
+                            found_in_tree = True
+                            break
+                    if found_in_tree:
+                        break
+                if found_in_tree:
+                    break
+
+            # 3. Резервный поиск через ИИ
+            if not found_in_tree:
+                send_vk_message(user_id, "🧠 Подбираю категорию с помощью ИИ...", get_cancel_keyboard(show_back=True))
+                type_menu = menu_full.get(op_type, {})
+                menu_str = f"[{op_type}]\n" + "\n".join([f"{c}: {', '.join(subs.keys() if isinstance(subs, dict) else subs)}" for c, subs in type_menu.items()])
+                ai_cat, ai_sub = categorize_with_ai(sel_op["article"], menu_str, context=user_text)
+                target_cat, target_sub = ai_cat, ai_sub
+
+        ok = update_transaction_category(internal_uid, sel_op["id"], target_cat, target_sub, target_art)
+        if ok:
+            # Обучаем личный словарь
+            if target_cat != "Разное" and target_sub != "Требует проверки":
+                learn_user_word(internal_uid, op_type, target_cat, target_sub, target_art, user_text)
+                learn_user_word(internal_uid, op_type, target_cat, target_sub, target_art, target_art)
+
+            send_vk_message(
+                user_id,
+                f"✅ Категория операции «{target_art}» успешно изменена:\n"
+                f"📂 {target_cat} -> {target_sub}",
+                get_main_keyboard(user_id)
+            )
+        else:
+            send_vk_message(user_id, "❌ Не удалось обновить категорию в базе данных.", get_main_keyboard(user_id))
+        del user_states[user_id]
+        return True
+
+    # =========================================================
+    # ВЫБОР НОМЕРА ОПЕРАЦИИ ИЗ СПИСКА ИСТОРИИ
+    # =========================================================
+    if state == "history_view":
+        if user_text.isdigit():
+            idx = int(user_text) - 1
+            items = user_states[user_id].get("history_data", {}).get("items", [])
+            if 0 <= idx < len(items):
+                sel_op = items[idx]
+                user_states[user_id]["state"] = "history_action_select"
+                user_states[user_id]["sel_op"] = sel_op
+                user_states[user_id]["idx"] = idx
+
+                date_str = sel_op["date"].strftime("%d.%m.%Y %H:%M") if sel_op.get("date") else ""
+                t_icon = "📈" if sel_op["type"] == "Доход" else "📉"
+                msg = (
+                    f"📌 **Выбрана операция №{idx+1}:**\n"
+                    f"• {t_icon} {sel_op['article']} — {sel_op['amount']:g} руб.\n"
+                    f"• 📂 {sel_op['category']} -> {sel_op['subcategory']}\n"
+                    f"• 📅 Дата: {date_str}\n\n"
+                    f"Что вы хотите сделать с этой операцией?"
+                )
+                send_vk_message(user_id, msg, get_tx_action_keyboard())
+                return True
+
+    # =========================================================
+    # ПОДТВЕРЖДЕНИЕ УДАЛЕНИЯ ОПЕРАЦИИ
+    # =========================================================
+    if state == "confirm_delete_tx":
+        if any(w in user_text_lower for w in ["да", "верно", "ага", "yes", "+", "удалить"]):
+            tx_id = user_states[user_id].get("tx_id") or (user_states[user_id].get("sel_op", {}).get("id"))
+            desc = user_states[user_id].get("desc") or (user_states[user_id].get("sel_op", {}).get("article", "Операция"))
+            if tx_id and delete_transaction_by_id(internal_uid, tx_id):
+                send_vk_message(user_id, f"🗑 Успешно удалено: «{desc}».", get_main_keyboard(user_id))
+            else:
+                send_vk_message(user_id, "❌ Не удалось удалить операцию.", get_main_keyboard(user_id))
+            del user_states[user_id]
+            return True
+        elif any(w in user_text_lower for w in ["нет", "неверно", "отмена"]):
+            del user_states[user_id]
+            send_vk_message(user_id, "Удаление отменено.", get_main_keyboard(user_id))
+            return True
+
+    # =========================================================
+    # РЕВЬЮ ПАКЕТА ОПЕРАЦИЙ (МАССОВЫЙ ВВОД)
     # =========================================================
     if state == "multi_tx_review":
         state_data = user_states[user_id]
@@ -193,9 +426,6 @@ def handle_transaction(user_id, user_text, state, user_states):
                 )
                 return True
 
-    # =========================================================
-    # ЭТАП 2.1: ОБРАБОТКА ПОДСКАЗКИ К КОНКРЕТНОМУ ПУНКТУ СПИСКА (ПОИСК В БД ПЕРВЫМ!)
-    # =========================================================
     if state == "multi_tx_edit_hint":
         state_data = user_states[user_id]
         idx = state_data["edit_idx"]
@@ -203,7 +433,6 @@ def handle_transaction(user_id, user_text, state, user_states):
         sel_item = items[idx]
         op_type = sel_item.get("type", "Расход")
 
-        # 1. Поиск по базе данных
         db_match = smart_search_item(internal_uid, user_text, op_type=op_type)
         if db_match["status"] != "FOUND":
             db_match = smart_search_item(internal_uid, user_text, op_type=None)
@@ -214,7 +443,6 @@ def handle_transaction(user_id, user_text, state, user_states):
             if db_match.get("type"):
                 sel_item["type"] = db_match["type"]
         else:
-            # 2. Проверка точного совпадения по дереву категорий
             menu_full = get_full_menu(internal_uid)
             u_clean = user_text.lower().strip()
             found_in_tree = False
@@ -242,7 +470,6 @@ def handle_transaction(user_id, user_text, state, user_states):
                 if found_in_tree:
                     break
 
-            # 3. Резервный поиск через нейросеть
             if not found_in_tree:
                 send_vk_message(user_id, "🧠 Подбираю категорию с помощью ИИ...", get_cancel_keyboard(show_back=True))
                 menu_full = state_data["menu"]
@@ -265,7 +492,7 @@ def handle_transaction(user_id, user_text, state, user_states):
         return False
 
     # =========================================================
-    # ЭТАП 1: ПЕРВИЧНЫЙ АНАЛИЗ ВВОДА (ГОЛОС ИЛИ ТЕКСТ) ЧЕРЕЗ ИИ
+    # ПЕРВИЧНЫЙ АНАЛИЗ ВВОДА (ГОЛОС ИЛИ ТЕКСТ) ЧЕРЕЗ ИИ
     # =========================================================
     reply_text = extract_transaction_with_ai(user_text)
     if not reply_text:
@@ -278,6 +505,63 @@ def handle_transaction(user_id, user_text, state, user_states):
             parsed_data = json.loads(clean_text)
             action = parsed_data.get("action")
 
+            # ---------------------------------------------------------
+            # 1. ЗАПРОС НА ПРОСМОТР ИСТОРИИ (ГОЛОС ИЛИ ТЕКСТ)
+            # ---------------------------------------------------------
+            if action == "show_history":
+                limit = int(parsed_data.get("limit") or 10)
+                period = parsed_data.get("period")
+                
+                send_vk_message(user_id, "⏳ Загружаю историю операций...")
+                history_data = get_user_history(internal_uid, limit=limit, period=period)
+                items = history_data["items"]
+
+                if not items:
+                    send_vk_message(user_id, "📭 За указанный период операций не найдено.", get_main_keyboard(user_id))
+                    return True
+
+                period_names = {
+                    "today": "за сегодня",
+                    "yesterday": "за вчера",
+                    "week": "за последнюю неделю",
+                    "month": "за последние 30 дней"
+                }
+                title_period = period_names.get(period, f"последние {len(items)}")
+
+                history_data["title_period"] = title_period
+                user_states[user_id] = {
+                    "state": "history_view",
+                    "history_data": history_data
+                }
+                _show_history_screen(user_id, items, title_period, history_data["total_expense"], history_data["total_income"])
+                return True
+
+            # ---------------------------------------------------------
+            # 2. БЫСТРОЕ УДАЛЕНИЕ ПОСЛЕДНЕЙ ОПЕРАЦИИ
+            # ---------------------------------------------------------
+            if action == "delete_last_tx":
+                last_op = get_last_transaction(internal_uid)
+                if not last_op:
+                    send_vk_message(user_id, "📭 В журнале пока нет операций для удаления.", get_main_keyboard(user_id))
+                    return True
+
+                user_states[user_id] = {
+                    "state": "confirm_delete_tx",
+                    "tx_id": last_op["id"],
+                    "desc": f"{last_op['article']} ({last_op['amount']:g} руб.)"
+                }
+                send_vk_message(
+                    user_id,
+                    f"⚠️ Вы уверены, что хотите удалить последнюю операцию?\n\n"
+                    f"• {last_op['article']} — {last_op['amount']:g} руб. ({last_op['type']})\n"
+                    f"• Категория: {last_op['category']} -> {last_op['subcategory']}",
+                    get_yes_no_keyboard(show_back=True)
+                )
+                return True
+
+            # ---------------------------------------------------------
+            # 3. ТЕКСТОВОЕ УПРАВЛЕНИЕ СТРУКТУРОЙ
+            # ---------------------------------------------------------
             if action in ["smart_rename", "smart_delete", "smart_move"]:
                 target_name = parsed_data.get("old_name") if action == "smart_rename" else parsed_data.get("item", "")
                 send_vk_message(user_id, f"⏳ Ищу '{target_name}' в структуре...")
@@ -368,6 +652,9 @@ def handle_transaction(user_id, user_text, state, user_states):
                     send_vk_message(user_id, f"Создаем категорию {f'«{item}»' if item else ''}.\nЭто категория Расходов или Доходов?", type_keyboard(show_back=True))
                     return True
 
+            # ---------------------------------------------------------
+            # 4. ОБЫЧНЫЙ ИЛИ МАССОВЫЙ ВВОД ТРАТ/ДОХОДОВ
+            # ---------------------------------------------------------
             raw_ops = parsed_data.get("operations", [])
             if not raw_ops and "item" in parsed_data:
                 raw_ops = [parsed_data]
@@ -392,12 +679,10 @@ def handle_transaction(user_id, user_text, state, user_states):
                     op_type = "Расход"
                 comment = op.get("comment", "").strip()
 
-                # 1. Поиск по чистому наименованию
                 search_res = smart_search_item(internal_uid, current_item, op_type=op_type)
                 if search_res["status"] != "FOUND":
                     search_res = smart_search_item(internal_uid, current_item, op_type=None)
 
-                # 2. Комбинированная проверка с комментарием (защита от разделения составных слов ИИ)
                 if search_res["status"] != "FOUND" and comment:
                     full_phrase = f"{current_item} {comment}".strip()
                     phrase_res = smart_search_item(internal_uid, full_phrase, op_type=op_type)
@@ -441,7 +726,6 @@ def handle_transaction(user_id, user_text, state, user_states):
                         "is_known": False
                     })
 
-            # СЦЕНАРИЙ А: 1 операция и она известна в базе -> мгновенная запись
             if len(processed_items) == 1 and all_known:
                 single = processed_items[0]
                 save_transaction(
@@ -462,7 +746,6 @@ def handle_transaction(user_id, user_text, state, user_states):
                 )
                 return True
 
-            # СЦЕНАРИЙ Б: Несколько операций или новая статья -> интерактивное ревью
             user_states[user_id] = {
                 "state": "multi_tx_review",
                 "items": processed_items,
