@@ -5,6 +5,7 @@ from services import (
     transcribe_audio_with_ai, parse_bank_file_with_ai
 )
 from keyboards import get_receipt_mode_keyboard, get_main_keyboard
+from handlers_voice_commands import handle_list_voice_commands
 from handlers_base import handle_base_commands
 from handlers_structure import handle_structure
 from handlers_queue import handle_queue_and_learning, _process_next_batch
@@ -124,7 +125,6 @@ for event in longpoll.listen():
                                 f"• Требует проверки: {stats['needs_review']}"
                             )
                             
-                            # Очищаем состояние ожидания файла
                             if user_id in user_states and user_states[user_id].get("state") == "wait_import_file":
                                 del user_states[user_id]
                             
@@ -166,15 +166,33 @@ for event in longpoll.listen():
         # ==============================================================
         # 3. МАРШРУТИЗАЦИЯ (STATE MACHINE / РОУТЕР)
         # ==============================================================
+        # Шаг 0: Перехват голосовых команд управления списками ("удали 1, 3 и 5", "измени сумму у 2 на 500")
+        if handle_list_voice_commands(user_id, user_text, user_text_lower, state, user_states):
+            continue
+
+        # Шаг 1: Базовые команды (отмена, назад, помощь, импорт выписок, миграция)
         if handle_base_commands(user_id, user_text_lower, state, user_states):
             continue
+
+        # Шаг 2: Управление структурой категорий и статей (CRUD)
         if handle_structure(user_id, user_text, user_text_lower, state, user_states):
             continue
+
+        # Шаг 3: Очередь разбора операций и одиночное обучение
         if handle_queue_and_learning(user_id, user_text, user_text_lower, state, user_states, MAX_ATTEMPTS):
             continue
+
+        # Шаг 4: Обработка чеков (GPT-4o Vision)
         if handle_receipt(user_id, user_text, user_text_lower, state, user_states):
             continue
+
+        # Шаг 5: Обычный ввод транзакций (голос/текст), просмотр истории и текстовый CRUD
         if handle_transaction(user_id, user_text, state, user_states):
             continue
 
-        send_vk_message(user_id, "⚠️ Неверный ввод. Пожалуйста, выберите вариант из меню.\nДля выхода нажмите «🚫 Отмена».", get_main_keyboard(user_id))
+        # Глобальная заглушка на непредвиденный ввод
+        send_vk_message(
+            user_id,
+            "⚠️ Неверный ввод. Пожалуйста, выберите вариант из меню.\nДля выхода нажмите «🚫 Отмена».",
+            get_main_keyboard(user_id)
+        )
