@@ -11,7 +11,12 @@ from .transactions import (
     get_full_menu,
     get_unverified_transactions,
     get_unreviewed_count,
-    resolve_unverified_item
+    resolve_unverified_item,
+    get_user_history,
+    delete_transaction_by_id,
+    get_last_transaction,
+    update_transaction_amount,
+    update_transaction_category
 )
 
 from .structure import (
@@ -43,6 +48,11 @@ __all__ = [
     "get_unverified_transactions",
     "get_unreviewed_count",
     "resolve_unverified_item",
+    "get_user_history",
+    "delete_transaction_by_id",
+    "get_last_transaction",
+    "update_transaction_amount",
+    "update_transaction_category",
     "db_add_subcategory",
     "db_add_article",
     "db_rename_category",
