@@ -61,14 +61,19 @@ def clean_fallback_item(user_text):
     clean = " ".join(words).strip()
     return clean if clean else "Трата"
 
-def _clean_json_string(text):
-    """Очищает строку от маркдауна ```json ... ``` если ИИ его добавил"""
-    text = text.strip()
-    if text.startswith("```json"):
-        text = text[7:-3].strip()
-    elif text.startswith("```"):
-        text = text[3:-3].strip()
-    return text
+def _extract_json_data(text):
+    """Надежно извлекает JSON объект или массив из текста с помощью регулярных выражений."""
+    if not text:
+        return None
+    # Ищем самый широкий JSON блок {...} или [...]
+    match = re.search(r'(\{.*\}|\[.*\])', text, re.DOTALL)
+    if match:
+        raw_json = match.group(0).strip()
+        try:
+            return json.loads(raw_json)
+        except Exception:
+            pass
+    return None
 
 def _show_multi_tx_items(user_id, items, show_apply_all=False):
     """Выводит красивый пронумерованный список распознанных операций."""
@@ -91,6 +96,42 @@ def _show_multi_tx_items(user_id, items, show_apply_all=False):
     msg += "Если хотите изменить категорию статьи — отправьте её НОМЕР."
 
     send_vk_message(user_id, msg, get_multi_tx_review_keyboard(len(items), show_apply_all=show_apply_all, show_back=True))
+
+def _save_items_batch(internal_uid, items):
+    """Сохраняет пачку операций в БД и возвращает статистику."""
+    saved_count = 0
+    needs_review_count = 0
+    for item in items:
+        cat = item.get("category", "Разное")
+        sub = item.get("subcategory", "Требует проверки")
+        art = item.get("item", "Трата")
+        amount = float(item.get("amount", 0))
+        op_type = item.get("type", "Расход")
+        comment = item.get("comment", "")
+
+        if cat == "Разное" or sub == "Требует проверки":
+            op_status = 'needs_review'
+            needs_review_count += 1
+        else:
+            op_status = 'verified'
+
+        ok = save_transaction(
+            user_id=internal_uid,
+            op_type=op_type,
+            category=cat,
+            subcategory=sub,
+            article=art,
+            amount=amount,
+            comment=comment,
+            original_text=art,
+            status=op_status
+        )
+        if ok:
+            saved_count += 1
+
+        if op_status == 'verified':
+            learn_user_word(internal_uid, op_type, cat, sub, art, art)
+    return saved_count, needs_review_count
 
 def _show_history_screen(user_id, items, title_period, total_expense, total_income):
     """Выводит список истории операций с клавиатурой выбора номера."""
@@ -127,14 +168,12 @@ def handle_transaction(user_id, user_text, state, user_states):
             send_vk_message(user_id, "Главное меню.", get_main_keyboard(user_id))
             return True
         elif state in ["history_action_select", "confirm_delete_tx"]:
-            # Возврат к просмотру списка истории
             hist = user_states[user_id].get("history_data", {})
             items = hist.get("items", [])
             user_states[user_id]["state"] = "history_view"
             _show_history_screen(user_id, items, hist.get("title_period", "список"), hist.get("total_expense", 0), hist.get("total_income", 0))
             return True
         elif state in ["history_edit_amount", "history_edit_category"]:
-            # Возврат к меню действий над конкретной операцией
             user_states[user_id]["state"] = "history_action_select"
             sel_op = user_states[user_id]["sel_op"]
             idx = user_states[user_id]["idx"]
@@ -155,12 +194,10 @@ def handle_transaction(user_id, user_text, state, user_states):
             return True
 
     # =========================================================
-    # ВЫБОР ДЕЙСТВИЯ НАД ОПЕРАЦИЕЙ ИЗ ИСТОРИИ (УДАЛИТЬ / СУММА / КАТЕГОРИЯ)
+    # ВЫБОР ДЕЙСТВИЯ НАД ОПЕРАЦИЕЙ ИЗ ИСТОРИИ
     # =========================================================
     if state == "history_action_select":
         sel_op = user_states[user_id].get("sel_op")
-        
-        # 1. Действие: Удалить операцию
         if "удалить" in user_text_lower:
             user_states[user_id]["state"] = "confirm_delete_tx"
             send_vk_message(
@@ -171,8 +208,6 @@ def handle_transaction(user_id, user_text, state, user_states):
                 get_yes_no_keyboard(show_back=True)
             )
             return True
-
-        # 2. Действие: Изменить сумму
         elif "сумму" in user_text_lower:
             user_states[user_id]["state"] = "history_edit_amount"
             send_vk_message(
@@ -182,8 +217,6 @@ def handle_transaction(user_id, user_text, state, user_states):
                 get_cancel_keyboard(show_back=True)
             )
             return True
-
-        # 3. Действие: Изменить категорию
         elif "категорию" in user_text_lower:
             user_states[user_id]["state"] = "history_edit_category"
             send_vk_message(
@@ -199,7 +232,6 @@ def handle_transaction(user_id, user_text, state, user_states):
     # =========================================================
     if state == "history_edit_amount":
         sel_op = user_states[user_id].get("sel_op")
-        # Выделяем число из текста пользователя
         raw_num = re.sub(r'[^\d.,]', '', user_text).replace(',', '.')
         try:
             new_amount = float(raw_num)
@@ -230,7 +262,6 @@ def handle_transaction(user_id, user_text, state, user_states):
         sel_op = user_states[user_id].get("sel_op")
         op_type = sel_op.get("type", "Расход")
 
-        # 1. Поиск подсказки по базе данных
         db_match = smart_search_item(internal_uid, user_text, op_type=op_type)
         if db_match["status"] != "FOUND":
             db_match = smart_search_item(internal_uid, user_text, op_type=None)
@@ -240,7 +271,6 @@ def handle_transaction(user_id, user_text, state, user_states):
             target_sub = db_match["subcategory"]
             target_art = db_match["article"]
         else:
-            # 2. Поиск по дереву категорий
             menu_full = get_full_menu(internal_uid)
             u_clean = user_text.lower().strip()
             found_in_tree = False
@@ -267,7 +297,6 @@ def handle_transaction(user_id, user_text, state, user_states):
                 if found_in_tree:
                     break
 
-            # 3. Резервный поиск через ИИ
             if not found_in_tree:
                 send_vk_message(user_id, "🧠 Подбираю категорию с помощью ИИ...", get_cancel_keyboard(show_back=True))
                 type_menu = menu_full.get(op_type, {})
@@ -277,7 +306,6 @@ def handle_transaction(user_id, user_text, state, user_states):
 
         ok = update_transaction_category(internal_uid, sel_op["id"], target_cat, target_sub, target_art)
         if ok:
-            # Обучаем личный словарь
             if target_cat != "Разное" and target_sub != "Требует проверки":
                 learn_user_word(internal_uid, op_type, target_cat, target_sub, target_art, user_text)
                 learn_user_word(internal_uid, op_type, target_cat, target_sub, target_art, target_art)
@@ -317,6 +345,10 @@ def handle_transaction(user_id, user_text, state, user_states):
                 )
                 send_vk_message(user_id, msg, get_tx_action_keyboard())
                 return True
+        else:
+            # Если пользователь при просмотре истории надиктовал новую трату, сбрасываем состояние истории
+            del user_states[user_id]
+            state = ""
 
     # =========================================================
     # ПОДТВЕРЖДЕНИЕ УДАЛЕНИЯ ОПЕРАЦИИ
@@ -343,41 +375,10 @@ def handle_transaction(user_id, user_text, state, user_states):
         state_data = user_states[user_id]
         items = state_data["items"]
 
-        if "готово" in user_text_lower:
+        # 1. Подтверждение сохранения (любые синонимы согласия)
+        if any(w in user_text_lower for w in ["готово", "сохранить", "сохрани", "да", "ок", "+", "верно", "ага"]):
             send_vk_message(user_id, "⏳ Сохраняю операции в базу данных...", get_cancel_keyboard(show_back=False))
-            saved_count = 0
-            needs_review_count = 0
-
-            for item in items:
-                cat = item.get("category", "Разное")
-                sub = item.get("subcategory", "Требует проверки")
-                art = item.get("item", "Трата")
-                amount = float(item.get("amount", 0))
-                op_type = item.get("type", "Расход")
-                comment = item.get("comment", "")
-
-                if cat == "Разное" or sub == "Требует проверки":
-                    op_status = 'needs_review'
-                    needs_review_count += 1
-                else:
-                    op_status = 'verified'
-
-                ok = save_transaction(
-                    user_id=internal_uid,
-                    op_type=op_type,
-                    category=cat,
-                    subcategory=sub,
-                    article=art,
-                    amount=amount,
-                    comment=comment,
-                    original_text=art,
-                    status=op_status
-                )
-                if ok:
-                    saved_count += 1
-
-                if op_status == 'verified':
-                    learn_user_word(internal_uid, op_type, cat, sub, art, art)
+            saved_count, needs_review_count = _save_items_batch(internal_uid, items)
 
             report_msg = f"🎉 Успешно сохранено {saved_count} операций!\nЖурнал обновлен."
             if needs_review_count > 0:
@@ -387,6 +388,7 @@ def handle_transaction(user_id, user_text, state, user_states):
             del user_states[user_id]
             return True
 
+        # 2. Кнопка "Применить для всех оставшихся"
         elif any(w in user_text_lower for w in ["применить для всех", "применить ко всем"]):
             last_cat = state_data.get("last_category")
             last_sub = state_data.get("last_subcategory")
@@ -412,6 +414,7 @@ def handle_transaction(user_id, user_text, state, user_states):
             _show_multi_tx_items(user_id, items, show_apply_all=True)
             return True
 
+        # 3. Выбор номера для редактирования
         elif user_text.isdigit():
             idx = int(user_text) - 1
             if 0 <= idx < len(items):
@@ -426,6 +429,17 @@ def handle_transaction(user_id, user_text, state, user_states):
                 )
                 return True
 
+        # 4. АВТОМАТИЧЕСКИЙ ВЫХОД ИЗ РЕВЬЮ: если пользователь прислал новую трату с цифрами
+        elif re.search(r'\d+', user_text):
+            # Автоматически сохраняем текущие элементы из списка
+            saved_count, _ = _save_items_batch(internal_uid, items)
+            send_vk_message(user_id, f"💾 Предыдущие операции ({saved_count} шт.) сохранены.")
+            del user_states[user_id]
+            state = "" # Сбрасываем стейт и продолжаем обработку нового ввода ниже!
+
+    # =========================================================
+    # ПОДСКАЗКА ДЛЯ КОНКРЕТНОГО ПУНКТА ИЗ МАССОВОГО ВВОДА
+    # =========================================================
     if state == "multi_tx_edit_hint":
         state_data = user_states[user_id]
         idx = state_data["edit_idx"]
@@ -488,6 +502,7 @@ def handle_transaction(user_id, user_text, state, user_states):
         _show_multi_tx_items(user_id, items, show_apply_all=True)
         return True
 
+    # Если в активном стейте другой сценарий (CRUD, регистрация), пропускаем
     if state != "":
         return False
 
@@ -498,11 +513,14 @@ def handle_transaction(user_id, user_text, state, user_states):
     if not reply_text:
         return False
 
-    clean_text = _clean_json_string(reply_text)
+    parsed_data = _extract_json_data(reply_text)
 
-    if clean_text.startswith("{") and clean_text.endswith("}"):
+    if parsed_data:
         try:
-            parsed_data = json.loads(clean_text)
+            # Если ИИ вернул прямой список объектов: [{"item":...}, {...}]
+            if isinstance(parsed_data, list):
+                parsed_data = {"operations": parsed_data}
+
             action = parsed_data.get("action")
 
             # ---------------------------------------------------------
@@ -679,10 +697,12 @@ def handle_transaction(user_id, user_text, state, user_states):
                     op_type = "Расход"
                 comment = op.get("comment", "").strip()
 
+                # 1. Поиск по чистому наименованию
                 search_res = smart_search_item(internal_uid, current_item, op_type=op_type)
                 if search_res["status"] != "FOUND":
                     search_res = smart_search_item(internal_uid, current_item, op_type=None)
 
+                # 2. Комбинированная проверка с комментарием
                 if search_res["status"] != "FOUND" and comment:
                     full_phrase = f"{current_item} {comment}".strip()
                     phrase_res = smart_search_item(internal_uid, full_phrase, op_type=op_type)
@@ -726,6 +746,7 @@ def handle_transaction(user_id, user_text, state, user_states):
                         "is_known": False
                     })
 
+            # СЦЕНАРИЙ А: 1 операция и она известна в базе -> мгновенная запись без лишних кликов
             if len(processed_items) == 1 and all_known:
                 single = processed_items[0]
                 save_transaction(
@@ -741,11 +762,12 @@ def handle_transaction(user_id, user_text, state, user_states):
                 )
                 send_vk_message(
                     user_id,
-                    f"✅ Успешно записано! ({single['type']})\n📂 {single['category']} -> {single['subcategory']}\n💰 {single['amount']} руб.",
+                    f"✅ Успешно записано! ({single['type']})\n📂 {single['category']} -> {single['subcategory']}\n💰 {single['amount']:g} руб.",
                     get_main_keyboard(user_id)
                 )
                 return True
 
+            # СЦЕНАРИЙ Б: Несколько операций или неизвестная статья -> интерактивное ревью
             user_states[user_id] = {
                 "state": "multi_tx_review",
                 "items": processed_items,
@@ -754,10 +776,9 @@ def handle_transaction(user_id, user_text, state, user_states):
             _show_multi_tx_items(user_id, processed_items, show_apply_all=False)
             return True
 
-        except json.JSONDecodeError:
-            send_vk_message(user_id, "❌ Ошибка: ИИ вернул некорректный формат ответа.", get_main_keyboard(user_id))
         except Exception as e:
             send_vk_message(user_id, f"❌ Ошибка базы данных: {e}", get_main_keyboard(user_id))
+            return True
     else:
         if reply_text:
             send_vk_message(user_id, reply_text, get_main_keyboard(user_id))
