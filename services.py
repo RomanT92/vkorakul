@@ -43,14 +43,36 @@ longpoll = VkLongPoll(vk_session)
 vk = vk_session.get_api()
 ai_client = OpenAI(api_key=AI_TUNNEL_KEY, base_url=AI_BASE_URL)
 
+# Промпт для голосовых команд над списками
+PROMPT_LIST_COMMAND = """
+Ты — анализатор команд управления списком операций.
+Пользователь смотрит на нумерованный список трат/доходов и даёт команду (голосом или текстом).
+
+Твоя задача — извлечь параметры команды в JSON:
+
+1. УДАЛЕНИЕ:
+- "удали первую, третью и пятую" -> {"action": "delete", "indices": [1, 3, 5]}
+- "убери вторую" -> {"action": "delete", "indices": [2]}
+- "удали 1 4 6" -> {"action": "delete", "indices": [1, 4, 6]}
+
+2. ИЗМЕНЕНИЕ СУММЫ:
+- "измени сумму у четвертой на 250" -> {"action": "edit_amount", "index": 4, "amount": 250}
+- "у второй поставь 1500 рублей" -> {"action": "edit_amount", "index": 2, "amount": 1500}
+
+3. ИЗМЕНЕНИЕ КАТЕГОРИИ:
+- "измени категорию у второй на рестораны" -> {"action": "edit_category", "index": 2, "category_hint": "рестораны"}
+- "четвертая это такси" -> {"action": "edit_category", "index": 4, "category_hint": "такси"}
+- "третья это спорт" -> {"action": "edit_category", "index": 3, "category_hint": "спорт"}
+
+Если команда не относится к управлению элементами списка — верни {"action": "unknown"}.
+Ответь СТРОГО JSON без маркдауна.
+"""
+
 # ====================================================================
 # ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ДЛЯ РАБОТЫ С ФОТО
 # ====================================================================
 def get_image_base64_uri(image_url):
-    """
-    Скачивает изображение из ВК через Python и кодирует в Base64.
-    Это защищает от блокировки со стороны VK CDN серверами OpenAI.
-    """
+    """Скачивает изображение из ВК через Python и кодирует в Base64."""
     try:
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
@@ -67,21 +89,36 @@ def get_image_base64_uri(image_url):
         return None
 
 # ====================================================================
-# ФУНКЦИИ СВЯЗИ
+# ФУНКЦИИ СВЯЗИ С ВК (С ЗАЩИТОЙ ОТ ЗАВИСАНИЯ И ДЛИННЫХ ТЕКСТОВ)
 # ====================================================================
 def send_vk_message(user_id, text, keyboard=None):
-    """Отправляет сообщение пользователю ВКонтакте."""
+    """
+    Отправляет сообщение пользователю ВКонтакте.
+    Защищает от лимита 4096 символов (разбивает сообщение на части),
+    чтобы бот не падал при запросе большой истории операций.
+    """
     try:
+        max_len = 3800
+        if len(text) > max_len:
+            parts = [text[i:i+max_len] for i in range(0, len(text), max_len)]
+            for idx, part in enumerate(parts):
+                kb = keyboard if idx == len(parts) - 1 else None
+                post = {'user_id': user_id, 'message': part, 'random_id': 0}
+                if kb is not None:
+                    post['keyboard'] = kb.get_keyboard()
+                vk.messages.send(**post)
+            return
+
         post = {'user_id': user_id, 'message': text, 'random_id': 0}
         if keyboard is not None:
             post['keyboard'] = keyboard.get_keyboard()
         vk.messages.send(**post)
     except Exception as e:
-        print(f"Ошибка отправки с клавиатурой: {e}")
+        print(f"Ошибка отправки сообщения ВК с клавиатурой: {e}")
         try:
-            vk.messages.send(user_id=user_id, message=text, random_id=0)
-        except:
-            pass
+            vk.messages.send(user_id=user_id, message=text[:3800], random_id=0)
+        except Exception as e2:
+            print(f"Критическая ошибка отправки: {e2}")
 
 def send_to_google_sheets(payload):
     """Отправляет JSON-данные в Google Таблицу и возвращает ответ."""
@@ -90,6 +127,27 @@ def send_to_google_sheets(payload):
         return response.json()
     except Exception as e:
         return {"status": "ERROR", "message": str(e)}
+
+def parse_voice_list_command_with_ai(user_text):
+    """Распознает команды изменения/удаления элементов списка из текста."""
+    try:
+        response = ai_client.chat.completions.create(
+            model="gpt-3.5-turbo",
+            temperature=0.0,
+            messages=[
+                {"role": "system", "content": PROMPT_LIST_COMMAND},
+                {"role": "user", "content": user_text}
+            ]
+        )
+        text = response.choices[0].message.content.strip()
+        if text.startswith("```json"):
+            text = text[7:-3].strip()
+        elif text.startswith("```"):
+            text = text[3:-3].strip()
+        return json.loads(text)
+    except Exception as e:
+        print(f"Ошибка парсинга голосовой команды списка: {e}")
+        return {"action": "unknown"}
 
 def categorize_with_ai(item, menu_str, context=""):
     """Просит ИИ подобрать категорию из меню с учетом контекста."""
@@ -116,11 +174,11 @@ def categorize_with_ai(item, menu_str, context=""):
     return "UNKNOWN", "UNKNOWN"
 
 def extract_transaction_with_ai(user_text):
-    """Универсальная функция: парсит транзакцию или отвечает как собеседник."""
+    """Парсит финансовые операции, команды истории/удаления или общается."""
     try:
         response = ai_client.chat.completions.create(
             model="gpt-3.5-turbo",
-            temperature=0.3,
+            temperature=0.2,
             messages=[
                 {"role": "system", "content": PROMPT_EXTRACT},
                 {"role": "user", "content": user_text}
@@ -155,7 +213,7 @@ def transcribe_audio_with_ai(audio_url):
         return None
 
 def extract_receipt_total_with_ai(image_url):
-    """Извлекает только общий итог и магазин из чека (GPT-4o Vision)."""
+    """Извлекает общий итог и магазин из чека (GPT-4o Vision)."""
     try:
         base64_uri = get_image_base64_uri(image_url)
         if not base64_uri:
@@ -206,7 +264,7 @@ def extract_receipt_items_with_ai(image_url, menu_str):
         return None
 
 def categorize_batch_with_ai(items_list, menu_str):
-    """Отправляет список операций в ИИ для массовой категоризации (разбор завалов)."""
+    """Отправляет список операций в ИИ для массовой категоризации."""
     prompt = f"Меню:\n{menu_str}\n\nОперации:\n"
     for item in items_list:
         prompt += f"- {item['original_item']} ({item['amount']} руб.)\n"
@@ -232,10 +290,7 @@ def categorize_batch_with_ai(items_list, menu_str):
     return []
 
 def parse_bank_file_with_ai(file_url, file_ext):
-    """
-    Скачивает файл, перебирает ВСЕ вкладки, анализирует структуру через ИИ
-    и вытаскивает все операции со всех подходящих листов.
-    """
+    """Скачивает файл выписки и извлекает все операции через ИИ."""
     try:
         response = requests.get(file_url, timeout=30)
         if response.status_code != 200:
@@ -358,55 +413,10 @@ def parse_bank_file_with_ai(file_url, file_ext):
         if len(parsed_operations) > 50000:
             return {
                 "status": "ERROR",
-                "message": f"Найдено слишком много цифр ({len(parsed_operations)}). Лимит системы - 50 000 за один раз."
+                "message": f"Найдено слишком много цифр ({len(parsed_operations)}). Лимит - 50 000."
             }
 
         return {"status": "SUCCESS", "operations": parsed_operations}
     except Exception as e:
         print(f"Ошибка парсинга файла: {e}")
         return {"status": "ERROR", "message": str(e)}
-
-PROMPT_LIST_COMMAND = """
-Ты — анализатор команд управления списком операций.
-Пользователь смотрит на нумерованный список трат/доходов и даёт команду (голосом или текстом).
-
-Твоя задача — извлечь параметры команды в JSON:
-
-1. УДАЛЕНИЕ:
-- "удали первую, третью и пятую" -> {"action": "delete", "indices": [1, 3, 5]}
-- "убери вторую" -> {"action": "delete", "indices": [2]}
-- "удали 1 4 6" -> {"action": "delete", "indices": [1, 4, 6]}
-
-2. ИЗМЕНЕНИЕ СУММЫ:
-- "измени сумму у четвертой на 250" -> {"action": "edit_amount", "index": 4, "amount": 250}
-- "у второй поставь 1500 рублей" -> {"action": "edit_amount", "index": 2, "amount": 1500}
-
-3. ИЗМЕНЕНИЕ КАТЕГОРИИ:
-- "измени категорию у второй на рестораны" -> {"action": "edit_category", "index": 2, "category_hint": "рестораны"}
-- "четвертая это такси" -> {"action": "edit_category", "index": 4, "category_hint": "такси"}
-- "третья это спорт" -> {"action": "edit_category", "index": 3, "category_hint": "спорт"}
-
-Если команда не относится к управлению элементами списка — верни {"action": "unknown"}.
-Ответь СТРОГО JSON без маркдауна.
-"""
-
-def parse_voice_list_command_with_ai(user_text):
-    """Распознает команды изменения/удаления элементов списка из голосового текста."""
-    try:
-        response = ai_client.chat.completions.create(
-            model="gpt-3.5-turbo",
-            temperature=0.0,
-            messages=[
-                {"role": "system", "content": PROMPT_LIST_COMMAND},
-                {"role": "user", "content": user_text}
-            ]
-        )
-        text = response.choices[0].message.content.strip()
-        if text.startswith("```json"):
-            text = text[7:-3].strip()
-        elif text.startswith("```"):
-            text = text[3:-3].strip()
-        return json.loads(text)
-    except Exception as e:
-        print(f"Ошибка парсинга голосовой команды: {e}")
-        return {"action": "unknown"}
