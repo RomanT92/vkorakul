@@ -1,22 +1,8 @@
 # -*- coding: utf-8 -*-
 from vk_api.keyboard import VkKeyboard, VkKeyboardColor
 
-# ====================================================================
-# ЕДИНАЯ ДИЗАЙН-СИСТЕМА С ИКОНКАМИ:
-# 🔴 NEGATIVE  (Красный)  — 🚫 Отмена, 🔙 Назад, 🗑 Удалить, ❌ Нет
-# 🟢 POSITIVE  (Зеленый)  — ✅ Готово, 💾 Сохранить пакет, ➕ Создать, ✅ Да
-# ⚪ SECONDARY (Серый)    — Все стандартные пункты меню, списки и цифры
-# 🔵 PRIMARY   (Синий)    — Особые действия (⚡ Применить, ✏️ Переименовать, ➡️ Перенести, чеки)
-# ====================================================================
-
 def get_main_keyboard(user_id=None, count=None):
-    """
-    Главное меню бота:
-    1 строка: 📥 Разобрать операции (с динамическим счетчиком)
-    2 строка: 📊 Импорт статистики прошлого
-    3 строка: 📂 Категории и статьи
-    4 строка: ❓ Помощь
-    """
+    """Главное меню бота"""
     unreviewed_count = 0
     if count is not None:
         unreviewed_count = count
@@ -30,7 +16,6 @@ def get_main_keyboard(user_id=None, count=None):
 
     keyboard = VkKeyboard(one_time=False)
     
-    # 1. Кнопка разбора операций
     if unreviewed_count > 0:
         btn_text = f"📥 Разобрать операции ({unreviewed_count})"
     else:
@@ -38,19 +23,12 @@ def get_main_keyboard(user_id=None, count=None):
         
     keyboard.add_button(btn_text, color=VkKeyboardColor.SECONDARY)
     keyboard.add_line()
-    
-    # 2. Кнопка импорта прошлого (синяя/акцентная)
     keyboard.add_button('📊 Импорт статистики прошлого', color=VkKeyboardColor.PRIMARY)
     keyboard.add_line()
-    
-    # 3. Управление структурой
     keyboard.add_button('📂 Категории и статьи', color=VkKeyboardColor.SECONDARY)
     keyboard.add_line()
-    
-    # 4. Помощь
     keyboard.add_button('❓ Помощь', color=VkKeyboardColor.SECONDARY)
     return keyboard
-
 
 def get_crud_keyboard():
     """Меню управления структурой"""
@@ -63,7 +41,6 @@ def get_crud_keyboard():
     keyboard.add_button('🔙 Назад', color=VkKeyboardColor.NEGATIVE)
     return keyboard
 
-
 def get_del_move_keyboard():
     """Подменю: Удаление или Перенос"""
     keyboard = VkKeyboard(one_time=False)
@@ -73,9 +50,8 @@ def get_del_move_keyboard():
     keyboard.add_button('🔙 Назад', color=VkKeyboardColor.NEGATIVE)
     return keyboard
 
-
 def get_entity_keyboard():
-    """Выбор уровня структуры: Категория, Подкатегория или Статья"""
+    """Выбор уровня структуры"""
     keyboard = VkKeyboard(one_time=False)
     keyboard.add_button('📁 Категорию', color=VkKeyboardColor.SECONDARY)
     keyboard.add_button('📂 Подкатегорию', color=VkKeyboardColor.SECONDARY)
@@ -84,7 +60,6 @@ def get_entity_keyboard():
     keyboard.add_line()
     keyboard.add_button('🔙 Назад', color=VkKeyboardColor.NEGATIVE)
     return keyboard
-
 
 def get_move_entity_keyboard():
     """Выбор уровня для переноса"""
@@ -95,9 +70,8 @@ def get_move_entity_keyboard():
     keyboard.add_button('🔙 Назад', color=VkKeyboardColor.NEGATIVE)
     return keyboard
 
-
 def get_numbered_keyboard(count, show_back=True):
-    """Универсальная клавиатура с цифрами и кнопками «Назад» и «Отмена»"""
+    """Универсальная клавиатура с цифрами"""
     keyboard = VkKeyboard(one_time=False)
     limit = min(count, 36)
     for i in range(1, limit + 1):
@@ -110,9 +84,8 @@ def get_numbered_keyboard(count, show_back=True):
     keyboard.add_button('🚫 Отмена', color=VkKeyboardColor.NEGATIVE)
     return keyboard
 
-
 def get_yes_no_keyboard(show_back=True):
-    """Клавиатура подтверждения: Да / Нет / Назад / Отмена"""
+    """Клавиатура подтверждения"""
     keyboard = VkKeyboard(one_time=False)
     keyboard.add_button('✅ Да', color=VkKeyboardColor.POSITIVE)
     keyboard.add_button('❌ Нет', color=VkKeyboardColor.NEGATIVE)
@@ -122,9 +95,8 @@ def get_yes_no_keyboard(show_back=True):
     keyboard.add_button('🚫 Отмена', color=VkKeyboardColor.NEGATIVE)
     return keyboard
 
-
 def type_keyboard(show_back=True):
-    """Выбор типа транзакции: Расход / Доход / Назад / Отмена"""
+    """Выбор типа транзакции"""
     keyboard = VkKeyboard(one_time=False)
     keyboard.add_button('📉 Расход', color=VkKeyboardColor.SECONDARY)
     keyboard.add_button('📈 Доход', color=VkKeyboardColor.SECONDARY)
@@ -134,18 +106,16 @@ def type_keyboard(show_back=True):
     keyboard.add_button('🚫 Отмена', color=VkKeyboardColor.NEGATIVE)
     return keyboard
 
-
 def get_cancel_keyboard(show_back=False):
-    """Кнопка Отмена (опционально с кнопкой Назад)"""
+    """Кнопка Отмена"""
     keyboard = VkKeyboard(one_time=False)
     if show_back:
         keyboard.add_button('🔙 Назад', color=VkKeyboardColor.NEGATIVE)
     keyboard.add_button('🚫 Отмена', color=VkKeyboardColor.NEGATIVE)
     return keyboard
 
-
 def get_receipt_mode_keyboard(show_back=True):
-    """Выбор режима обработки чека"""
+    """Выбор режима чека"""
     keyboard = VkKeyboard(one_time=False)
     keyboard.add_button('🧾 Общий итог', color=VkKeyboardColor.PRIMARY)
     keyboard.add_button('📋 По позициям', color=VkKeyboardColor.PRIMARY)
@@ -155,9 +125,8 @@ def get_receipt_mode_keyboard(show_back=True):
     keyboard.add_button('🚫 Отмена', color=VkKeyboardColor.NEGATIVE)
     return keyboard
 
-
 def get_receipt_review_keyboard(count, show_back=True):
-    """Клавиатура для ревью позиций чека"""
+    """Клавиатура позиций чека"""
     keyboard = VkKeyboard(one_time=False)
     limit = min(count, 36)
     for i in range(1, limit + 1):
@@ -172,9 +141,8 @@ def get_receipt_review_keyboard(count, show_back=True):
     keyboard.add_button('🚫 Отмена', color=VkKeyboardColor.NEGATIVE)
     return keyboard
 
-
 def get_queue_review_keyboard(count, show_apply_all=False, show_back=True):
-    """Клавиатура для пакета операций разбора"""
+    """Клавиатура разбора операций"""
     keyboard = VkKeyboard(one_time=False)
     limit = min(count, 36)
     for i in range(1, limit + 1):
@@ -194,9 +162,8 @@ def get_queue_review_keyboard(count, show_apply_all=False, show_back=True):
     keyboard.add_button('🚫 Отмена', color=VkKeyboardColor.NEGATIVE)
     return keyboard
 
-
 def get_multi_tx_review_keyboard(count, show_apply_all=False, show_back=True):
-    """Клавиатура для ревью массового голосового/текстового ввода операций"""
+    """Клавиатура ревью массового ввода"""
     keyboard = VkKeyboard(one_time=False)
     limit = min(count, 36)
     for i in range(1, limit + 1):
@@ -213,5 +180,23 @@ def get_multi_tx_review_keyboard(count, show_apply_all=False, show_back=True):
     keyboard.add_line()
     if show_back:
         keyboard.add_button('🔙 Назад', color=VkKeyboardColor.NEGATIVE)
+    keyboard.add_button('🚫 Отмена', color=VkKeyboardColor.NEGATIVE)
+    return keyboard
+
+def get_tx_action_keyboard():
+    """
+    Клавиатура действий над конкретной операцией:
+    - Изменить сумму
+    - Изменить категорию
+    - Удалить
+    - Назад / Отмена
+    """
+    keyboard = VkKeyboard(one_time=False)
+    keyboard.add_button('✏️ Изменить сумму', color=VkKeyboardColor.PRIMARY)
+    keyboard.add_button('📂 Изменить категорию', color=VkKeyboardColor.PRIMARY)
+    keyboard.add_line()
+    keyboard.add_button('🗑 Удалить операцию', color=VkKeyboardColor.NEGATIVE)
+    keyboard.add_line()
+    keyboard.add_button('🔙 Назад к списку', color=VkKeyboardColor.NEGATIVE)
     keyboard.add_button('🚫 Отмена', color=VkKeyboardColor.NEGATIVE)
     return keyboard
