@@ -14,6 +14,7 @@ from .transactions import (
     resolve_unverified_item,
     get_user_history,
     delete_transaction_by_id,
+    delete_all_user_transactions,
     get_last_transaction,
     update_transaction_amount,
     update_transaction_category
@@ -50,6 +51,7 @@ __all__ = [
     "resolve_unverified_item",
     "get_user_history",
     "delete_transaction_by_id",
+    "delete_all_user_transactions",
     "get_last_transaction",
     "update_transaction_amount",
     "update_transaction_category",
