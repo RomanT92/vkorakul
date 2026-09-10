@@ -67,7 +67,7 @@ def _clean_json_string(text):
 def _show_multi_tx_items(user_id, items, show_apply_all=False):
     """Выводит красивый пронумерованный список распознанных операций."""
     msg = f"📋 Распознанные операции (всего {len(items)}):\n\n"
-    for i, item in enumerate(batch := items):
+    for i, item in enumerate(items):
         item_name = item.get("item", "Операция")
         amount = item.get("amount", 0)
         op_type = item.get("type", "Расход")
@@ -390,11 +390,23 @@ def handle_transaction(user_id, user_text, state, user_states):
                 op_type = op.get("type", "Расход")
                 if op_type not in ["Расход", "Доход"]:
                     op_type = "Расход"
-                comment = op.get("comment", "")
+                comment = op.get("comment", "").strip()
 
+                # 1. Поиск по чистому наименованию
                 search_res = smart_search_item(internal_uid, current_item, op_type=op_type)
                 if search_res["status"] != "FOUND":
                     search_res = smart_search_item(internal_uid, current_item, op_type=None)
+
+                # 2. Комбинированная проверка с комментарием (защита от разделения составных слов ИИ)
+                if search_res["status"] != "FOUND" and comment:
+                    full_phrase = f"{current_item} {comment}".strip()
+                    phrase_res = smart_search_item(internal_uid, full_phrase, op_type=op_type)
+                    if phrase_res["status"] != "FOUND":
+                        phrase_res = smart_search_item(internal_uid, full_phrase, op_type=None)
+                    if phrase_res["status"] == "FOUND":
+                        search_res = phrase_res
+                        current_item = full_phrase
+                        comment = ""
 
                 if search_res["status"] == "FOUND":
                     processed_items.append({
@@ -429,6 +441,7 @@ def handle_transaction(user_id, user_text, state, user_states):
                         "is_known": False
                     })
 
+            # СЦЕНАРИЙ А: 1 операция и она известна в базе -> мгновенная запись
             if len(processed_items) == 1 and all_known:
                 single = processed_items[0]
                 save_transaction(
@@ -449,6 +462,7 @@ def handle_transaction(user_id, user_text, state, user_states):
                 )
                 return True
 
+            # СЦЕНАРИЙ Б: Несколько операций или новая статья -> интерактивное ревью
             user_states[user_id] = {
                 "state": "multi_tx_review",
                 "items": processed_items,
