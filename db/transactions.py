@@ -23,14 +23,12 @@ def smart_search_item(user_id, item_name, op_type=None):
 
         if op_type:
             combined_source = """
-                -- 1. Личные слова пользователя (активные)
                 SELECT type, category, subcategory, article, LOWER(synonym) AS synonym
                 FROM user_dictionary
                 WHERE user_id = %s AND type = %s AND is_deleted = FALSE
 
                 UNION ALL
 
-                -- 2. Глобальная база (исключая те, которые пользователь удалил у себя)
                 SELECT g.type, g.category, g.subcategory, g.article, LOWER(g.synonym) AS synonym
                 FROM global_dictionary g
                 WHERE g.type = %s
@@ -73,7 +71,6 @@ def smart_search_item(user_id, item_name, op_type=None):
             exact_params = (uid, uid, clean_item)
             fuzzy_params = (clean_item, uid, uid, clean_item)
 
-        # Шаг 1: Точное совпадение (1-2 мс)
         exact_query = f"""
             SELECT type, category, subcategory, article
             FROM ({combined_source}) AS combined
@@ -91,7 +88,6 @@ def smart_search_item(user_id, item_name, op_type=None):
                 "article": exact_match[3]
             }
 
-        # Шаг 2: Триграммный поиск опечаток (pg_trgm)
         fuzzy_query = f"""
             SELECT type, category, subcategory, article, synonym, 
                    1 - (synonym <-> %s) AS similarity_score
@@ -160,8 +156,7 @@ def learn_user_word(user_id, op_type, category, subcategory, article, synonym):
 
 def get_full_menu(user_id):
     """
-    Строит актуальное дерево структуры для пользователя:
-    Глобальные категории + Личные категории МИНУС Удаленные пользователем.
+    Строит актуальное дерево структуры для пользователя.
     """
     conn = get_db_connection()
     cur = conn.cursor()
@@ -170,7 +165,6 @@ def get_full_menu(user_id):
         uid = _resolve_internal_user_id(cur, user_id)
 
         query = """
-            -- 1. Берем глобальные статьи, если пользователь не удалил их у себя
             SELECT g.type, g.category, g.subcategory, g.article
             FROM global_dictionary g
             WHERE NOT EXISTS (
@@ -183,10 +177,7 @@ def get_full_menu(user_id):
                       OR (u.category = g.category AND u.subcategory = g.subcategory AND u.article = g.article AND u.is_deleted = TRUE)
                   )
             )
-
             UNION
-
-            -- 2. Берем личные статьи пользователя
             SELECT type, category, subcategory, article
             FROM user_dictionary
             WHERE user_id = %s AND is_deleted = FALSE
@@ -290,6 +281,182 @@ def resolve_unverified_item(user_id, original_item, op_type, category, subcatego
     except Exception as e:
         print(f"Ошибка разрешения завалов: {e}")
         return 0
+    finally:
+        cur.close()
+        conn.close()
+
+# ====================================================================
+# НОВЫЕ ФУНКЦИИ: ИСТОРИЯ, РЕДАКТИРОВАНИЕ И УДАЛЕНИЕ ОПЕРАЦИЙ
+# ====================================================================
+
+def get_user_history(user_id, limit=10, period=None):
+    """
+    Возвращает список операций пользователя с фильтрацией по количеству или периоду,
+    а также суммарные расходы и доходы.
+    """
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        uid = _resolve_internal_user_id(cur, user_id)
+        
+        where_clauses = ["user_id = %s"]
+        params = [uid]
+
+        if period == "today":
+            where_clauses.append("operation_date >= CURRENT_DATE")
+        elif period == "yesterday":
+            where_clauses.append("operation_date >= CURRENT_DATE - INTERVAL '1 day' AND operation_date < CURRENT_DATE")
+        elif period == "week":
+            where_clauses.append("operation_date >= CURRENT_DATE - INTERVAL '7 days'")
+        elif period == "month":
+            where_clauses.append("operation_date >= CURRENT_DATE - INTERVAL '30 days'")
+
+        where_sql = " AND ".join(where_clauses)
+        
+        query = f"""
+            SELECT id, operation_date, type, category, subcategory, article, amount, comment
+            FROM transactions
+            WHERE {where_sql}
+            ORDER BY operation_date DESC, id DESC
+            LIMIT %s;
+        """
+        params.append(min(max(limit, 1), 50))
+        cur.execute(query, tuple(params))
+        rows = cur.fetchall()
+
+        items = []
+        total_expense = 0.0
+        total_income = 0.0
+
+        for r in rows:
+            amt = float(r[6])
+            op_t = r[2]
+            if op_t == "Доход":
+                total_income += amt
+            else:
+                total_expense += amt
+
+            items.append({
+                "id": r[0],
+                "date": r[1],
+                "type": op_t,
+                "category": r[3],
+                "subcategory": r[4],
+                "article": r[5],
+                "amount": amt,
+                "comment": r[7] or ""
+            })
+
+        return {
+            "items": items,
+            "total_expense": total_expense,
+            "total_income": total_income,
+            "count": len(items)
+        }
+    except Exception as e:
+        print(f"Ошибка получения истории: {e}")
+        return {"items": [], "total_expense": 0.0, "total_income": 0.0, "count": 0}
+    finally:
+        cur.close()
+        conn.close()
+
+def delete_transaction_by_id(user_id, tx_id):
+    """Удаляет конкретную транзакцию пользователя по id."""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        uid = _resolve_internal_user_id(cur, user_id)
+        cur.execute("DELETE FROM transactions WHERE id = %s AND user_id = %s RETURNING id;", (tx_id, uid))
+        deleted = cur.fetchone()
+        conn.commit()
+        return deleted is not None
+    except Exception as e:
+        print(f"Ошибка удаления операции: {e}")
+        return False
+    finally:
+        cur.close()
+        conn.close()
+
+def get_last_transaction(user_id):
+    """Возвращает последнюю операцию пользователя."""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        uid = _resolve_internal_user_id(cur, user_id)
+        cur.execute("""
+            SELECT id, operation_date, type, category, subcategory, article, amount
+            FROM transactions
+            WHERE user_id = %s
+            ORDER BY id DESC
+            LIMIT 1;
+        """, (uid,))
+        r = cur.fetchone()
+        if r:
+            return {
+                "id": r[0],
+                "date": r[1],
+                "type": r[2],
+                "category": r[3],
+                "subcategory": r[4],
+                "article": r[5],
+                "amount": float(r[6])
+            }
+        return None
+    except Exception as e:
+        print(f"Ошибка получения последней операции: {e}")
+        return None
+    finally:
+        cur.close()
+        conn.close()
+
+def update_transaction_amount(user_id, tx_id, new_amount):
+    """Обновляет сумму существующей транзакции."""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        uid = _resolve_internal_user_id(cur, user_id)
+        cur.execute("""
+            UPDATE transactions 
+            SET amount = %s 
+            WHERE id = %s AND user_id = %s 
+            RETURNING id;
+        """, (new_amount, tx_id, uid))
+        ok = cur.fetchone() is not None
+        conn.commit()
+        return ok
+    except Exception as e:
+        print(f"Ошибка обновления суммы операции: {e}")
+        return False
+    finally:
+        cur.close()
+        conn.close()
+
+def update_transaction_category(user_id, tx_id, category, subcategory, article=None):
+    """Обновляет категорию, подкатегорию и статью существующей транзакции."""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        uid = _resolve_internal_user_id(cur, user_id)
+        if article:
+            cur.execute("""
+                UPDATE transactions 
+                SET category = %s, subcategory = %s, article = %s, status = 'verified'
+                WHERE id = %s AND user_id = %s 
+                RETURNING id;
+            """, (category, subcategory, article, tx_id, uid))
+        else:
+            cur.execute("""
+                UPDATE transactions 
+                SET category = %s, subcategory = %s, status = 'verified'
+                WHERE id = %s AND user_id = %s 
+                RETURNING id;
+            """, (category, subcategory, tx_id, uid))
+        ok = cur.fetchone() is not None
+        conn.commit()
+        return ok
+    except Exception as e:
+        print(f"Ошибка обновления категории операции: {e}")
+        return False
     finally:
         cur.close()
         conn.close()
