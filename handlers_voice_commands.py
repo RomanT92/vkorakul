@@ -14,22 +14,20 @@ from db import (
 def handle_list_voice_commands(user_id, user_text, user_text_lower, state, user_states):
     """
     Универсальный обработчик голосовых команд над списками:
-    - Массовое удаление ("удали первую, пятую и десятую")
+    - Исправление названия товара ("первая операция это огурцы")
     - Изменение суммы ("измени сумму у четвертой на 250")
-    - Изменение категории ("вторая это кафе")
-    Работает во всех режимах: multi_tx_review, receipt_review, queue_batch_review, history_view.
+    - Удаление нескольких позиций ("удали первую, третью и пятую")
     """
     target_states = ["multi_tx_review", "receipt_review", "queue_batch_review", "history_view"]
     internal_uid = get_or_create_user(user_id)
 
-    # 1. ОБРАБОТКА ПОДТВЕРЖДЕНИЯ МАССОВОГО УДАЛЕНИЯ ("Да" / "Нет")
+    # 1. ОБРАБОТКА ПОДТВЕРЖДЕНИЯ УДАЛЕНИЯ ("Да" / "Нет")
     if state == "confirm_voice_delete":
         state_data = user_states[user_id]
         prev_state = state_data["prev_state"]
         indices = state_data["delete_indices"]
 
         if any(w in user_text_lower for w in ["да", "верно", "ок", "удалить", "+", "yes"]):
-            # --- РЕЖИМ: ИСТОРИЯ ОПЕРАЦИЙ ---
             if prev_state == "history_view":
                 items = state_data["history_items"]
                 deleted_cnt = 0
@@ -38,23 +36,18 @@ def handle_list_voice_commands(user_id, user_text, user_text_lower, state, user_
                         tx_id = items[idx]["id"]
                         if delete_transaction_by_id(internal_uid, tx_id):
                             deleted_cnt += 1
-                send_vk_message(user_id, f"🗑 Успешно удалено операций: {deleted_cnt} из базы данных.", get_main_keyboard(user_id))
+                send_vk_message(user_id, f"🗑 Успешно удалено {deleted_cnt} операций из базы данных.", get_main_keyboard(user_id))
                 del user_states[user_id]
                 return True
-
-            # --- РЕЖИМ: ЧЕКИ / МАССОВЫЙ ВВОД / РАЗБОР ЗАВАЛОВ ---
             else:
                 items_key = "current_batch" if prev_state == "queue_batch_review" else "items"
                 items = state_data[items_key]
-                # Удаляем строго с конца, чтобы индексы не сдвигались
                 for idx in sorted(indices, reverse=True):
                     if 0 <= idx < len(items):
                         items.pop(idx)
 
                 user_states[user_id]["state"] = prev_state
                 send_vk_message(user_id, f"🗑 Удалено {len(indices)} позиций из списка.")
-
-                # Перерисовываем обновленный список
                 _refresh_screen(user_id, prev_state, user_states[user_id])
                 return True
 
@@ -64,16 +57,17 @@ def handle_list_voice_commands(user_id, user_text, user_text_lower, state, user_
             _refresh_screen(user_id, prev_state, user_states[user_id])
             return True
 
-    # Если мы не в режиме просмотра списка — пропускаем
     if state not in target_states:
         return False
 
-    # Быстрая эвристика: если нет командных слов, не дергаем ИИ зря
-    cmd_triggers = ["удали", "убери", "измени", "поставь", "исправь", "это", "рубл", "сумму", "перв", "втор", "трет", "четверт", "пят", "шест", "седьм", "восьм", "девят", "десят"]
+    cmd_triggers = [
+        "удали", "убери", "измени", "поставь", "исправь", "это", "рубл", "сумму", "название", "товар",
+        "перв", "втор", "трет", "четверт", "пят", "шест", "седьм", "восьм", "девят", "десят",
+        "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "операци", "строк", "пункт"
+    ]
     if not any(t in user_text_lower for t in cmd_triggers):
         return False
 
-    # Распознаем команду через ИИ
     parsed_cmd = parse_voice_list_command_with_ai(user_text)
     action = parsed_cmd.get("action")
 
@@ -92,7 +86,123 @@ def handle_list_voice_commands(user_id, user_text, user_text_lower, state, user_
         return False
 
     # ====================================================================
-    # КОМАНДА 1: МАССОВОЕ УДАЛЕНИЕ ("Удали первую, пятую и десятую")
+    # КОМАНДА 1: ИСПРАВЛЕНИЕ НАЗВАНИЯ ТОВАРА/СТАТЬИ И КАТЕГОРИИ
+    # ("Первая операция это огурцы" / "исправь первую на молоко")
+    # ====================================================================
+    if action in ["edit_item", "edit_category", "edit_item_and_amount"]:
+        idx = int(parsed_cmd.get("index", 0)) - 1
+        new_text = parsed_cmd.get("text", "").strip()
+        new_amount = float(parsed_cmd.get("amount", 0)) if action == "edit_item_and_amount" else None
+
+        if 0 <= idx < len(items) and new_text:
+            it = items[idx]
+            op_type = it.get("type", "Расход")
+
+            # 1. Сначала ищем новое слово в базе данных (вдруг это знакомый товар!)
+            db_match = smart_search_item(internal_uid, new_text, op_type=op_type)
+            if db_match["status"] != "FOUND":
+                db_match = smart_search_item(internal_uid, new_text, op_type=None)
+
+            if db_match["status"] == "FOUND":
+                # Найдено в базе -> обновляем и товар, и категорию из эталона базы!
+                target_art = new_text.capitalize()
+                target_cat = db_match["category"]
+                target_sub = db_match["subcategory"]
+                if db_match.get("type"):
+                    op_type = db_match["type"]
+            else:
+                # 2. Проверяем: вдруг названа категория из меню
+                menu_full = get_full_menu(internal_uid)
+                u_clean = new_text.lower()
+                found_in_tree = False
+                target_art = new_text.capitalize()
+                target_cat, target_sub = "Разное", "Требует проверки"
+
+                for m_type in ["Расход", "Доход"]:
+                    type_cats = menu_full.get(m_type, {})
+                    for m_cat, m_subs in type_cats.items():
+                        if m_cat.lower() == u_clean:
+                            target_cat = m_cat
+                            sub_keys = list(m_subs.keys()) if isinstance(m_subs, dict) else (m_subs if m_subs else [])
+                            target_sub = sub_keys[0] if sub_keys else "Разное"
+                            found_in_tree = True
+                            break
+                        sub_keys = list(m_subs.keys()) if isinstance(m_subs, dict) else (m_subs if m_subs else [])
+                        for s_name in sub_keys:
+                            if s_name.lower() == u_clean:
+                                target_cat = m_cat
+                                target_sub = s_name
+                                found_in_tree = True
+                                break
+                        if found_in_tree:
+                            break
+                    if found_in_tree:
+                        break
+
+                # 3. Если нет — просим ИИ подобрать категорию под новое слово
+                if not found_in_tree:
+                    type_menu = menu_full.get(op_type, {})
+                    menu_str = f"[{op_type}]\n" + "\n".join([f"{c}: {', '.join(subs.keys() if isinstance(subs, dict) else subs)}" for c, subs in type_menu.items()])
+                    ai_cat, ai_sub = categorize_with_ai(target_art, menu_str)
+                    target_cat, target_sub = ai_cat, ai_sub
+
+            # Применяем изменения
+            if state == "history_view":
+                update_transaction_category(internal_uid, it["id"], target_cat, target_sub, target_art)
+                if new_amount:
+                    update_transaction_amount(internal_uid, it["id"], new_amount)
+                    it["amount"] = new_amount
+                it["article"] = target_art
+                it["category"] = target_cat
+                it["subcategory"] = target_sub
+            else:
+                if "item" in it:
+                    it["item"] = target_art
+                elif "original_item" in it:
+                    it["original_item"] = target_art
+                elif "article" in it:
+                    it["article"] = target_art
+
+                it["category"] = target_cat
+                it["subcategory"] = target_sub
+                it["type"] = op_type
+                if new_amount:
+                    it["amount"] = new_amount
+
+            amt_info = f" ({new_amount:g} руб.)" if new_amount else ""
+            send_vk_message(
+                user_id,
+                f"✅ Позиция №{idx+1} обновлена:\n"
+                f"• Статья: «{target_art}»{amt_info}\n"
+                f"• Категория: 📂 {target_cat} -> {target_sub}"
+            )
+            _refresh_screen(user_id, state, state_data)
+            return True
+
+    # ====================================================================
+    # КОМАНДА 2: ИЗМЕНЕНИЕ СУММЫ ("Измени сумму у четвертой на 250")
+    # ====================================================================
+    if action == "edit_amount":
+        idx = int(parsed_cmd.get("index", 0)) - 1
+        new_amount = float(parsed_cmd.get("amount", 0))
+
+        if 0 <= idx < len(items) and new_amount > 0:
+            it = items[idx]
+            name = it.get("article") or it.get("original_item") or it.get("item") or "Операция"
+            old_amt = it.get("amount", 0)
+
+            if state == "history_view":
+                update_transaction_amount(internal_uid, it["id"], new_amount)
+                it["amount"] = new_amount
+            else:
+                it["amount"] = new_amount
+
+            send_vk_message(user_id, f"✅ Сумма позиции №{idx+1} («{name}») изменена: {old_amt:g} руб. ➔ {new_amount:g} руб.")
+            _refresh_screen(user_id, state, state_data)
+            return True
+
+    # ====================================================================
+    # КОМАНДА 3: МАССОВОЕ УДАЛЕНИЕ ("Удали первую и третью")
     # ====================================================================
     if action == "delete":
         raw_indices = parsed_cmd.get("indices", [])
@@ -103,11 +213,10 @@ def handle_list_voice_commands(user_id, user_text, user_text_lower, state, user_
                 valid_indices.append(idx)
 
         if not valid_indices:
-            send_vk_message(user_id, "⚠️ Не удалось найти указанные номера в текущем списке.")
+            send_vk_message(user_id, "⚠️ Не удалось найти указанные номера в списке.")
             return True
 
-        # Формируем текст подтверждения
-        confirm_msg = f"⚠️ Вы уверены, что хотите удалить следующие {len(valid_indices)} поз.:\n\n"
+        confirm_msg = f"⚠️ Вы уверены, что хотите удалить {len(valid_indices)} поз.:\n\n"
         for idx in valid_indices:
             it = items[idx]
             name = it.get("article") or it.get("original_item") or it.get("item") or "Операция"
@@ -124,77 +233,10 @@ def handle_list_voice_commands(user_id, user_text, user_text_lower, state, user_
         send_vk_message(user_id, confirm_msg, get_yes_no_keyboard(show_back=True))
         return True
 
-    # ====================================================================
-    # КОМАНДА 2: ИЗМЕНЕНИЕ СУММЫ ("Измени сумму у четвертой на 250")
-    # ====================================================================
-    if action == "edit_amount":
-        idx = int(parsed_cmd.get("index", 0)) - 1
-        new_amount = float(parsed_cmd.get("amount", 0))
-
-        if 0 <= idx < len(items) and new_amount > 0:
-            it = items[idx]
-            name = it.get("article") or it.get("original_item") or it.get("item") or "Операция"
-            old_amt = it.get("amount", 0)
-
-            if state == "history_view":
-                # Сразу обновляем в БД
-                update_transaction_amount(internal_uid, it["id"], new_amount)
-                it["amount"] = new_amount
-            else:
-                # Обновляем в памяти списка
-                it["amount"] = new_amount
-
-            send_vk_message(user_id, f"✅ Сумма позиции №{idx+1} («{name}») изменена: {old_amt:g} руб. ➔ {new_amount:g} руб.")
-            _refresh_screen(user_id, state, state_data)
-            return True
-
-    # ====================================================================
-    # КОМАНДА 3: ИЗМЕНЕНИЕ КАТЕГОРИИ ("Вторая это такси" / "у третьей спорт")
-    # ====================================================================
-    if action == "edit_category":
-        idx = int(parsed_cmd.get("index", 0)) - 1
-        cat_hint = parsed_cmd.get("category_hint", "").strip()
-
-        if 0 <= idx < len(items) and cat_hint:
-            it = items[idx]
-            item_name = it.get("article") or it.get("original_item") or it.get("item") or "Операция"
-            op_type = it.get("type", "Расход")
-
-            # 1. Проверяем подсказку по базе данных
-            db_match = smart_search_item(internal_uid, cat_hint, op_type=op_type)
-            if db_match["status"] != "FOUND":
-                db_match = smart_search_item(internal_uid, cat_hint, op_type=None)
-
-            if db_match["status"] == "FOUND":
-                target_cat = db_match["category"]
-                target_sub = db_match["subcategory"]
-                target_art = db_match["article"]
-            else:
-                # 2. Ищем через ИИ
-                menu_full = get_full_menu(internal_uid)
-                type_menu = menu_full.get(op_type, {})
-                menu_str = f"[{op_type}]\n" + "\n".join([f"{c}: {', '.join(subs.keys() if isinstance(subs, dict) else subs)}" for c, subs in type_menu.items()])
-                target_cat, target_sub = categorize_with_ai(item_name, menu_str, context=cat_hint)
-                target_art = item_name
-
-            if state == "history_view":
-                update_transaction_category(internal_uid, it["id"], target_cat, target_sub, target_art)
-                it["category"] = target_cat
-                it["subcategory"] = target_sub
-                it["article"] = target_art
-            else:
-                it["category"] = target_cat
-                it["subcategory"] = target_sub
-
-            send_vk_message(user_id, f"✅ Категория позиции №{idx+1} («{item_name}») изменена:\n📂 {target_cat} -> {target_sub}")
-            _refresh_screen(user_id, state, state_data)
-            return True
-
     return False
 
-
 def _refresh_screen(user_id, state, state_data):
-    """Вспомогательная функция для перерисовки экрана после изменений."""
+    """Перерисовывает экран после изменений."""
     if state == "multi_tx_review":
         from handlers_transaction import _show_multi_tx_items
         _show_multi_tx_items(user_id, state_data["items"], show_apply_all=False)
