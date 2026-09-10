@@ -22,6 +22,7 @@ import requests
 import json
 import tempfile
 
+# Импортируем ВСЕ настройки и ВСЕ промпты строго из config.py
 from config import (
     VK_TOKEN,
     AI_TUNNEL_KEY,
@@ -29,6 +30,7 @@ from config import (
     AI_BASE_URL,
     PROMPT_CATEGORIZE,
     PROMPT_EXTRACT,
+    PROMPT_LIST_COMMAND,
     PROMPT_RECEIPT_TOTAL,
     PROMPT_RECEIPT_ITEMS,
     PROMPT_BATCH_CATEGORIZE,
@@ -42,31 +44,6 @@ vk_session = vk_api.VkApi(token=VK_TOKEN, api_version='5.131')
 longpoll = VkLongPoll(vk_session)
 vk = vk_session.get_api()
 ai_client = OpenAI(api_key=AI_TUNNEL_KEY, base_url=AI_BASE_URL)
-
-# Промпт для голосовых команд над списками
-PROMPT_LIST_COMMAND = """
-Ты — анализатор команд управления списком операций.
-Пользователь смотрит на нумерованный список трат/доходов и даёт команду (голосом или текстом).
-
-Твоя задача — извлечь параметры команды в JSON:
-
-1. УДАЛЕНИЕ:
-- "удали первую, третью и пятую" -> {"action": "delete", "indices": [1, 3, 5]}
-- "убери вторую" -> {"action": "delete", "indices": [2]}
-- "удали 1 4 6" -> {"action": "delete", "indices": [1, 4, 6]}
-
-2. ИЗМЕНЕНИЕ СУММЫ:
-- "измени сумму у четвертой на 250" -> {"action": "edit_amount", "index": 4, "amount": 250}
-- "у второй поставь 1500 рублей" -> {"action": "edit_amount", "index": 2, "amount": 1500}
-
-3. ИЗМЕНЕНИЕ КАТЕГОРИИ:
-- "измени категорию у второй на рестораны" -> {"action": "edit_category", "index": 2, "category_hint": "рестораны"}
-- "четвертая это такси" -> {"action": "edit_category", "index": 4, "category_hint": "такси"}
-- "третья это спорт" -> {"action": "edit_category", "index": 3, "category_hint": "спорт"}
-
-Если команда не относится к управлению элементами списка — верни {"action": "unknown"}.
-Ответь СТРОГО JSON без маркдауна.
-"""
 
 # ====================================================================
 # ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ДЛЯ РАБОТЫ С ФОТО
@@ -129,7 +106,7 @@ def send_to_google_sheets(payload):
         return {"status": "ERROR", "message": str(e)}
 
 def parse_voice_list_command_with_ai(user_text):
-    """Распознает команды изменения/удаления элементов списка из текста."""
+    """Распознает голосовые/текстовые команды управления элементами списков."""
     try:
         response = ai_client.chat.completions.create(
             model="gpt-3.5-turbo",
