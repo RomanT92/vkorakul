@@ -155,9 +155,7 @@ def learn_user_word(user_id, op_type, category, subcategory, article, synonym):
         conn.close()
 
 def get_full_menu(user_id):
-    """
-    Строит актуальное дерево структуры для пользователя.
-    """
+    """Строит актуальное дерево структуры для пользователя."""
     conn = get_db_connection()
     cur = conn.cursor()
     menu = {"Расход": {}, "Доход": {}}
@@ -285,14 +283,9 @@ def resolve_unverified_item(user_id, original_item, op_type, category, subcatego
         cur.close()
         conn.close()
 
-# ====================================================================
-# НОВЫЕ ФУНКЦИИ: ИСТОРИЯ, РЕДАКТИРОВАНИЕ И УДАЛЕНИЕ ОПЕРАЦИЙ
-# ====================================================================
-
 def get_user_history(user_id, limit=10, period=None):
     """
-    Возвращает список операций пользователя с фильтрацией по количеству или периоду,
-    а также суммарные расходы и доходы.
+    Возвращает список операций пользователя с фильтрацией по количеству или периоду.
     """
     conn = get_db_connection()
     cur = conn.cursor()
@@ -373,6 +366,40 @@ def delete_transaction_by_id(user_id, tx_id):
     except Exception as e:
         print(f"Ошибка удаления операции: {e}")
         return False
+    finally:
+        cur.close()
+        conn.close()
+
+def delete_all_user_transactions(user_id, period=None):
+    """
+    Массово удаляет транзакции пользователя (за указанный период или абсолютно все).
+    Возвращает количество удалённых строк.
+    """
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        uid = _resolve_internal_user_id(cur, user_id)
+        where_clauses = ["user_id = %s"]
+        params = [uid]
+
+        if period == "today":
+            where_clauses.append("operation_date >= CURRENT_DATE")
+        elif period == "yesterday":
+            where_clauses.append("operation_date >= CURRENT_DATE - INTERVAL '1 day' AND operation_date < CURRENT_DATE")
+        elif period == "week":
+            where_clauses.append("operation_date >= CURRENT_DATE - INTERVAL '7 days'")
+        elif period == "month":
+            where_clauses.append("operation_date >= CURRENT_DATE - INTERVAL '30 days'")
+
+        where_sql = " AND ".join(where_clauses)
+        query = f"DELETE FROM transactions WHERE {where_sql};"
+        cur.execute(query, tuple(params))
+        deleted_count = cur.rowcount
+        conn.commit()
+        return deleted_count
+    except Exception as e:
+        print(f"Ошибка массового удаления операций: {e}")
+        return 0
     finally:
         cur.close()
         conn.close()
