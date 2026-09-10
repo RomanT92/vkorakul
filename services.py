@@ -365,3 +365,48 @@ def parse_bank_file_with_ai(file_url, file_ext):
     except Exception as e:
         print(f"Ошибка парсинга файла: {e}")
         return {"status": "ERROR", "message": str(e)}
+
+PROMPT_LIST_COMMAND = """
+Ты — анализатор команд управления списком операций.
+Пользователь смотрит на нумерованный список трат/доходов и даёт команду (голосом или текстом).
+
+Твоя задача — извлечь параметры команды в JSON:
+
+1. УДАЛЕНИЕ:
+- "удали первую, третью и пятую" -> {"action": "delete", "indices": [1, 3, 5]}
+- "убери вторую" -> {"action": "delete", "indices": [2]}
+- "удали 1 4 6" -> {"action": "delete", "indices": [1, 4, 6]}
+
+2. ИЗМЕНЕНИЕ СУММЫ:
+- "измени сумму у четвертой на 250" -> {"action": "edit_amount", "index": 4, "amount": 250}
+- "у второй поставь 1500 рублей" -> {"action": "edit_amount", "index": 2, "amount": 1500}
+
+3. ИЗМЕНЕНИЕ КАТЕГОРИИ:
+- "измени категорию у второй на рестораны" -> {"action": "edit_category", "index": 2, "category_hint": "рестораны"}
+- "четвертая это такси" -> {"action": "edit_category", "index": 4, "category_hint": "такси"}
+- "третья это спорт" -> {"action": "edit_category", "index": 3, "category_hint": "спорт"}
+
+Если команда не относится к управлению элементами списка — верни {"action": "unknown"}.
+Ответь СТРОГО JSON без маркдауна.
+"""
+
+def parse_voice_list_command_with_ai(user_text):
+    """Распознает команды изменения/удаления элементов списка из голосового текста."""
+    try:
+        response = ai_client.chat.completions.create(
+            model="gpt-3.5-turbo",
+            temperature=0.0,
+            messages=[
+                {"role": "system", "content": PROMPT_LIST_COMMAND},
+                {"role": "user", "content": user_text}
+            ]
+        )
+        text = response.choices[0].message.content.strip()
+        if text.startswith("```json"):
+            text = text[7:-3].strip()
+        elif text.startswith("```"):
+            text = text[3:-3].strip()
+        return json.loads(text)
+    except Exception as e:
+        print(f"Ошибка парсинга голосовой команды: {e}")
+        return {"action": "unknown"}
