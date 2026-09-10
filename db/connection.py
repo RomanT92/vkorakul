@@ -17,8 +17,11 @@ except ImportError:
 from config import DB_URL
 
 def get_db_connection():
-    """Устанавливает соединение с базой данных Supabase (PostgreSQL)."""
-    return psycopg2.connect(DB_URL)
+    """
+    Устанавливает соединение с базой данных Supabase (PostgreSQL).
+    connect_timeout=10 гарантирует, что бот не зависнет при задержках сети.
+    """
+    return psycopg2.connect(DB_URL, connect_timeout=10)
 
 def get_or_create_user(vk_id):
     """
