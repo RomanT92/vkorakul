@@ -77,33 +77,7 @@ def handle_queue_and_learning(user_id, user_text, user_text_lower, state, user_s
     internal_uid = get_or_create_user(user_id)
 
     # =========================================================
-    # ОБРАБОТКА «НАЗАД» В ОЧЕРЕДИ
-    # =========================================================
-    if "назад" in user_text_lower:
-        if state == "queue_batch_edit_hint":
-            user_states[user_id]["state"] = "queue_batch_review"
-            _show_batch_items(user_id, user_states[user_id]["current_batch"], len(user_states[user_id]["queue"]), show_apply_all=False)
-            return True
-        elif state == "queue_batch_review":
-            del user_states[user_id]
-            send_vk_message(user_id, "Главное меню.", get_main_keyboard(user_id))
-            return True
-        elif state == "tx_manual_cat":
-            user_states[user_id]["state"] = "tx_manual_type"
-            send_vk_message(user_id, "Это Расход или Доход?", type_keyboard(show_back=True))
-            return True
-        elif state == "tx_manual_sub":
-            cats = user_states[user_id].get("cats", [])
-            op_type = user_states[user_id]["payload"].get("type", "Расход")
-            user_states[user_id]["state"] = "tx_manual_cat"
-            msg = f"Выберите КАТЕГОРИЮ ({op_type}):\n\n"
-            for i, c in enumerate(cats):
-                msg += f"{i+1}. {c}\n"
-            send_vk_message(user_id, msg, get_numbered_keyboard(len(cats), show_back=True))
-            return True
-
-    # =========================================================
-    # 1. ЗАПУСК РАЗБОРА ОПЕРАЦИЙ
+    # 1. ЗАПУСК РАЗБОРА ОПЕРАЦИЙ (РАБОТАЕТ ИЗ ЛЮБОГО СОСТОЯНИЯ!)
     # =========================================================
     triggers = [
         "разобрать операции",
@@ -112,12 +86,15 @@ def handle_queue_and_learning(user_id, user_text, user_text_lower, state, user_s
         "завалы",
         "импорт статистики прошлого"
     ]
-    if state == "" and any(trigger in user_text_lower for trigger in triggers):
+    # УБРАНО ОГРАНИЧЕНИЕ state == "" — теперь кнопка работает всегда!
+    if any(trigger in user_text_lower for trigger in triggers):
         send_vk_message(user_id, "⏳ Проверяю нераспознанные операции в базе...")
         unverified_raw = get_unverified_transactions(user_id)
 
         if not unverified_raw:
             send_vk_message(user_id, "🎉 Всё чисто! Нераспределенных операций нет.", get_main_keyboard(user_id))
+            if user_id in user_states:
+                del user_states[user_id]
             return True
 
         unique_items = {}
@@ -149,6 +126,32 @@ def handle_queue_and_learning(user_id, user_text, user_text_lower, state, user_s
         return True
 
     # =========================================================
+    # ОБРАБОТКА «НАЗАД» В ОЧЕРЕДИ
+    # =========================================================
+    if "назад" in user_text_lower:
+        if state == "queue_batch_edit_hint":
+            user_states[user_id]["state"] = "queue_batch_review"
+            _show_batch_items(user_id, user_states[user_id]["current_batch"], len(user_states[user_id]["queue"]), show_apply_all=False)
+            return True
+        elif state == "queue_batch_review":
+            del user_states[user_id]
+            send_vk_message(user_id, "Главное меню.", get_main_keyboard(user_id))
+            return True
+        elif state == "tx_manual_cat":
+            user_states[user_id]["state"] = "tx_manual_type"
+            send_vk_message(user_id, "Это Расход или Доход?", type_keyboard(show_back=True))
+            return True
+        elif state == "tx_manual_sub":
+            cats = user_states[user_id].get("cats", [])
+            op_type = user_states[user_id]["payload"].get("type", "Расход")
+            user_states[user_id]["state"] = "tx_manual_cat"
+            msg = f"Выберите КАТЕГОРИЮ ({op_type}):\n\n"
+            for i, c in enumerate(cats):
+                msg += f"{i+1}. {c}\n"
+            send_vk_message(user_id, msg, get_numbered_keyboard(len(cats), show_back=True))
+            return True
+
+    # =========================================================
     # 2. РЕВЬЮ ПАКЕТА ОПЕРАЦИЙ
     # =========================================================
     if state == "queue_batch_review":
@@ -156,7 +159,7 @@ def handle_queue_and_learning(user_id, user_text, user_text_lower, state, user_s
         batch = state_data["current_batch"]
 
         # --- СОХРАНЕНИЕ ПАКЕТА ---
-        if "сохранить пакет" in user_text_lower:
+        if "сохранить пакет" in user_text_lower or any(w in user_text_lower for w in ["сохранить", "готово", "ок", "да", "+"]):
             send_vk_message(user_id, "⏳ Сохраняю и обучаю систему...", get_cancel_keyboard(show_back=False))
             for item in batch:
                 resolve_unverified_item(
@@ -212,7 +215,7 @@ def handle_queue_and_learning(user_id, user_text, user_text_lower, state, user_s
                 return True
 
     # =========================================================
-    # 2.1 ВВОД ПОДСКАЗКИ ДЛЯ КОНКРЕТНОЙ ОПЕРАЦИИ (ПОИСК В БАЗЕ ПЕРВЫМ!)
+    # 2.1 ВВОД ПОДСКАЗКИ ДЛЯ КОНКРЕТНОЙ ОПЕРАЦИИ
     # =========================================================
     if state == "queue_batch_edit_hint":
         state_data = user_states[user_id]
@@ -221,9 +224,7 @@ def handle_queue_and_learning(user_id, user_text, user_text_lower, state, user_s
         sel_item = batch[idx]
         op_type = sel_item.get("type", "Расход")
 
-        # ------------------------------------------------------------------
-        # ШАГ 1: ПРОВЕРКА ПОДСКАЗКИ ПО БАЗЕ ДАННЫХ (ВЫСШИЙ ПРИОРИТЕТ)
-        # ------------------------------------------------------------------
+        # 1. Поиск по базе данных
         db_match = smart_search_item(internal_uid, user_text, op_type=op_type)
         if db_match["status"] != "FOUND":
             db_match = smart_search_item(internal_uid, user_text, op_type=None)
@@ -234,15 +235,13 @@ def handle_queue_and_learning(user_id, user_text, user_text_lower, state, user_s
             if db_match.get("type"):
                 sel_item["type"] = db_match["type"]
         else:
-            # --------------------------------------------------------------
-            # ШАГ 2: ПРОВЕРКА ТОЧНОГО СОВПАДЕНИЯ С ИМЕНЕМ КАТЕГОРИИ/ПОДКАТЕГОРИИ
-            # --------------------------------------------------------------
-            full_menu = get_full_menu(internal_uid)
+            # 2. Поиск по дереву категорий
+            menu_full = get_full_menu(internal_uid)
             u_clean = user_text.lower().strip()
             found_in_tree = False
 
             for m_type in ["Расход", "Доход"]:
-                type_cats = full_menu.get(m_type, {})
+                type_cats = menu_full.get(m_type, {})
                 for m_cat, m_subs in type_cats.items():
                     if m_cat.lower() == u_clean:
                         ai_cat = m_cat
@@ -264,9 +263,6 @@ def handle_queue_and_learning(user_id, user_text, user_text_lower, state, user_s
                 if found_in_tree:
                     break
 
-            # --------------------------------------------------------------
-            # ШАГ 3: ЕСЛИ В БАЗЕ И ДЕРЕВЕ СОВПАДЕНИЙ НЕТ — СПРАШИВАЕМ ИИ
-            # --------------------------------------------------------------
             if not found_in_tree:
                 send_vk_message(user_id, "🧠 Подбираю категорию с помощью ИИ...", get_cancel_keyboard(show_back=True))
                 menu_str = "\n".join([f"{c}: {', '.join(subs)}" for c, subs in state_data["menu"].items()])
@@ -347,7 +343,6 @@ def handle_queue_and_learning(user_id, user_text, user_text_lower, state, user_s
 
         op_type = payload.get("type", "Расход")
 
-        # 1. Поиск в БД
         check_res = smart_search_item(internal_uid, user_text, op_type=op_type)
         if check_res.get("status") != "FOUND":
             check_res = smart_search_item(internal_uid, user_text, op_type=None)
@@ -361,7 +356,6 @@ def handle_queue_and_learning(user_id, user_text, user_text_lower, state, user_s
             send_vk_message(user_id, f"Ага! «{user_text}» — это знакомая категория:\n📂 {check_res.get('category')} -> {check_res.get('subcategory')}\n\nПривязать «{payload['item']}» сюда?", get_yes_no_keyboard(show_back=True))
             return True
 
-        # 2. Поиск через ИИ
         send_vk_message(user_id, "🧠 Думаю...")
         menu_full = get_full_menu(internal_uid)
         type_menu = menu_full.get(op_type, {})
