@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+import difflib
 from services import send_vk_message, parse_voice_list_command_with_ai, categorize_with_ai
 from keyboards import get_yes_no_keyboard, get_main_keyboard
 from db import (
@@ -13,35 +14,68 @@ from db import (
 
 def _find_category_in_menu(menu_full, hint_text):
     """
-    Проверяет, совпадает ли подсказка напрямую с названием категории или подкатегории в меню.
-    Возвращает (found: bool, op_type, category, subcategory).
+    Умный трехуровневый поиск категории/подкатегории:
+    1. Точное совпадение
+    2. Частичное вхождение ("уход за собой" в "Уход за собой")
+    3. Нечеткий поиск опечаток и падежей (difflib)
     """
     clean = hint_text.lower().strip()
+    cat_candidates = []
+    sub_candidates = []
+
     for m_type in ["Расход", "Доход"]:
         type_cats = menu_full.get(m_type, {})
         for cat_name, subs in type_cats.items():
-            # 1. Точное совпадение с категорией (например: "бизнес", "продукты", "транспорт")
+            sub_keys = list(subs.keys()) if isinstance(subs, dict) else (subs if subs else [])
+
+            # 1. ТОЧНОЕ СОВПАДЕНИЕ
             if cat_name.lower() == clean:
-                sub_keys = list(subs.keys()) if isinstance(subs, dict) else (subs if subs else [])
-                # Ищем подкатегорию с таким же именем или берем первую/дефолтную
                 matching_sub = next((s for s in sub_keys if s.lower() == clean), (sub_keys[0] if sub_keys else "Разное"))
                 return True, m_type, cat_name, matching_sub
 
-            # 2. Точное совпадение с подкатегорией (например: "бизнес" под "Карьера и бизнес", "такси", "кафе")
-            sub_keys = list(subs.keys()) if isinstance(subs, dict) else (subs if subs else [])
             for s_name in sub_keys:
                 if s_name.lower() == clean:
                     return True, m_type, cat_name, s_name
+
+            # 2. ЧАСТИЧНОЕ ВХОЖДЕНИЕ
+            if len(clean) >= 4:
+                if clean in cat_name.lower() or cat_name.lower() in clean:
+                    matching_sub = sub_keys[0] if sub_keys else "Разное"
+                    return True, m_type, cat_name, matching_sub
+                for s_name in sub_keys:
+                    if clean in s_name.lower() or s_name.lower() in clean:
+                        return True, m_type, cat_name, s_name
+
+            cat_candidates.append((cat_name.lower(), m_type, cat_name, sub_keys))
+            for s_name in sub_keys:
+                sub_candidates.append((s_name.lower(), m_type, cat_name, s_name))
+
+    # 3. НЕЧЕТКИЙ ПОИСК (difflib)
+    all_sub_names = [item[0] for item in sub_candidates]
+    matches_sub = difflib.get_close_matches(clean, all_sub_names, n=1, cutoff=0.70)
+    if matches_sub:
+        matched_str = matches_sub[0]
+        for item in sub_candidates:
+            if item[0] == matched_str:
+                return True, item[1], item[2], item[3]
+
+    all_cat_names = [item[0] for item in cat_candidates]
+    matches_cat = difflib.get_close_matches(clean, all_cat_names, n=1, cutoff=0.70)
+    if matches_cat:
+        matched_str = matches_cat[0]
+        for item in cat_candidates:
+            if item[0] == matched_str:
+                sub_keys = item[3]
+                matching_sub = sub_keys[0] if sub_keys else "Разное"
+                return True, item[1], item[2], matching_sub
 
     return False, None, None, None
 
 def handle_list_voice_commands(user_id, user_text, user_text_lower, state, user_states):
     """
-    Универсальный обработчик голосовых команд над списками:
-    - Указание категории ("первое это бизнес", "категория у второй такси")
-    - Переименование товара ("первая операция это огурцы")
-    - Изменение суммы ("измени сумму у четвертой на 250")
-    - Удаление позиций ("удали первую и третью", "удали все")
+    Универсальный обработчик голосовых команд над списками.
+    Поддерживает применение категории сразу к НЕСКОЛЬКИМ позициям
+    ("четвертое это уход за собой, и пятое тоже").
     """
     target_states = ["multi_tx_review", "receipt_review", "queue_batch_review", "history_view"]
     internal_uid = get_or_create_user(user_id)
@@ -89,7 +123,7 @@ def handle_list_voice_commands(user_id, user_text, user_text_lower, state, user_
 
     cmd_triggers = [
         "удали", "убери", "измени", "поставь", "исправь", "это", "рубл", "сумму", "название", "товар",
-        "все", "всё", "всех", "очисти", "категори",
+        "все", "всё", "всех", "очисти", "категори", "тоже", "также",
         "перв", "втор", "трет", "четверт", "пят", "шест", "седьм", "восьм", "девят", "десят",
         "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "операци", "строк", "пункт"
     ]
@@ -104,7 +138,7 @@ def handle_list_voice_commands(user_id, user_text, user_text_lower, state, user_
 
     state_data = user_states[user_id]
     items_key = "history_items" if state == "history_view" else ("current_batch" if state == "queue_batch_review" else "items")
-    
+
     if state == "history_view":
         items = state_data.get("history_data", {}).get("items", [])
     else:
@@ -113,63 +147,92 @@ def handle_list_voice_commands(user_id, user_text, user_text_lower, state, user_
     if not items:
         return False
 
-    # ====================================================================
-    # КОМАНДА 1: УКАЗАНИЕ КАТЕГОРИИ ИЛИ ПЕРЕИМЕНОВАНИЕ ТОВАРА
-    # ====================================================================
-    if action in ["set_category", "rename_item", "rename_item_and_amount"]:
-        idx = int(parsed_cmd.get("index", 0)) - 1
-        raw_text = (parsed_cmd.get("hint") or parsed_cmd.get("name") or "").strip()
-        new_amount = float(parsed_cmd.get("amount", 0)) if action == "rename_item_and_amount" else None
+    # Извлекаем индексы (поддерживаем как массив indices, так и одиночный index)
+    raw_indices = parsed_cmd.get("indices")
+    if not raw_indices and "index" in parsed_cmd:
+        raw_indices = [parsed_cmd["index"]]
+    if not raw_indices:
+        raw_indices = []
 
-        if 0 <= idx < len(items) and raw_text:
-            it = items[idx]
-            current_art_name = it.get("article") or it.get("original_item") or it.get("item") or "Операция"
-            op_type = it.get("type", "Расход")
+    valid_indices = [int(i) - 1 for i in raw_indices if 0 <= int(i) - 1 < len(items)]
+
+    # ====================================================================
+    # КОМАНДА 1: УКАЗАНИЕ КАТЕГОРИИ (К ОДНОМУ ИЛИ НЕСКОЛЬКИМ ПУНКТАМ)
+    # ("Четвертое – это уход за собой, и пятое тоже")
+    # ====================================================================
+    if action == "set_category":
+        hint_text = (parsed_cmd.get("hint") or "").strip()
+        if valid_indices and hint_text:
             menu_full = get_full_menu(internal_uid)
 
-            # --- ШАГ 1: ПРОВЕРКА, НЕ ЯВЛЯЕТСЯ ЛИ ПОДСКАЗКА КАТЕГОРИЕЙ/ПОДКАТЕГОРИЕЙ МЕНЮ ---
-            # (Например "бизнес", "продукты", "такси", "образование")
-            is_cat_match, matched_type, found_cat, found_sub = _find_category_in_menu(menu_full, raw_text)
+            # Ищем категорию по 3-уровневой воронке
+            is_match, m_type, found_cat, found_sub = _find_category_in_menu(menu_full, hint_text)
 
-            if is_cat_match:
-                # Пользователь указал категорию/подкатегорию!
-                # НАЗВАНИЕ ТОВАРА НЕ ТРОГАЕМ!
-                target_art = current_art_name
-                target_cat = found_cat
-                target_sub = found_sub
-                if matched_type:
-                    op_type = matched_type
-            else:
-                # --- ШАГ 2: ПРОВЕРЯЕМ СЛОВО В БАЗЕ СИНОНИМОВ КАК СТАТЬЮ ---
-                db_match = smart_search_item(internal_uid, raw_text, op_type=op_type)
-                if db_match["status"] != "FOUND":
-                    db_match = smart_search_item(internal_uid, raw_text, op_type=None)
-
+            if not is_match:
+                # Проверяем в базе синонимов
+                db_match = smart_search_item(internal_uid, hint_text, op_type=None)
                 if db_match["status"] == "FOUND":
-                    target_cat = db_match["category"]
-                    target_sub = db_match["subcategory"]
-                    if db_match.get("type"):
-                        op_type = db_match["type"]
+                    is_match = True
+                    m_type = db_match.get("type", "Расход")
+                    found_cat = db_match["category"]
+                    found_sub = db_match["subcategory"]
 
-                    # Если мы в режиме очереди завалов -> название операции ("Мне на проекты") не затираем!
-                    if state == "queue_batch_review":
-                        target_art = current_art_name
-                    else:
-                        # В режиме новых трат (чеки / диктовка) обновляем название на исправленное
-                        target_art = raw_text.capitalize()
+            if not is_match:
+                # Резерв ИИ
+                sample_item = items[valid_indices[0]].get("article") or items[valid_indices[0]].get("item") or "Операция"
+                type_menu = menu_full.get("Расход", {})
+                menu_str = "[Расход]\n" + "\n".join([f"{c}: {', '.join(subs.keys() if isinstance(subs, dict) else subs)}" for c, subs in type_menu.items()])
+                ai_c, ai_s = categorize_with_ai(sample_item, menu_str, context=hint_text)
+                m_type, found_cat, found_sub = "Расход", ai_c, ai_s
+
+            # Применяем категорию ко ВСЕМ указанным позициям!
+            for idx in valid_indices:
+                it = items[idx]
+                if state == "history_view":
+                    update_transaction_category(internal_uid, it["id"], found_cat, found_sub, it["article"])
+                    it["category"] = found_cat
+                    it["subcategory"] = found_sub
                 else:
-                    # --- ШАГ 3: РЕЗЕРВНЫЙ ПОДБОР ЧЕРЕЗ ИИ ---
-                    type_menu = menu_full.get(op_type, {})
-                    menu_str = f"[{op_type}]\n" + "\n".join([f"{c}: {', '.join(subs.keys() if isinstance(subs, dict) else subs)}" for c, subs in type_menu.items()])
-                    ai_cat, ai_sub = categorize_with_ai(current_art_name, menu_str, context=raw_text)
-                    target_cat, target_sub = ai_cat, ai_sub
-                    
-                    if state == "queue_batch_review":
-                        target_art = current_art_name
-                    else:
-                        target_art = raw_text.capitalize() if action == "rename_item" else current_art_name
+                    it["category"] = found_cat
+                    it["subcategory"] = found_sub
+                    if m_type:
+                        it["type"] = m_type
 
-            # ПРИМЕНЯЕМ РЕЗУЛЬТАТ:
+            indices_str = ", ".join([f"№{i+1}" for i in valid_indices])
+            send_vk_message(
+                user_id,
+                f"✅ Позиции {indices_str} обновлены:\n"
+                f"📂 {found_cat} -> {found_sub}"
+            )
+            _refresh_screen(user_id, state, state_data)
+            return True
+
+    # ====================================================================
+    # КОМАНДА 2: ПЕРЕИМЕНОВАНИЕ ТОВАРА ("Первая операция это огурцы")
+    # ====================================================================
+    if action in ["rename_item", "rename_item_and_amount"]:
+        new_name = (parsed_cmd.get("name") or "").strip()
+        new_amount = float(parsed_cmd.get("amount", 0)) if action == "rename_item_and_amount" else None
+
+        if valid_indices and new_name:
+            idx = valid_indices[0]
+            it = items[idx]
+            op_type = it.get("type", "Расход")
+
+            # Проверяем новое имя по базе
+            db_match = smart_search_item(internal_uid, new_name, op_type=op_type)
+            if db_match["status"] != "FOUND":
+                db_match = smart_search_item(internal_uid, new_name, op_type=None)
+
+            if db_match["status"] == "FOUND":
+                target_art = new_name.capitalize()
+                target_cat = db_match["category"]
+                target_sub = db_match["subcategory"]
+            else:
+                target_art = new_name.capitalize()
+                target_cat = it.get("category", "Разное")
+                target_sub = it.get("subcategory", "Требует проверки")
+
             if state == "history_view":
                 update_transaction_category(internal_uid, it["id"], target_cat, target_sub, target_art)
                 if new_amount:
@@ -179,16 +242,12 @@ def handle_list_voice_commands(user_id, user_text, user_text_lower, state, user_
                 it["category"] = target_cat
                 it["subcategory"] = target_sub
             else:
-                if "item" in it:
-                    it["item"] = target_art
-                elif "original_item" in it:
-                    it["original_item"] = target_art
-                elif "article" in it:
-                    it["article"] = target_art
+                if "item" in it: it["item"] = target_art
+                elif "original_item" in it: it["original_item"] = target_art
+                elif "article" in it: it["article"] = target_art
 
                 it["category"] = target_cat
                 it["subcategory"] = target_sub
-                it["type"] = op_type
                 if new_amount:
                     it["amount"] = new_amount
 
@@ -203,13 +262,12 @@ def handle_list_voice_commands(user_id, user_text, user_text_lower, state, user_
             return True
 
     # =========================================================
-    # КОМАНДА 2: ИЗМЕНЕНИЕ СУММЫ ("Измени сумму у четвертой на 250")
+    # КОМАНДА 3: ИЗМЕНЕНИЕ СУММЫ ("Измени сумму у четвертой на 250")
     # =========================================================
     if action == "edit_amount":
-        idx = int(parsed_cmd.get("index", 0)) - 1
         new_amount = float(parsed_cmd.get("amount", 0))
-
-        if 0 <= idx < len(items) and new_amount > 0:
+        if valid_indices and new_amount > 0:
+            idx = valid_indices[0]
             it = items[idx]
             name = it.get("article") or it.get("original_item") or it.get("item") or "Операция"
             old_amt = it.get("amount", 0)
@@ -225,44 +283,40 @@ def handle_list_voice_commands(user_id, user_text, user_text_lower, state, user_
             return True
 
     # =========================================================
-    # КОМАНДА 3: УДАЛЕНИЕ (ВСЕ, СПИСОК НОМЕРОВ ИЛИ ПОСЛЕДНИЕ N)
+    # КОМАНДА 4: УДАЛЕНИЕ (ВСЕ, СПИСОК НОМЕРОВ ИЛИ ПОСЛЕДНИЕ N)
     # =========================================================
     if action in ["delete", "delete_all", "delete_last_n"]:
-        valid_indices = []
+        del_indices = []
 
         if action == "delete_all":
-            valid_indices = list(range(len(items)))
+            del_indices = list(range(len(items)))
         elif action == "delete_last_n":
             count_n = int(parsed_cmd.get("count", 1))
-            valid_indices = list(range(max(0, len(items) - count_n), len(items)))
+            del_indices = list(range(max(0, len(items) - count_n), len(items)))
         else:
-            raw_indices = parsed_cmd.get("indices", [])
-            for i in raw_indices:
-                idx = int(i) - 1
-                if 0 <= idx < len(items):
-                    valid_indices.append(idx)
+            del_indices = valid_indices
 
-        if not valid_indices:
+        if not del_indices:
             send_vk_message(user_id, "⚠️ Не удалось определить позиции для удаления в списке.")
             return True
 
-        if len(valid_indices) == len(items):
+        if len(del_indices) == len(items):
             confirm_msg = f"⚠️ Вы уверены, что хотите удалить ВСЕ {len(items)} операций из списка?\n\n"
         else:
-            confirm_msg = f"⚠️ Вы уверены, что хотите удалить {len(valid_indices)} поз.:\n\n"
+            confirm_msg = f"⚠️ Вы уверены, что хотите удалить {len(del_indices)} поз.:\n\n"
 
-        for idx in valid_indices[:10]:
+        for idx in del_indices[:10]:
             it = items[idx]
             name = it.get("article") or it.get("original_item") or it.get("item") or "Операция"
             amt = it.get("amount", 0)
             confirm_msg += f"• №{idx+1}: {name} — {amt:g} руб.\n"
-        if len(valid_indices) > 10:
-            confirm_msg += f"... и еще {len(valid_indices) - 10} операций.\n"
+        if len(del_indices) > 10:
+            confirm_msg += f"... и еще {len(del_indices) - 10} операций.\n"
 
         user_states[user_id] = {
             "state": "confirm_voice_delete",
             "prev_state": state,
-            "delete_indices": valid_indices,
+            "delete_indices": del_indices,
             "history_items": items if state == "history_view" else None,
             items_key: items
         }
