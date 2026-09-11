@@ -587,7 +587,6 @@ def handle_transaction(user_id, user_text, state, user_states):
             # ---------------------------------------------------------
             if action == "delete_all_tx":
                 period = parsed_data.get("period") or "all"
-                # Проверяем, есть ли операции
                 check_hist = get_user_history(internal_uid, limit=50, period=None if period == "all" else period)
                 total_ops = check_hist.get("count", 0)
 
@@ -746,8 +745,6 @@ def handle_transaction(user_id, user_text, state, user_states):
             processed_items = []
             all_known = True
 
-            send_vk_message(user_id, f"⚡ Распознаю {len(raw_ops)} операций и сопоставляю с базой...")
-
             for op in raw_ops:
                 current_item = op.get("item", "").strip()
                 if not current_item or current_item.lower() in ["приход", "доход", "расход", "трата", "поступление"]:
@@ -806,26 +803,70 @@ def handle_transaction(user_id, user_text, state, user_states):
                         "is_known": False
                     })
 
-            if len(processed_items) == 1 and all_known:
+            # =========================================================
+            # СЦЕНАРИЙ А: РОВНО 1 ОПЕРАЦИЯ (НЕТ ЛИШНИХ СПИСКОВ ИЗ 1 ПУНКТА!)
+            # =========================================================
+            if len(processed_items) == 1:
                 single = processed_items[0]
-                save_transaction(
-                    user_id=internal_uid,
-                    op_type=single["type"],
-                    category=single["category"],
-                    subcategory=single["subcategory"],
-                    article=single["item"],
-                    amount=single["amount"],
-                    comment=single["comment"],
-                    original_text=single["item"],
-                    status='verified'
-                )
+
+                # 1. Известна в базе -> мгновенная запись без лишних вопросов!
+                if single["is_known"]:
+                    save_transaction(
+                        user_id=internal_uid,
+                        op_type=single["type"],
+                        category=single["category"],
+                        subcategory=single["subcategory"],
+                        article=single["item"],
+                        amount=single["amount"],
+                        comment=single["comment"],
+                        original_text=single["item"],
+                        status='verified'
+                    )
+                    send_vk_message(
+                        user_id,
+                        f"✅ Успешно записано! ({single['type']})\n📂 {single['category']} -> {single['subcategory']}\n💰 {single['amount']:g} руб.",
+                        get_main_keyboard(user_id)
+                    )
+                    return True
+
+                # 2. Неизвестна, но ИИ подобрал конкретную категорию -> переспрашиваем "Да/Нет"
+                if single["category"] != "Разное" and single["subcategory"] != "Требует проверки":
+                    user_states[user_id] = {
+                        "state": "confirm_category",
+                        "payload": single,
+                        "menu": menu_full,
+                        "ai_cat": single["category"],
+                        "ai_sub": single["subcategory"],
+                        "attempts": 1
+                    }
+                    send_vk_message(
+                        user_id,
+                        f"🤖 Думаю, «{single['item']}» ({single['type']}) относится к:\n"
+                        f"📂 {single['category']} -> {single['subcategory']}\n"
+                        f"💰 {single['amount']:g} руб.\n\nВсё верно?",
+                        get_yes_no_keyboard(show_back=True)
+                    )
+                    return True
+
+                # 3. Полностью неизвестная статья -> сразу просим подсказать категорию!
+                user_states[user_id] = {
+                    "state": "provide_context",
+                    "payload": single,
+                    "menu": menu_full,
+                    "attempts": 1
+                }
                 send_vk_message(
                     user_id,
-                    f"✅ Успешно записано! ({single['type']})\n📂 {single['category']} -> {single['subcategory']}\n💰 {single['amount']:g} руб.",
-                    get_main_keyboard(user_id)
+                    f"🤔 Я пока не знаю статью «{single['item']}» ({single['amount']:g} руб.).\n"
+                    f"Подскажи в двух словах, к чему это относится (или назови категорию):",
+                    get_cancel_keyboard(show_back=True)
                 )
                 return True
 
+            # =========================================================
+            # СЦЕНАРИЙ Б: НЕСКОЛЬКО ОПЕРАЦИЙ (2 и более) -> СВОДНЫЙ СПИСОК РЕВЬЮ
+            # =========================================================
+            send_vk_message(user_id, f"⚡ Распознаю {len(processed_items)} операций и сопоставляю с базой...")
             user_states[user_id] = {
                 "state": "multi_tx_review",
                 "items": processed_items,
@@ -842,4 +883,4 @@ def handle_transaction(user_id, user_text, state, user_states):
             send_vk_message(user_id, reply_text, get_main_keyboard(user_id))
             return True
 
-    return False 
+    return False
