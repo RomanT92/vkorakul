@@ -11,18 +11,44 @@ from db import (
     update_transaction_category
 )
 
+def _find_category_in_menu(menu_full, hint_text):
+    """
+    Проверяет, совпадает ли подсказка напрямую с названием категории или подкатегории в меню.
+    Возвращает (found: bool, op_type, category, subcategory).
+    """
+    clean = hint_text.lower().strip()
+    for m_type in ["Расход", "Доход"]:
+        type_cats = menu_full.get(m_type, {})
+        for cat_name, subs in type_cats.items():
+            # 1. Точное совпадение с категорией (например: "бизнес", "продукты", "транспорт")
+            if cat_name.lower() == clean:
+                sub_keys = list(subs.keys()) if isinstance(subs, dict) else (subs if subs else [])
+                # Ищем подкатегорию с таким же именем или берем первую/дефолтную
+                matching_sub = next((s for s in sub_keys if s.lower() == clean), (sub_keys[0] if sub_keys else "Разное"))
+                return True, m_type, cat_name, matching_sub
+
+            # 2. Точное совпадение с подкатегорией (например: "бизнес" под "Карьера и бизнес", "такси", "кафе")
+            sub_keys = list(subs.keys()) if isinstance(subs, dict) else (subs if subs else [])
+            for s_name in sub_keys:
+                if s_name.lower() == clean:
+                    return True, m_type, cat_name, s_name
+
+    return False, None, None, None
+
 def handle_list_voice_commands(user_id, user_text, user_text_lower, state, user_states):
     """
     Универсальный обработчик голосовых команд над списками:
-    - Исправление названия товара ("первая операция это огурцы")
+    - Указание категории ("первое это бизнес", "категория у второй такси")
+    - Переименование товара ("первая операция это огурцы")
     - Изменение суммы ("измени сумму у четвертой на 250")
-    - Удаление нескольких позиций ("удали первую, третью и пятую")
-    - Удаление ВСЕХ позиций списка ("удали все", "удали их все")
+    - Удаление позиций ("удали первую и третью", "удали все")
     """
     target_states = ["multi_tx_review", "receipt_review", "queue_batch_review", "history_view"]
     internal_uid = get_or_create_user(user_id)
 
-    # 1. ОБРАБОТКА ПОДТВЕРЖДЕНИЯ УДАЛЕНИЯ ("Да" / "Нет")
+    # ====================================================================
+    # 1. ПОДТВЕРЖДЕНИЕ УДАЛЕНИЯ ("Да" / "Нет")
+    # ====================================================================
     if state == "confirm_voice_delete":
         state_data = user_states[user_id]
         prev_state = state_data["prev_state"]
@@ -63,7 +89,7 @@ def handle_list_voice_commands(user_id, user_text, user_text_lower, state, user_
 
     cmd_triggers = [
         "удали", "убери", "измени", "поставь", "исправь", "это", "рубл", "сумму", "название", "товар",
-        "все", "всё", "всех", "очисти",
+        "все", "всё", "всех", "очисти", "категори",
         "перв", "втор", "трет", "четверт", "пят", "шест", "седьм", "восьм", "девят", "десят",
         "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "операци", "строк", "пункт"
     ]
@@ -88,61 +114,62 @@ def handle_list_voice_commands(user_id, user_text, user_text_lower, state, user_
         return False
 
     # ====================================================================
-    # КОМАНДА 1: ИСПРАВЛЕНИЕ НАЗВАНИЯ ТОВАРА/СТАТЬИ И КАТЕГОРИИ
+    # КОМАНДА 1: УКАЗАНИЕ КАТЕГОРИИ ИЛИ ПЕРЕИМЕНОВАНИЕ ТОВАРА
     # ====================================================================
-    if action in ["edit_item", "edit_category", "edit_item_and_amount"]:
+    if action in ["set_category", "rename_item", "rename_item_and_amount"]:
         idx = int(parsed_cmd.get("index", 0)) - 1
-        new_text = parsed_cmd.get("text", "").strip()
-        new_amount = float(parsed_cmd.get("amount", 0)) if action == "edit_item_and_amount" else None
+        raw_text = (parsed_cmd.get("hint") or parsed_cmd.get("name") or "").strip()
+        new_amount = float(parsed_cmd.get("amount", 0)) if action == "rename_item_and_amount" else None
 
-        if 0 <= idx < len(items) and new_text:
+        if 0 <= idx < len(items) and raw_text:
             it = items[idx]
+            current_art_name = it.get("article") or it.get("original_item") or it.get("item") or "Операция"
             op_type = it.get("type", "Расход")
+            menu_full = get_full_menu(internal_uid)
 
-            db_match = smart_search_item(internal_uid, new_text, op_type=op_type)
-            if db_match["status"] != "FOUND":
-                db_match = smart_search_item(internal_uid, new_text, op_type=None)
+            # --- ШАГ 1: ПРОВЕРКА, НЕ ЯВЛЯЕТСЯ ЛИ ПОДСКАЗКА КАТЕГОРИЕЙ/ПОДКАТЕГОРИЕЙ МЕНЮ ---
+            # (Например "бизнес", "продукты", "такси", "образование")
+            is_cat_match, matched_type, found_cat, found_sub = _find_category_in_menu(menu_full, raw_text)
 
-            if db_match["status"] == "FOUND":
-                target_art = new_text.capitalize()
-                target_cat = db_match["category"]
-                target_sub = db_match["subcategory"]
-                if db_match.get("type"):
-                    op_type = db_match["type"]
+            if is_cat_match:
+                # Пользователь указал категорию/подкатегорию!
+                # НАЗВАНИЕ ТОВАРА НЕ ТРОГАЕМ!
+                target_art = current_art_name
+                target_cat = found_cat
+                target_sub = found_sub
+                if matched_type:
+                    op_type = matched_type
             else:
-                menu_full = get_full_menu(internal_uid)
-                u_clean = new_text.lower()
-                found_in_tree = False
-                target_art = new_text.capitalize()
-                target_cat, target_sub = "Разное", "Требует проверки"
+                # --- ШАГ 2: ПРОВЕРЯЕМ СЛОВО В БАЗЕ СИНОНИМОВ КАК СТАТЬЮ ---
+                db_match = smart_search_item(internal_uid, raw_text, op_type=op_type)
+                if db_match["status"] != "FOUND":
+                    db_match = smart_search_item(internal_uid, raw_text, op_type=None)
 
-                for m_type in ["Расход", "Доход"]:
-                    type_cats = menu_full.get(m_type, {})
-                    for m_cat, m_subs in type_cats.items():
-                        if m_cat.lower() == u_clean:
-                            target_cat = m_cat
-                            sub_keys = list(m_subs.keys()) if isinstance(m_subs, dict) else (m_subs if m_subs else [])
-                            target_sub = sub_keys[0] if sub_keys else "Разное"
-                            found_in_tree = True
-                            break
-                        sub_keys = list(m_subs.keys()) if isinstance(m_subs, dict) else (m_subs if m_subs else [])
-                        for s_name in sub_keys:
-                            if s_name.lower() == u_clean:
-                                target_cat = m_cat
-                                target_sub = s_name
-                                found_in_tree = True
-                                break
-                        if found_in_tree:
-                            break
-                    if found_in_tree:
-                        break
+                if db_match["status"] == "FOUND":
+                    target_cat = db_match["category"]
+                    target_sub = db_match["subcategory"]
+                    if db_match.get("type"):
+                        op_type = db_match["type"]
 
-                if not found_in_tree:
+                    # Если мы в режиме очереди завалов -> название операции ("Мне на проекты") не затираем!
+                    if state == "queue_batch_review":
+                        target_art = current_art_name
+                    else:
+                        # В режиме новых трат (чеки / диктовка) обновляем название на исправленное
+                        target_art = raw_text.capitalize()
+                else:
+                    # --- ШАГ 3: РЕЗЕРВНЫЙ ПОДБОР ЧЕРЕЗ ИИ ---
                     type_menu = menu_full.get(op_type, {})
                     menu_str = f"[{op_type}]\n" + "\n".join([f"{c}: {', '.join(subs.keys() if isinstance(subs, dict) else subs)}" for c, subs in type_menu.items()])
-                    ai_cat, ai_sub = categorize_with_ai(target_art, menu_str)
+                    ai_cat, ai_sub = categorize_with_ai(current_art_name, menu_str, context=raw_text)
                     target_cat, target_sub = ai_cat, ai_sub
+                    
+                    if state == "queue_batch_review":
+                        target_art = current_art_name
+                    else:
+                        target_art = raw_text.capitalize() if action == "rename_item" else current_art_name
 
+            # ПРИМЕНЯЕМ РЕЗУЛЬТАТ:
             if state == "history_view":
                 update_transaction_category(internal_uid, it["id"], target_cat, target_sub, target_art)
                 if new_amount:
@@ -204,7 +231,6 @@ def handle_list_voice_commands(user_id, user_text, user_text_lower, state, user_
         valid_indices = []
 
         if action == "delete_all":
-            # УДАЛИТЬ ВСЕ ЭЛЕМЕНТЫ ТЕКУЩЕГО СПИСКА (все 10 из 10)
             valid_indices = list(range(len(items)))
         elif action == "delete_last_n":
             count_n = int(parsed_cmd.get("count", 1))
@@ -225,7 +251,7 @@ def handle_list_voice_commands(user_id, user_text, user_text_lower, state, user_
         else:
             confirm_msg = f"⚠️ Вы уверены, что хотите удалить {len(valid_indices)} поз.:\n\n"
 
-        for idx in valid_indices[:10]: # показываем первые 10 для компактности
+        for idx in valid_indices[:10]:
             it = items[idx]
             name = it.get("article") or it.get("original_item") or it.get("item") or "Операция"
             amt = it.get("amount", 0)
