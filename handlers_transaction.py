@@ -2,6 +2,7 @@
 import json
 import re
 import difflib
+
 from keyboards import (
     get_main_keyboard,
     get_yes_no_keyboard,
@@ -11,7 +12,11 @@ from keyboards import (
     get_multi_tx_review_keyboard,
     get_tx_action_keyboard
 )
-from services import send_vk_message, extract_transaction_with_ai, categorize_with_ai
+from services import (
+    send_vk_message,
+    extract_transaction_with_ai,
+    categorize_with_ai
+)
 from db import (
     get_or_create_user,
     smart_search_item,
@@ -35,6 +40,7 @@ def find_entity_in_menu(menu, target_name):
     """Поиск сущности любого уровня (категория, подкатегория, статья) по названию."""
     target = target_name.lower().strip()
     all_entities = []
+
     for c_type in ["Расход", "Доход"]:
         type_menu = menu.get(c_type, {})
         for cat, subs in type_menu.items():
@@ -44,7 +50,7 @@ def find_entity_in_menu(menu, target_name):
                 all_entities.append({"level": "subcategory", "type": c_type, "cat": cat, "sub": sub, "art": "", "name": sub.lower().strip()})
                 for art in arts:
                     all_entities.append({"level": "article", "type": c_type, "cat": cat, "sub": sub, "art": art, "name": art.lower().strip()})
-    
+
     results = [ent for ent in all_entities if ent["name"] == target]
     if not results:
         names = [ent["name"] for ent in all_entities]
@@ -94,7 +100,6 @@ def _show_multi_tx_items(user_id, items, show_apply_all=False):
         cat = item.get("category", "?")
         sub = item.get("subcategory", "?")
         comm = f" ({item['comment']})" if item.get("comment") else ""
-
         type_icon = "📉" if op_type == "Расход" else "📈"
         msg += f"{i+1}. {item_name} — {amount} руб. {type_icon}{comm}\n"
         msg += f"   📂 {cat} -> {sub}\n\n"
@@ -103,13 +108,13 @@ def _show_multi_tx_items(user_id, items, show_apply_all=False):
     if show_apply_all:
         msg += "Нажмите «⚡ Применить для всех оставшихся», чтобы продублировать категорию.\n"
     msg += "Если хотите изменить категорию статьи — отправьте её НОМЕР."
-
     send_vk_message(user_id, msg, get_multi_tx_review_keyboard(len(items), show_apply_all=show_apply_all, show_back=True))
 
 def _save_items_batch(internal_uid, items):
     """Сохраняет пачку операций в БД и возвращает статистику."""
     saved_count = 0
     needs_review_count = 0
+
     for item in items:
         cat = item.get("category", "Разное")
         sub = item.get("subcategory", "Требует проверки")
@@ -137,9 +142,9 @@ def _save_items_batch(internal_uid, items):
         )
         if ok:
             saved_count += 1
+            if op_status == 'verified':
+                learn_user_word(internal_uid, op_type, cat, sub, art, art)
 
-        if op_status == 'verified':
-            learn_user_word(internal_uid, op_type, cat, sub, art, art)
     return saved_count, needs_review_count
 
 def _show_history_screen(user_id, items, title_period, total_expense, total_income, total_count=None):
@@ -162,6 +167,22 @@ def _show_history_screen(user_id, items, title_period, total_expense, total_inco
 
     msg += "\n👉 Чтобы изменить сумму, категорию или удалить операцию — нажмите НОМЕР операции или скажите (например: «Удали вторую и третью»):"
     send_vk_message(user_id, msg, get_numbered_keyboard(min(len(items), 15), show_back=True))
+
+def _match_category_tree(menu_full, op_type, text):
+    """
+    Быстрый локальный поиск по дереву категорий и подкатегорий.
+    """
+    clean = text.lower().strip()
+    type_menu = menu_full.get(op_type, {})
+    for cat, subs in type_menu.items():
+        if cat.lower() == clean:
+            sub_keys = list(subs.keys()) if isinstance(subs, dict) else (subs if subs else [])
+            return cat, (sub_keys[0] if sub_keys else "Разное")
+        sub_keys = list(subs.keys()) if isinstance(subs, dict) else (subs if subs else [])
+        for s in sub_keys:
+            if s.lower() == clean:
+                return cat, s
+    return None, None
 
 def handle_transaction(user_id, user_text, state, user_states):
     user_text_lower = user_text.lower()
@@ -273,7 +294,9 @@ def handle_transaction(user_id, user_text, state, user_states):
     if state == "history_edit_category":
         sel_op = user_states[user_id].get("sel_op")
         op_type = sel_op.get("type", "Расход")
+        menu_full = get_full_menu(internal_uid)
 
+        # 1. Полноценный поиск по БД
         db_match = smart_search_item(internal_uid, user_text, op_type=op_type)
         if db_match["status"] != "FOUND":
             db_match = smart_search_item(internal_uid, user_text, op_type=None)
@@ -283,45 +306,23 @@ def handle_transaction(user_id, user_text, state, user_states):
             target_sub = db_match["subcategory"]
             target_art = db_match["article"]
         else:
-            menu_full = get_full_menu(internal_uid)
-            u_clean = user_text.lower().strip()
-            found_in_tree = False
-            target_cat, target_sub, target_art = "Разное", "Требует проверки", sel_op["article"]
-
-            for m_type in ["Расход", "Доход"]:
-                type_cats = menu_full.get(m_type, {})
-                for m_cat, m_subs in type_cats.items():
-                    if m_cat.lower() == u_clean:
-                        target_cat = m_cat
-                        sub_keys = list(m_subs.keys()) if isinstance(m_subs, dict) else (m_subs if m_subs else [])
-                        target_sub = sub_keys[0] if sub_keys else "Разное"
-                        found_in_tree = True
-                        break
-                    sub_keys = list(m_subs.keys()) if isinstance(m_subs, dict) else (m_subs if m_subs else [])
-                    for s_name in sub_keys:
-                        if s_name.lower() == u_clean:
-                            target_cat = m_cat
-                            target_sub = s_name
-                            found_in_tree = True
-                            break
-                    if found_in_tree:
-                        break
-                if found_in_tree:
-                    break
-
-            if not found_in_tree:
+            # 2. Поиск по дереву категорий
+            c_tree, s_tree = _match_category_tree(menu_full, op_type, user_text)
+            if c_tree and s_tree:
+                target_cat, target_sub, target_art = c_tree, s_tree, sel_op["article"]
+            else:
+                # 3. Резерв через ИИ
                 send_vk_message(user_id, "🧠 Подбираю категорию с помощью ИИ...", get_cancel_keyboard(show_back=True))
                 type_menu = menu_full.get(op_type, {})
                 menu_str = f"[{op_type}]\n" + "\n".join([f"{c}: {', '.join(subs.keys() if isinstance(subs, dict) else subs)}" for c, subs in type_menu.items()])
                 ai_cat, ai_sub = categorize_with_ai(sel_op["article"], menu_str, context=user_text)
-                target_cat, target_sub = ai_cat, ai_sub
+                target_cat, target_sub, target_art = ai_cat, ai_sub, sel_op["article"]
 
         ok = update_transaction_category(internal_uid, sel_op["id"], target_cat, target_sub, target_art)
         if ok:
             if target_cat != "Разное" and target_sub != "Требует проверки":
                 learn_user_word(internal_uid, op_type, target_cat, target_sub, target_art, user_text)
                 learn_user_word(internal_uid, op_type, target_cat, target_sub, target_art, target_art)
-
             send_vk_message(
                 user_id,
                 f"✅ Категория операции «{target_art}» успешно изменена:\n"
@@ -345,7 +346,6 @@ def handle_transaction(user_id, user_text, state, user_states):
                 user_states[user_id]["state"] = "history_action_select"
                 user_states[user_id]["sel_op"] = sel_op
                 user_states[user_id]["idx"] = idx
-
                 date_str = sel_op["date"].strftime("%d.%m.%Y %H:%M") if sel_op.get("date") else ""
                 t_icon = "📈" if sel_op["type"] == "Доход" else "📉"
                 msg = (
@@ -380,7 +380,7 @@ def handle_transaction(user_id, user_text, state, user_states):
             return True
 
     # =========================================================
-    # ПОДТВЕРЖДЕНИЕ МАССОВОГО УДАЛЕНИЯ ОПЕРАЦИЙ (DELETE ALL)
+    # ПОДТВЕРЖДЕНИЕ МАССОВОГО УДАЛЕНИЯ ОПЕРАЦИЙ (DELETE ALL TX)
     # =========================================================
     if state == "confirm_delete_all_tx":
         if any(w in user_text_lower for w in ["да", "верно", "ага", "yes", "+", "удалить", "очисти"]):
@@ -404,11 +404,9 @@ def handle_transaction(user_id, user_text, state, user_states):
         if any(w in user_text_lower for w in ["готово", "сохранить", "сохрани", "да", "ок", "+", "верно", "ага"]):
             send_vk_message(user_id, "⏳ Сохраняю операции в базу данных...", get_cancel_keyboard(show_back=False))
             saved_count, needs_review_count = _save_items_batch(internal_uid, items)
-
             report_msg = f"🎉 Успешно сохранено {saved_count} операций!\nЖурнал обновлен."
             if needs_review_count > 0:
                 report_msg += f"\n\n⚠️ {needs_review_count} позиций требуют проверки. Вы можете распределить их кнопкой «📥 Разобрать операции»."
-
             send_vk_message(user_id, report_msg, get_main_keyboard(user_id))
             del user_states[user_id]
             return True
@@ -417,23 +415,19 @@ def handle_transaction(user_id, user_text, state, user_states):
             last_cat = state_data.get("last_category")
             last_sub = state_data.get("last_subcategory")
             start_idx = state_data.get("last_edit_idx", 0) + 1
-
             if not last_cat or not last_sub:
                 send_vk_message(user_id, "⚠️ Сначала измените какую-нибудь одну операцию из списка.")
                 return True
-
             applied = 0
             for i in range(start_idx, len(items)):
                 items[i]["category"] = last_cat
                 items[i]["subcategory"] = last_sub
                 applied += 1
-
             if applied == 0:
                 for it in items:
                     it["category"] = last_cat
                     it["subcategory"] = last_sub
                 applied = len(items)
-
             send_vk_message(user_id, f"⚡ Категория «{last_cat} -> {last_sub}» применена к {applied} операциям!")
             _show_multi_tx_items(user_id, items, show_apply_all=True)
             return True
@@ -467,6 +461,7 @@ def handle_transaction(user_id, user_text, state, user_states):
         items = state_data["items"]
         sel_item = items[idx]
         op_type = sel_item.get("type", "Расход")
+        menu_full = get_full_menu(internal_uid)
 
         db_match = smart_search_item(internal_uid, user_text, op_type=op_type)
         if db_match["status"] != "FOUND":
@@ -478,47 +473,20 @@ def handle_transaction(user_id, user_text, state, user_states):
             if db_match.get("type"):
                 sel_item["type"] = db_match["type"]
         else:
-            menu_full = get_full_menu(internal_uid)
-            u_clean = user_text.lower().strip()
-            found_in_tree = False
-
-            for m_type in ["Расход", "Доход"]:
-                type_cats = menu_full.get(m_type, {})
-                for m_cat, m_subs in type_cats.items():
-                    if m_cat.lower() == u_clean:
-                        ai_cat = m_cat
-                        sub_keys = list(m_subs.keys()) if isinstance(m_subs, dict) else (m_subs if m_subs else [])
-                        ai_sub = sub_keys[0] if sub_keys else "Разное"
-                        sel_item["type"] = m_type
-                        found_in_tree = True
-                        break
-                    sub_keys = list(m_subs.keys()) if isinstance(m_subs, dict) else (m_subs if m_subs else [])
-                    for s_name in sub_keys:
-                        if s_name.lower() == u_clean:
-                            ai_cat = m_cat
-                            ai_sub = s_name
-                            sel_item["type"] = m_type
-                            found_in_tree = True
-                            break
-                    if found_in_tree:
-                        break
-                if found_in_tree:
-                    break
-
-            if not found_in_tree:
+            c_tree, s_tree = _match_category_tree(menu_full, op_type, user_text)
+            if c_tree and s_tree:
+                ai_cat, ai_sub = c_tree, s_tree
+            else:
                 send_vk_message(user_id, "🧠 Подбираю категорию с помощью ИИ...", get_cancel_keyboard(show_back=True))
-                menu_full = state_data["menu"]
                 type_menu = menu_full.get(op_type, {})
                 menu_str = f"[{op_type}]\n" + "\n".join([f"{c}: {', '.join(subs.keys() if isinstance(subs, dict) else subs)}" for c, subs in type_menu.items()])
                 ai_cat, ai_sub = categorize_with_ai(sel_item.get("item"), menu_str, context=user_text)
 
         sel_item["category"] = ai_cat
         sel_item["subcategory"] = ai_sub
-
         state_data["last_category"] = ai_cat
         state_data["last_subcategory"] = ai_sub
         state_data["last_edit_idx"] = idx
-
         state_data["state"] = "multi_tx_review"
         _show_multi_tx_items(user_id, items, show_apply_all=True)
         return True
@@ -534,7 +502,6 @@ def handle_transaction(user_id, user_text, state, user_states):
         return False
 
     parsed_data = _extract_json_data(reply_text)
-
     if parsed_data:
         try:
             if isinstance(parsed_data, list):
@@ -542,19 +509,16 @@ def handle_transaction(user_id, user_text, state, user_states):
 
             action = parsed_data.get("action")
 
-            # ---------------------------------------------------------
-            # 1. ЗАПРОС НА ПРОСМОТР ИСТОРИИ (ГОЛОС ИЛИ ТЕКСТ)
-            # ---------------------------------------------------------
+            # 1. ПРОСМОТР ИСТОРИИ
             if action == "show_history":
                 raw_limit = parsed_data.get("limit")
                 limit = int(raw_limit) if raw_limit else 10
                 limit = min(max(limit, 1), 15)
                 period = parsed_data.get("period")
-                
+
                 send_vk_message(user_id, "⏳ Загружаю историю операций...")
                 history_data = get_user_history(internal_uid, limit=limit, period=period)
                 items = history_data["items"]
-
                 if not items:
                     send_vk_message(user_id, "📭 За указанный период операций не найдено.", get_main_keyboard(user_id))
                     return True
@@ -566,30 +530,26 @@ def handle_transaction(user_id, user_text, state, user_states):
                     "month": "за последние 30 дней"
                 }
                 title_period = period_names.get(period, f"последние {len(items)}")
-
                 history_data["title_period"] = title_period
                 user_states[user_id] = {
                     "state": "history_view",
                     "history_data": history_data
                 }
                 _show_history_screen(
-                    user_id, 
-                    items, 
-                    title_period, 
-                    history_data["total_expense"], 
+                    user_id,
+                    items,
+                    title_period,
+                    history_data["total_expense"],
                     history_data["total_income"],
                     total_count=history_data.get("count")
                 )
                 return True
 
-            # ---------------------------------------------------------
-            # 2. МАССОВОЕ УДАЛЕНИЕ ОПЕРАЦИЙ (DELETE ALL TX)
-            # ---------------------------------------------------------
+            # 2. МАССОВОЕ УДАЛЕНИЕ ОПЕРАЦИЙ
             if action == "delete_all_tx":
                 period = parsed_data.get("period") or "all"
                 check_hist = get_user_history(internal_uid, limit=50, period=None if period == "all" else period)
                 total_ops = check_hist.get("count", 0)
-
                 if total_ops == 0:
                     send_vk_message(user_id, "📭 В журнале пока нет операций для удаления.", get_main_keyboard(user_id))
                     return True
@@ -615,9 +575,7 @@ def handle_transaction(user_id, user_text, state, user_states):
                 )
                 return True
 
-            # ---------------------------------------------------------
-            # 3. БЫСТРОЕ УДАЛЕНИЕ ОДНОЙ ПОСЛЕДНЕЙ ОПЕРАЦИИ
-            # ---------------------------------------------------------
+            # 3. БЫСТРОЕ УДАЛЕНИЕ ПОСЛЕДНЕЙ ОПЕРАЦИИ
             if action == "delete_last_tx":
                 last_op = get_last_transaction(internal_uid)
                 if not last_op:
@@ -638,15 +596,12 @@ def handle_transaction(user_id, user_text, state, user_states):
                 )
                 return True
 
-            # ---------------------------------------------------------
             # 4. ТЕКСТОВОЕ УПРАВЛЕНИЕ СТРУКТУРОЙ (CRUD)
-            # ---------------------------------------------------------
             if action in ["smart_rename", "smart_delete", "smart_move"]:
                 target_name = parsed_data.get("old_name") if action == "smart_rename" else parsed_data.get("item", "")
                 send_vk_message(user_id, f"⏳ Ищу '{target_name}' в структуре...")
                 menu = get_full_menu(internal_uid)
                 results = find_entity_in_menu(menu, target_name)
-                
                 if not results:
                     send_vk_message(user_id, f"❌ Не нашел '{target_name}' в базе. Попробуйте через кнопки меню.", get_main_keyboard(user_id))
                     return True
@@ -683,7 +638,6 @@ def handle_transaction(user_id, user_text, state, user_states):
                     if r["level"] == "category":
                         send_vk_message(user_id, "❌ Категорию нельзя перенести. Только подкатегорию или статью.", get_main_keyboard(user_id))
                         return True
-                    
                     cats = sorted(list(menu.get(r["type"], {}).keys()))
                     if r["level"] == "article":
                         user_states[user_id] = {
@@ -699,7 +653,6 @@ def handle_transaction(user_id, user_text, state, user_states):
                         for i, c in enumerate(cats):
                             msg += f"{i+1}. {c}\n"
                         send_vk_message(user_id, msg, get_numbered_keyboard(len(cats), show_back=True))
-
                     elif r["level"] == "subcategory":
                         user_states[user_id] = {
                             "state": "move_target_parent",
@@ -731,19 +684,15 @@ def handle_transaction(user_id, user_text, state, user_states):
                     send_vk_message(user_id, f"Создаем категорию {f'«{item}»' if item else ''}.\nЭто категория Расходов или Доходов?", type_keyboard(show_back=True))
                     return True
 
-            # ---------------------------------------------------------
             # 5. ОБЫЧНЫЙ ИЛИ МАССОВЫЙ ВВОД ТРАТ/ДОХОДОВ
-            # ---------------------------------------------------------
             raw_ops = parsed_data.get("operations", [])
             if not raw_ops and "item" in parsed_data:
                 raw_ops = [parsed_data]
-
             if not raw_ops:
                 return False
 
             menu_full = get_full_menu(internal_uid)
             processed_items = []
-            all_known = True
 
             for op in raw_ops:
                 current_item = op.get("item", "").strip()
@@ -756,10 +705,12 @@ def handle_transaction(user_id, user_text, state, user_states):
                     op_type = "Расход"
                 comment = op.get("comment", "").strip()
 
+                # 1. Полноценный поиск по БД
                 search_res = smart_search_item(internal_uid, current_item, op_type=op_type)
                 if search_res["status"] != "FOUND":
                     search_res = smart_search_item(internal_uid, current_item, op_type=None)
 
+                # Поиск по фразе вместе с комментарием
                 if search_res["status"] != "FOUND" and comment:
                     full_phrase = f"{current_item} {comment}".strip()
                     phrase_res = smart_search_item(internal_uid, full_phrase, op_type=op_type)
@@ -781,35 +732,47 @@ def handle_transaction(user_id, user_text, state, user_states):
                         "is_known": True
                     })
                 else:
-                    all_known = False
-                    type_menu = menu_full.get(op_type, {})
-                    menu_str = f"[{op_type}]\n" + "\n".join([f"{c}: {', '.join(subs.keys() if isinstance(subs, dict) else subs)}" for c, subs in type_menu.items()])
-                    ai_cat, ai_sub = categorize_with_ai(current_item, menu_str)
-
-                    valid_cat = ai_cat in type_menu and ai_sub in (type_menu[ai_cat].keys() if isinstance(type_menu[ai_cat], dict) else type_menu[ai_cat])
-
-                    if valid_cat and ai_sub != "Требует проверки":
-                        cat_res, sub_res = ai_cat, ai_sub
+                    # 2. Локальный поиск по дереву категорий и подкатегорий
+                    c_tree, s_tree = _match_category_tree(menu_full, op_type, current_item)
+                    if c_tree and s_tree:
+                        processed_items.append({
+                            "item": current_item,
+                            "amount": amount,
+                            "type": op_type,
+                            "category": c_tree,
+                            "subcategory": s_tree,
+                            "comment": comment,
+                            "is_known": True
+                        })
                     else:
-                        cat_res, sub_res = "Разное", "Требует проверки"
+                        # 3. Резервный подбор ИИ по меню
+                        type_menu = menu_full.get(op_type, {})
+                        menu_str = f"[{op_type}]\n" + "\n".join([f"{c}: {', '.join(subs.keys() if isinstance(subs, dict) else subs)}" for c, subs in type_menu.items()])
+                        ai_cat, ai_sub = categorize_with_ai(current_item, menu_str)
 
-                    processed_items.append({
-                        "item": current_item,
-                        "amount": amount,
-                        "type": op_type,
-                        "category": cat_res,
-                        "subcategory": sub_res,
-                        "comment": comment,
-                        "is_known": False
-                    })
+                        valid_cat = ai_cat in type_menu and ai_sub in (type_menu[ai_cat].keys() if isinstance(type_menu[ai_cat], dict) else type_menu[ai_cat])
+                        if valid_cat and ai_sub != "Требует проверки":
+                            cat_res, sub_res = ai_cat, ai_sub
+                        else:
+                            cat_res, sub_res = "Разное", "Требует проверки"
+
+                        processed_items.append({
+                            "item": current_item,
+                            "amount": amount,
+                            "type": op_type,
+                            "category": cat_res,
+                            "subcategory": sub_res,
+                            "comment": comment,
+                            "is_known": False
+                        })
 
             # =========================================================
-            # СЦЕНАРИЙ А: РОВНО 1 ОПЕРАЦИЯ (НЕТ ЛИШНИХ СПИСКОВ ИЗ 1 ПУНКТА!)
+            # СЦЕНАРИЙ А: РОВНО 1 ОПЕРАЦИЯ
             # =========================================================
             if len(processed_items) == 1:
                 single = processed_items[0]
 
-                # 1. Известна в базе -> мгновенная запись без лишних вопросов!
+                # 1. Известна в базе (по синониму, статье или подкатегории) -> мгновенная запись!
                 if single["is_known"]:
                     save_transaction(
                         user_id=internal_uid,
@@ -829,7 +792,7 @@ def handle_transaction(user_id, user_text, state, user_states):
                     )
                     return True
 
-                # 2. Неизвестна, но ИИ подобрал конкретную категорию -> переспрашиваем "Да/Нет"
+                # 2. Неизвестна точно, но ИИ подобрал конкретную категорию -> переспрашиваем "Да/Нет"
                 if single["category"] != "Разное" and single["subcategory"] != "Требует проверки":
                     user_states[user_id] = {
                         "state": "confirm_category",
@@ -848,7 +811,7 @@ def handle_transaction(user_id, user_text, state, user_states):
                     )
                     return True
 
-                # 3. Полностью неизвестная статья -> сразу просим подсказать категорию!
+                # 3. Полностью неизвестная статья -> начинаем цикл подсказок (попытка 1 из 3)
                 user_states[user_id] = {
                     "state": "provide_context",
                     "payload": single,
@@ -864,7 +827,7 @@ def handle_transaction(user_id, user_text, state, user_states):
                 return True
 
             # =========================================================
-            # СЦЕНАРИЙ Б: НЕСКОЛЬКО ОПЕРАЦИЙ (2 и более) -> СВОДНЫЙ СПИСОК РЕВЬЮ
+            # СЦЕНАРИЙ Б: НЕСКОЛЬКО ОПЕРАЦИЙ (2 и более)
             # =========================================================
             send_vk_message(user_id, f"⚡ Распознаю {len(processed_items)} операций и сопоставляю с базой...")
             user_states[user_id] = {
