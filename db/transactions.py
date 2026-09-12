@@ -12,72 +12,60 @@ def _resolve_internal_user_id(cur, user_id):
 
 def smart_search_item(user_id, item_name, op_type=None):
     """
-    Поиск синонима с регистронезависимостью (LOWER).
-    Объединяет глобальную базу и личные слова пользователя с учетом меток удаления.
+    Умный многоуровневый поиск:
+    1. По синонимам и точным названиям статей (user_dictionary + global_dictionary)
+    2. По названиям подкатегорий и категорий (если пользователь назвал имя группы)
+    3. Нечёткий поиск через pg_trgm (сходство >= 0.65)
     """
     conn = get_db_connection()
     cur = conn.cursor()
     clean_item = item_name.lower().strip()
+    
     try:
         uid = _resolve_internal_user_id(cur, user_id)
-
-        if op_type:
-            combined_source = """
-                SELECT type, category, subcategory, article, LOWER(synonym) AS synonym
-                FROM user_dictionary
-                WHERE user_id = %s AND type = %s AND is_deleted = FALSE
-
-                UNION ALL
-
-                SELECT g.type, g.category, g.subcategory, g.article, LOWER(g.synonym) AS synonym
-                FROM global_dictionary g
-                WHERE g.type = %s
-                  AND NOT EXISTS (
-                      SELECT 1 FROM user_dictionary u
-                      WHERE u.user_id = %s
-                        AND u.type = g.type
-                        AND (
-                            (u.category = g.category AND (u.subcategory = '' OR u.subcategory IS NULL) AND u.is_deleted = TRUE)
-                            OR (u.category = g.category AND u.subcategory = g.subcategory AND (u.article = '' OR u.article IS NULL) AND u.is_deleted = TRUE)
-                            OR (u.category = g.category AND u.subcategory = g.subcategory AND u.article = g.article AND u.is_deleted = TRUE)
-                            OR (LOWER(u.synonym) = LOWER(g.synonym) AND u.is_deleted = TRUE)
-                        )
+        
+        not_deleted_clause = """
+            NOT EXISTS (
+                SELECT 1 FROM user_dictionary u 
+                WHERE u.user_id = %s 
+                  AND u.type = g.type
+                  AND (
+                      (u.category = g.category AND (u.subcategory = '' OR u.subcategory IS NULL) AND u.is_deleted = TRUE)
+                      OR (u.category = g.category AND u.subcategory = g.subcategory AND (u.article = '' OR u.article IS NULL) AND u.is_deleted = TRUE)
+                      OR (u.category = g.category AND u.subcategory = g.subcategory AND u.article = g.article AND u.is_deleted = TRUE)
+                      OR (LOWER(u.synonym) = LOWER(g.synonym) AND u.is_deleted = TRUE)
                   )
-            """
-            exact_params = (uid, op_type, op_type, uid, clean_item)
-            fuzzy_params = (clean_item, uid, op_type, op_type, uid, clean_item)
+            )
+        """
+        
+        type_filter_user = "AND type = %s" if op_type else ""
+        type_filter_global = "AND g.type = %s" if op_type else ""
+        
+        combined_source = f"""
+            SELECT type, category, subcategory, article, LOWER(synonym) AS syn, LOWER(article) AS art_low
+            FROM user_dictionary
+            WHERE user_id = %s AND is_deleted = FALSE {type_filter_user}
+            UNION ALL
+            SELECT g.type, g.category, g.subcategory, g.article, LOWER(g.synonym) AS syn, LOWER(g.article) AS art_low
+            FROM global_dictionary g
+            WHERE is_default = TRUE {type_filter_global} AND {not_deleted_clause}
+        """
+        
+        if op_type:
+            base_params = (uid, op_type, op_type, uid)
         else:
-            combined_source = """
-                SELECT type, category, subcategory, article, LOWER(synonym) AS synonym
-                FROM user_dictionary
-                WHERE user_id = %s AND is_deleted = FALSE
-
-                UNION ALL
-
-                SELECT g.type, g.category, g.subcategory, g.article, LOWER(g.synonym) AS synonym
-                FROM global_dictionary g
-                WHERE NOT EXISTS (
-                    SELECT 1 FROM user_dictionary u
-                    WHERE u.user_id = %s
-                      AND u.type = g.type
-                      AND (
-                          (u.category = g.category AND (u.subcategory = '' OR u.subcategory IS NULL) AND u.is_deleted = TRUE)
-                          OR (u.category = g.category AND u.subcategory = g.subcategory AND (u.article = '' OR u.article IS NULL) AND u.is_deleted = TRUE)
-                          OR (u.category = g.category AND u.subcategory = g.subcategory AND u.article = g.article AND u.is_deleted = TRUE)
-                          OR (LOWER(u.synonym) = LOWER(g.synonym) AND u.is_deleted = TRUE)
-                      )
-                )
-            """
-            exact_params = (uid, uid, clean_item)
-            fuzzy_params = (clean_item, uid, uid, clean_item)
-
+            base_params = (uid, uid)
+            
+        # -------------------------------------------------------------
+        # ШАГ 1: ТОЧНЫЙ ПОИСК ПО СИНОНИМАМ И НАЗВАНИЯМ СТАТЕЙ
+        # -------------------------------------------------------------
         exact_query = f"""
             SELECT type, category, subcategory, article
             FROM ({combined_source}) AS combined
-            WHERE synonym = %s
+            WHERE syn = %s OR art_low = %s
             LIMIT 1;
         """
-        cur.execute(exact_query, exact_params)
+        cur.execute(exact_query, base_params + (clean_item, clean_item))
         exact_match = cur.fetchone()
         if exact_match:
             return {
@@ -88,24 +76,56 @@ def smart_search_item(user_id, item_name, op_type=None):
                 "article": exact_match[3]
             }
 
-        fuzzy_query = f"""
-            SELECT type, category, subcategory, article, synonym, 
-                   1 - (synonym <-> %s) AS similarity_score
+        # -------------------------------------------------------------
+        # ШАГ 2: ПРОВЕРКА ПО НАЗВАНИЯМ ПОДКАТЕГОРИЙ И КАТЕГОРИЙ
+        # (Например: "Интернет и связь", "Транспорт", "Фастфуд")
+        # -------------------------------------------------------------
+        group_query = f"""
+            SELECT type, category, subcategory, article
             FROM ({combined_source}) AS combined
-            ORDER BY synonym <-> %s
+            WHERE LOWER(subcategory) = %s OR LOWER(category) = %s
+            ORDER BY 
+                CASE 
+                    WHEN LOWER(subcategory) = %s THEN 1 
+                    WHEN LOWER(category) = %s THEN 2 
+                    ELSE 3 
+                END
             LIMIT 1;
         """
-        cur.execute(fuzzy_query, fuzzy_params)
-        result = cur.fetchone()
-        if result and result[5] >= 0.7:
+        cur.execute(group_query, base_params + (clean_item, clean_item, clean_item, clean_item))
+        group_match = cur.fetchone()
+        if group_match:
             return {
                 "status": "FOUND",
-                "type": result[0],
-                "category": result[1],
-                "subcategory": result[2],
-                "article": result[3]
+                "type": group_match[0],
+                "category": group_match[1],
+                "subcategory": group_match[2],
+                "article": item_name.strip()
             }
 
+        # -------------------------------------------------------------
+        # ШАГ 3: НЕЧЁТКИЙ ПОИСК (PG_TRGM) ПО СИНОНИМАМ И СТАТЬЯМ
+        # -------------------------------------------------------------
+        fuzzy_query = f"""
+            SELECT type, category, subcategory, article, syn, 1 - (syn <-> %s) AS similarity_score
+            FROM ({combined_source}) AS combined
+            ORDER BY syn <-> %s
+            LIMIT 1;
+        """
+        cur.execute(fuzzy_query, (clean_item,) + base_params + (clean_item,))
+        fuzzy_result = cur.fetchone()
+        if fuzzy_result and fuzzy_result[5] is not None and fuzzy_result[5] >= 0.65:
+            return {
+                "status": "FOUND",
+                "type": fuzzy_result[0],
+                "category": fuzzy_result[1],
+                "subcategory": fuzzy_result[2],
+                "article": fuzzy_result[3]
+            }
+
+        return {"status": "NOT_FOUND"}
+    except Exception as e:
+        print(f"Ошибка в smart_search_item: {e}")
         return {"status": "NOT_FOUND"}
     finally:
         cur.close()
@@ -161,7 +181,6 @@ def get_full_menu(user_id):
     menu = {"Расход": {}, "Доход": {}}
     try:
         uid = _resolve_internal_user_id(cur, user_id)
-
         query = """
             SELECT g.type, g.category, g.subcategory, g.article
             FROM global_dictionary g
@@ -207,8 +226,8 @@ def get_unverified_transactions(user_id):
             JOIN users u ON u.id = t.user_id
             WHERE (u.id = %s OR u.vk_id = %s)
               AND (
-                  t.status = 'needs_review' 
-                  OR LOWER(t.subcategory) = 'требует проверки' 
+                  t.status = 'needs_review'
+                  OR LOWER(t.subcategory) = 'требует проверки'
                   OR LOWER(t.category) = 'разное'
               )
             ORDER BY t.id DESC;
@@ -236,13 +255,13 @@ def get_unreviewed_count(user_id):
     cur = conn.cursor()
     try:
         cur.execute("""
-            SELECT COUNT(*) 
+            SELECT COUNT(*)
             FROM transactions t
             JOIN users u ON u.id = t.user_id
             WHERE (u.id = %s OR u.vk_id = %s)
               AND (
-                  t.status = 'needs_review' 
-                  OR LOWER(t.subcategory) = 'требует проверки' 
+                  t.status = 'needs_review'
+                  OR LOWER(t.subcategory) = 'требует проверки'
                   OR LOWER(t.category) = 'разное'
               );
         """, (user_id, user_id))
@@ -264,16 +283,15 @@ def resolve_unverified_item(user_id, original_item, op_type, category, subcatego
             UPDATE transactions
             SET category = %s, subcategory = %s, article = %s, status = 'verified'
             WHERE user_id IN (SELECT id FROM users WHERE id = %s OR vk_id = %s)
-              AND original_text = %s 
+              AND original_text = %s
               AND (
-                  status = 'needs_review' 
-                  OR LOWER(subcategory) = 'требует проверки' 
+                  status = 'needs_review'
+                  OR LOWER(subcategory) = 'требует проверки'
                   OR LOWER(category) = 'разное'
               );
         """, (category, subcategory, original_item, user_id, user_id, original_item))
         updated_count = cur.rowcount
         conn.commit()
-
         learn_user_word(user_id, op_type, category, subcategory, original_item, original_item)
         return updated_count
     except Exception as e:
@@ -291,7 +309,6 @@ def get_user_history(user_id, limit=10, period=None):
     cur = conn.cursor()
     try:
         uid = _resolve_internal_user_id(cur, user_id)
-        
         where_clauses = ["user_id = %s"]
         params = [uid]
 
@@ -305,7 +322,6 @@ def get_user_history(user_id, limit=10, period=None):
             where_clauses.append("operation_date >= CURRENT_DATE - INTERVAL '30 days'")
 
         where_sql = " AND ".join(where_clauses)
-        
         query = f"""
             SELECT id, operation_date, type, category, subcategory, article, amount, comment
             FROM transactions
@@ -443,9 +459,9 @@ def update_transaction_amount(user_id, tx_id, new_amount):
     try:
         uid = _resolve_internal_user_id(cur, user_id)
         cur.execute("""
-            UPDATE transactions 
-            SET amount = %s 
-            WHERE id = %s AND user_id = %s 
+            UPDATE transactions
+            SET amount = %s
+            WHERE id = %s AND user_id = %s
             RETURNING id;
         """, (new_amount, tx_id, uid))
         ok = cur.fetchone() is not None
@@ -466,16 +482,16 @@ def update_transaction_category(user_id, tx_id, category, subcategory, article=N
         uid = _resolve_internal_user_id(cur, user_id)
         if article:
             cur.execute("""
-                UPDATE transactions 
+                UPDATE transactions
                 SET category = %s, subcategory = %s, article = %s, status = 'verified'
-                WHERE id = %s AND user_id = %s 
+                WHERE id = %s AND user_id = %s
                 RETURNING id;
             """, (category, subcategory, article, tx_id, uid))
         else:
             cur.execute("""
-                UPDATE transactions 
+                UPDATE transactions
                 SET category = %s, subcategory = %s, status = 'verified'
-                WHERE id = %s AND user_id = %s 
+                WHERE id = %s AND user_id = %s
                 RETURNING id;
             """, (category, subcategory, tx_id, uid))
         ok = cur.fetchone() is not None
