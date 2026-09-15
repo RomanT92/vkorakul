@@ -36,6 +36,26 @@ from db import (
     update_transaction_category
 )
 
+INCOME_KEYWORDS = [
+    "доход", "приход", "поступление", "поступило", "пополнил", "пополнение",
+    "зарплата", "зп", "аванс", "премия", "подарили", "подарок мне",
+    "вернули долг", "отдали долг", "кэшбэк", "проценты", "дивиденды",
+    "выручка", "оплата от клиента", "зачисление"
+]
+
+def detect_operation_type(user_text="", raw_type="Расход", item_name="", comment=""):
+    """
+    Надежно определяет тип операции:
+    Если есть хоть один признак Дохода -> Доход. Иначе -> Расход.
+    """
+    check_str = f"{user_text} {raw_type} {item_name} {comment}".lower()
+    for kw in INCOME_KEYWORDS:
+        if re.search(r'\b' + re.escape(kw) + r'\b', check_str) or kw in check_str:
+            return "Доход"
+    if str(raw_type).strip().lower() in ["доход", "приход", "income"]:
+        return "Доход"
+    return "Расход"
+
 def find_entity_in_menu(menu, target_name):
     """Поиск сущности любого уровня (категория, подкатегория, статья) по названию."""
     target = target_name.lower().strip()
@@ -66,7 +86,7 @@ def clean_fallback_item(user_text):
     stop_words = ["руб", "рублей", "р", "к", "k", "приход", "доход", "расход", "трата", "купил", "оплатил"]
     words = [w for w in text.split() if w.lower() not in stop_words]
     clean = " ".join(words).strip()
-    return clean if clean else "Трата"
+    return clean if clean else "Операция"
 
 def _clean_json_string(text):
     """Очищает строку от маркдауна ```json ... ``` если ИИ его добавил"""
@@ -118,7 +138,7 @@ def _save_items_batch(internal_uid, items):
     for item in items:
         cat = item.get("category", "Разное")
         sub = item.get("subcategory", "Требует проверки")
-        art = item.get("item", "Трата")
+        art = item.get("item", "Операция")
         amount = float(item.get("amount", 0))
         op_type = item.get("type", "Расход")
         comment = item.get("comment", "")
@@ -411,7 +431,7 @@ def handle_transaction(user_id, user_text, state, user_states):
             del user_states[user_id]
             return True
 
-        elif any(w in user_text_lower for w in ["применить для всех", "применить ко всем"]):
+        elif any(phrase in user_text_lower for phrase in ["применить для всех", "применить ко всем"]):
             last_cat = state_data.get("last_category")
             last_sub = state_data.get("last_subcategory")
             start_idx = state_data.get("last_edit_idx", 0) + 1
@@ -460,7 +480,8 @@ def handle_transaction(user_id, user_text, state, user_states):
         idx = state_data["edit_idx"]
         items = state_data["items"]
         sel_item = items[idx]
-        op_type = sel_item.get("type", "Расход")
+        op_type = detect_operation_type(user_text, sel_item.get("type", "Расход"))
+        sel_item["type"] = op_type
         menu_full = get_full_menu(internal_uid)
 
         db_match = smart_search_item(internal_uid, user_text, op_type=op_type)
@@ -700,10 +721,10 @@ def handle_transaction(user_id, user_text, state, user_states):
                     current_item = clean_fallback_item(user_text)
 
                 amount = float(op.get("amount", 0))
-                op_type = op.get("type", "Расход")
-                if op_type not in ["Расход", "Доход"]:
-                    op_type = "Расход"
                 comment = op.get("comment", "").strip()
+
+                # Надежное определение типа операции: сканируем сырой ввод, ответ ИИ, item и comment
+                op_type = detect_operation_type(user_text, op.get("type", "Расход"), current_item, comment)
 
                 # 1. Полноценный поиск по БД
                 search_res = smart_search_item(internal_uid, current_item, op_type=op_type)
@@ -725,7 +746,7 @@ def handle_transaction(user_id, user_text, state, user_states):
                     processed_items.append({
                         "item": current_item,
                         "amount": amount,
-                        "type": search_res["type"],
+                        "type": search_res.get("type", op_type),
                         "category": search_res["category"],
                         "subcategory": search_res["subcategory"],
                         "comment": comment,
