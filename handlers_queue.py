@@ -45,14 +45,16 @@ def _show_batch_items(user_id, batch, total_left, show_apply_all=False):
     msg = f"📋 Пакет операций (осталось распределить: {total_left + len(batch)}):\n\n"
     for i, item in enumerate(batch):
         amt_str = _format_amt(item['amount'])
+        cat = item.get('category', '?')
+        sub = item.get('subcategory', '?')
         msg += f"{i+1}. {item['original_item']} ({item['count']} шт., ~{amt_str} руб.)\n"
-        msg += f"   📂 {item.get('category', '?')} -> {item.get('subcategory', '?')}\n\n"
+        msg += f"   📂 {cat} -> {sub}\n\n"
 
     msg += "👉 Если всё верно — жмите «💾 Сохранить пакет».\n"
     msg += "👉 Если здесь мусор (заголовки выписки) — скажите «Всё в мусор», «Удали 2 и 3» или нажмите «🗑 Удалить мусор».\n"
     if show_apply_all:
         msg += "👉 Нажмите «⚡ Применить для всех оставшихся», чтобы продублировать категорию.\n"
-    msg += "👉 Для изменения категории — отправьте НОМЕР позиции."
+    msg += "👉 Для изменения категории — отправьте НОМЕР позиции или скажите (например: «это всё подарок»)."
     send_vk_message(user_id, msg, get_queue_review_keyboard(len(batch), show_apply_all=show_apply_all, show_back=True))
 
 def _process_next_batch(user_id, user_states):
@@ -67,7 +69,8 @@ def _process_next_batch(user_id, user_states):
     filtered_queue = []
     for item in queue:
         match = smart_search_item(internal_uid, item["original_item"], op_type=item.get("type"))
-        if match["status"] == "FOUND" and match["category"] != "Разное":
+        # Если слово уже имеет точную подкатегорию — мгновенно разрешаем без лишних вопросов!
+        if match["status"] == "FOUND" and match.get("subcategory") not in ["Требует проверки", ""]:
             resolve_unverified_item(internal_uid, item["original_item"], match["type"], match["category"], match["subcategory"])
         else:
             filtered_queue.append(item)
@@ -184,23 +187,24 @@ def handle_queue_and_learning(user_id, user_text, user_text_lower, state, user_s
         state_data = user_states[user_id]
         batch = state_data.get("current_batch", [])
 
-        # Если пакет пуст — сразу переходим к следующему
         if not batch:
             _process_next_batch(user_id, user_states)
             return True
 
-        # --- СОХРАНЕНИЕ ПАКЕТА (включая "Да") ---
-        if any(w in user_text_lower for w in ["сохранить пакет", "сохранить", "готово", "ок", "+", "да", "верно"]):
+        # СТРОГАЯ ПРОВЕРКА НА СОХРАНЕНИЕ ПАКЕТА (только явные команды сохранения)
+        save_triggers = ["сохранить пакет", "сохрани пакет", "сохранить", "готово", "сохрани"]
+        if any(trig == user_text_lower or user_text_lower.startswith("сохранить") for trig in save_triggers):
             send_vk_message(user_id, "⏳ Сохраняю и каскадно обновляю базу...", get_cancel_keyboard(show_back=False))
             saved_count = 0
             for item in batch:
-                if item.get("category") != "Разное":
+                # ВАЖНО: сохраняем, если подкатегория НЕ "Требует проверки"
+                if item.get("subcategory") != "Требует проверки":
                     resolve_unverified_item(
                         user_id=internal_uid,
                         original_item=item["original_item"],
-                        op_type=item["type"],
-                        category=item["category"],
-                        subcategory=item["subcategory"]
+                        op_type=item.get("type", "Расход"),
+                        category=item.get("category", "Другое"),
+                        subcategory=item.get("subcategory", "Другое")
                     )
                     saved_count += 1
             send_vk_message(user_id, f"✅ Успешно распределено {saved_count} статей!")
@@ -211,7 +215,7 @@ def handle_queue_and_learning(user_id, user_text, user_text_lower, state, user_s
         all_trash_triggers = [
             "все эти операции в мусор", "все в мусор", "всё в мусор", "в мусор всё",
             "в мусор все", "это всё мусор", "это все мусор", "в корзину все", "в корзину всё",
-            "удали всё", "удали все", "стереть всё", "очисти пакет", "удалить все эти", "всё в корзину", "все в корзину"
+            "удали всё", "удали все", "стереть всё", "очисти пакет", "всё в корзину", "все в корзину"
         ]
         if any(trig in user_text_lower for trig in all_trash_triggers):
             user_states[user_id]["state"] = "confirm_delete_all_batch_trash"
@@ -388,53 +392,13 @@ def handle_queue_and_learning(user_id, user_text, user_text_lower, state, user_s
         idx = state_data["edit_idx"]
         batch = state_data["current_batch"]
         sel_item = batch[idx]
-        op_type = sel_item.get("type", "Расход")
+        from handlers_voice_commands import _apply_category_to_item
 
-        db_match = smart_search_item(internal_uid, user_text, op_type=op_type)
-        if db_match["status"] != "FOUND":
-            db_match = smart_search_item(internal_uid, user_text, op_type=None)
+        menu_full = get_full_menu(internal_uid)
+        found_cat, found_sub = _apply_category_to_item(internal_uid, sel_item, user_text, menu_full, state)
 
-        if db_match["status"] == "FOUND":
-            ai_cat = db_match["category"]
-            ai_sub = db_match["subcategory"]
-            if db_match.get("type"):
-                sel_item["type"] = db_match["type"]
-        else:
-            menu_full = get_full_menu(internal_uid)
-            u_clean = user_text.lower().strip()
-            found_in_tree = False
-            for m_type in ["Расход", "Доход"]:
-                type_cats = menu_full.get(m_type, {})
-                for m_cat, m_subs in type_cats.items():
-                    if m_cat.lower() == u_clean:
-                        ai_cat = m_cat
-                        sub_keys = list(m_subs.keys()) if isinstance(m_subs, dict) else (m_subs if m_subs else [])
-                        ai_sub = sub_keys[0] if sub_keys else "Разное"
-                        sel_item["type"] = m_type
-                        found_in_tree = True
-                        break
-                    sub_keys = list(m_subs.keys()) if isinstance(m_subs, dict) else (m_subs if m_subs else [])
-                    for s_name in sub_keys:
-                        if s_name.lower() == u_clean:
-                            ai_cat = m_cat
-                            ai_sub = s_name
-                            sel_item["type"] = m_type
-                            found_in_tree = True
-                            break
-                    if found_in_tree:
-                        break
-                if found_in_tree:
-                    break
-
-            if not found_in_tree:
-                send_vk_message(user_id, "🧠 Подбираю категорию с помощью ИИ...", get_cancel_keyboard(show_back=True))
-                menu_str = "\n".join([f"{c}: {', '.join(subs)}" for c, subs in state_data["menu"].items()])
-                ai_cat, ai_sub = categorize_with_ai(sel_item["original_item"], menu_str, context=user_text)
-
-        sel_item["category"] = ai_cat
-        sel_item["subcategory"] = ai_sub
-        state_data["last_category"] = ai_cat
-        state_data["last_subcategory"] = ai_sub
+        state_data["last_category"] = found_cat
+        state_data["last_subcategory"] = found_sub
         state_data["last_edit_idx"] = idx
         state_data["state"] = "queue_batch_review"
         _show_batch_items(user_id, batch, len(state_data["queue"]), show_apply_all=True)
