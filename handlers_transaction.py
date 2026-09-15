@@ -83,7 +83,7 @@ def find_entity_in_menu(menu, target_name):
 def clean_fallback_item(user_text):
     """Вырезает из текста пользователя сумму и служебные слова, оставляя реальное название."""
     text = re.sub(r'\d+([.,]\d+)?', '', user_text).strip()
-    stop_words = ["руб", "рублей", "р", "к", "k", "приход", "доход", "расход", "трата", "купил", "оплатил"]
+    stop_words = ["руб", "рублей", "р", "к", "k", "приход", "доход", "расход", "трата", "купил", "оплатил", "исправь", "измени", "категорию", "сумма", "на"]
     words = [w for w in text.split() if w.lower() not in stop_words]
     clean = " ".join(words).strip()
     return clean if clean else "Операция"
@@ -314,7 +314,6 @@ def handle_transaction(user_id, user_text, state, user_states):
         op_type, is_exp_inc = detect_operation_type(user_text, sel_op.get("type", "Расход"))
         menu_full = get_full_menu(internal_uid)
 
-        # 1. Поиск по БД строго в рамках целевого типа
         db_match = smart_search_item(internal_uid, user_text, op_type=op_type)
         if db_match["status"] != "FOUND" and not is_exp_inc:
             db_match = smart_search_item(internal_uid, user_text, op_type=None)
@@ -324,12 +323,10 @@ def handle_transaction(user_id, user_text, state, user_states):
             target_sub = db_match["subcategory"]
             target_art = db_match["article"]
         else:
-            # 2. Поиск по дереву категорий
             c_tree, s_tree = _match_category_tree(menu_full, op_type, user_text)
             if c_tree and s_tree:
                 target_cat, target_sub, target_art = c_tree, s_tree, sel_op["article"]
             else:
-                # 3. Резерв через ИИ
                 send_vk_message(user_id, "🧠 Подбираю категорию с помощью ИИ...", get_cancel_keyboard(show_back=True))
                 type_menu = menu_full.get(op_type, {})
                 menu_str = f"[{op_type}]\n" + "\n".join([f"{c}: {', '.join(subs.keys() if isinstance(subs, dict) else subs)}" for c, subs in type_menu.items()])
@@ -351,6 +348,38 @@ def handle_transaction(user_id, user_text, state, user_states):
             send_vk_message(user_id, "❌ Не удалось обновить категорию в базе данных.", get_main_keyboard(user_id))
         del user_states[user_id]
         return True
+
+    # =========================================================
+    # ПОДТВЕРЖДЕНИЕ ПРАВКИ ОПЕРАЦИИ (ГОЛОСОВАЯ КОМАНДА "ИСПРАВЬ...")
+    # =========================================================
+    if state == "confirm_voice_edit_tx":
+        state_data = user_states[user_id]
+        tx = state_data["tx"]
+        n_amt = state_data.get("new_amount")
+        n_cat = state_data.get("new_category")
+        n_sub = state_data.get("new_subcategory")
+        n_art = state_data.get("new_article") or tx["article"]
+        n_type = state_data.get("new_type") or tx["type"]
+
+        if any(w in user_text_lower for w in ["да", "верно", "ага", "yes", "+", "измени", "исправь", "сохрани"]):
+            if n_amt is not None and n_amt > 0:
+                update_transaction_amount(internal_uid, tx["id"], n_amt)
+            if n_cat and n_sub:
+                update_transaction_category(internal_uid, tx["id"], n_cat, n_sub, n_art)
+                learn_user_word(internal_uid, n_type, n_cat, n_sub, n_art, n_art)
+                if state_data.get("raw_hint"):
+                    learn_user_word(internal_uid, n_type, n_cat, n_sub, n_art, state_data["raw_hint"])
+
+            send_vk_message(user_id, "✅ Изменения успешно применены к операции!", get_main_keyboard(user_id))
+            del user_states[user_id]
+            return True
+        elif any(w in user_text_lower for w in ["нет", "отмена", "неверно", "не", "назад"]):
+            del user_states[user_id]
+            send_vk_message(user_id, "Изменение отменено. Главное меню.", get_main_keyboard(user_id))
+            return True
+        else:
+            send_vk_message(user_id, "Пожалуйста, подтвердите кнопками «✅ Да» или «❌ Нет».", get_yes_no_keyboard(show_back=True))
+            return True
 
     # =========================================================
     # ВЫБОР НОМЕРА ОПЕРАЦИИ ИЗ СПИСКА ИСТОРИИ
@@ -527,6 +556,90 @@ def handle_transaction(user_id, user_text, state, user_states):
                 parsed_data = {"operations": parsed_data}
 
             action = parsed_data.get("action")
+
+            # ---------------------------------------------------------
+            # 0. ГОЛОСОВОЕ/ТЕКСТОВОЕ ИСПРАВЛЕНИЕ ОПЕРАЦИИ (EDIT_TX)
+            # ---------------------------------------------------------
+            if action == "edit_tx":
+                target = parsed_data.get("target", "last")
+                new_amt = parsed_data.get("new_amount")
+                cat_hint = parsed_data.get("new_category_hint")
+                new_type = parsed_data.get("new_type")
+                new_item_name = parsed_data.get("new_item_name")
+
+                # Находим нужную операцию
+                tx_to_edit = None
+                if target == "last" or not target:
+                    tx_to_edit = get_last_transaction(internal_uid)
+                elif isinstance(target, int) or (isinstance(target, str) and target.isdigit()):
+                    idx = int(target)
+                    hist = get_user_history(internal_uid, limit=max(idx, 10))
+                    if 0 < idx <= len(hist["items"]):
+                        tx_to_edit = hist["items"][idx - 1]
+                else:
+                    # Поиск по названию
+                    hist = get_user_history(internal_uid, limit=30)
+                    for item in hist["items"]:
+                        if str(target).lower().strip() in item["article"].lower():
+                            tx_to_edit = item
+                            break
+
+                if not tx_to_edit:
+                    send_vk_message(user_id, "📭 Не удалось найти операцию для исправления.", get_main_keyboard(user_id))
+                    return True
+
+                op_type = new_type or tx_to_edit["type"]
+                final_cat = tx_to_edit["category"]
+                final_sub = tx_to_edit["subcategory"]
+                final_art = new_item_name or tx_to_edit["article"]
+
+                if cat_hint:
+                    menu_full = get_full_menu(internal_uid)
+                    db_m = smart_search_item(internal_uid, cat_hint, op_type=op_type)
+                    if db_m["status"] != "FOUND":
+                        db_m = smart_search_item(internal_uid, cat_hint, op_type=None)
+
+                    if db_m["status"] == "FOUND":
+                        final_cat = db_m["category"]
+                        final_sub = db_m["subcategory"]
+                    else:
+                        c_t, s_t = _match_category_tree(menu_full, op_type, cat_hint)
+                        if c_t and s_t:
+                            final_cat, final_sub = c_t, s_t
+                        else:
+                            type_menu = menu_full.get(op_type, {})
+                            menu_str = f"[{op_type}]\n" + "\n".join([f"{c}: {', '.join(subs.keys() if isinstance(subs, dict) else subs)}" for c, subs in type_menu.items()])
+                            ai_c, ai_s = categorize_with_ai(final_art, menu_str, context=cat_hint)
+                            final_cat, final_sub = ai_c, ai_s
+
+                # Собираем красивую карточку изменений
+                old_amt_str = f"{tx_to_edit['amount']:g} руб."
+                new_amt_val = float(new_amt) if new_amt else tx_to_edit["amount"]
+                new_amt_str = f"{new_amt_val:g} руб."
+
+                msg = (
+                    f"✏️ **Подтвердите исправление операции:**\n\n"
+                    f"• Статья: «{tx_to_edit['article']}»" + (f" ➔ «{final_art}»" if final_art != tx_to_edit['article'] else "") + "\n"
+                    f"• Сумма: {old_amt_str}" + (f" ➔ **{new_amt_str}**" if new_amt and new_amt_val != tx_to_edit['amount'] else "") + "\n"
+                    f"• Категория: {tx_to_edit['category']} -> {tx_to_edit['subcategory']}"
+                )
+                if cat_hint:
+                    msg += f"\n  ➔ **{final_cat} -> {final_sub}**"
+
+                msg += "\n\nПрименить изменения?"
+
+                user_states[user_id] = {
+                    "state": "confirm_voice_edit_tx",
+                    "tx": tx_to_edit,
+                    "new_amount": new_amt_val if new_amt else None,
+                    "new_category": final_cat if cat_hint else None,
+                    "new_subcategory": final_sub if cat_hint else None,
+                    "new_article": final_art if new_item_name else None,
+                    "new_type": op_type,
+                    "raw_hint": cat_hint
+                }
+                send_vk_message(user_id, msg, get_yes_no_keyboard(show_back=True))
+                return True
 
             # 1. ПРОСМОТР ИСТОРИИ
             if action == "show_history":
@@ -721,16 +834,12 @@ def handle_transaction(user_id, user_text, state, user_states):
                 amount = float(op.get("amount", 0))
                 comment = op.get("comment", "").strip()
 
-                # Надежное определение типа операции:
                 op_type, is_explicit_income = detect_operation_type(user_text, op.get("type", "Расход"), current_item, comment)
 
-                # 1. Полноценный поиск по БД:
-                # Если явно указан ДОХОД — ищем ТОЛЬКО в Доходах! В Расходы не подглядываем!
                 search_res = smart_search_item(internal_uid, current_item, op_type=op_type)
                 if search_res["status"] != "FOUND" and not is_explicit_income:
                     search_res = smart_search_item(internal_uid, current_item, op_type=None)
 
-                # Поиск по фразе вместе с комментарием
                 if search_res["status"] != "FOUND" and comment:
                     full_phrase = f"{current_item} {comment}".strip()
                     phrase_res = smart_search_item(internal_uid, full_phrase, op_type=op_type)
@@ -741,7 +850,6 @@ def handle_transaction(user_id, user_text, state, user_states):
                         current_item = full_phrase
                         comment = ""
 
-                # КРИТИЧЕСКАЯ ЗАЩИТА: Если пользователь сказал "Доход", результат поиска не может быть "Расход"
                 if search_res["status"] == "FOUND":
                     if is_explicit_income and search_res.get("type") == "Расход":
                         search_res = {"status": "NOT_FOUND"}
@@ -757,7 +865,6 @@ def handle_transaction(user_id, user_text, state, user_states):
                         "is_known": True
                     })
                 else:
-                    # 2. Локальный поиск по дереву категорий и подкатегорий (строго в op_type)
                     c_tree, s_tree = _match_category_tree(menu_full, op_type, current_item)
                     if c_tree and s_tree:
                         processed_items.append({
@@ -770,7 +877,6 @@ def handle_transaction(user_id, user_text, state, user_states):
                             "is_known": True
                         })
                     else:
-                        # 3. Резервный подбор ИИ строго по меню выбранного типа (op_type)
                         type_menu = menu_full.get(op_type, {})
                         menu_str = f"[{op_type}]\n" + "\n".join([f"{c}: {', '.join(subs.keys() if isinstance(subs, dict) else subs)}" for c, subs in type_menu.items()])
                         ai_cat, ai_sub = categorize_with_ai(current_item, menu_str)
@@ -797,7 +903,6 @@ def handle_transaction(user_id, user_text, state, user_states):
             if len(processed_items) == 1:
                 single = processed_items[0]
 
-                # 1. Известна в базе -> мгновенная запись
                 if single["is_known"]:
                     save_transaction(
                         user_id=internal_uid,
@@ -817,7 +922,6 @@ def handle_transaction(user_id, user_text, state, user_states):
                     )
                     return True
 
-                # 2. Неизвестна точно, но ИИ подобрал категорию -> переспрашиваем "Да/Нет"
                 if single["category"] != "Разное" and single["subcategory"] != "Требует проверки":
                     user_states[user_id] = {
                         "state": "confirm_category",
@@ -836,7 +940,6 @@ def handle_transaction(user_id, user_text, state, user_states):
                     )
                     return True
 
-                # 3. Полностью неизвестная статья -> начинаем цикл подсказок (попытка 1 из 3)
                 user_states[user_id] = {
                     "state": "provide_context",
                     "payload": single,
