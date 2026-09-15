@@ -26,9 +26,7 @@ def smart_search_item(user_id, item_name, op_type=None):
     try:
         uid = _resolve_internal_user_id(cur, user_id)
         
-        # -------------------------------------------------------------
         # 1. АБСОЛЮТНЫЙ ПРИОРИТЕТ: ЛИЧНЫЙ СЛОВАРЬ ПОЛЬЗОВАТЕЛЯ
-        # -------------------------------------------------------------
         if clean_type:
             user_sql = """
                 SELECT type, category, subcategory, article
@@ -63,9 +61,7 @@ def smart_search_item(user_id, item_name, op_type=None):
                 "article": user_match[3].strip()
             }
 
-        # -------------------------------------------------------------
-        # 2. ГЛОБАЛЬНЫЙ ЭТАЛОН (если слово НЕ переопределено и НЕ удалено)
-        # -------------------------------------------------------------
+        # 2. ГЛОБАЛЬНЫЙ ЭТАЛОН
         type_clause_global = "AND LOWER(TRIM(g.type)) = %s" if clean_type else ""
         
         global_sql = f"""
@@ -110,9 +106,7 @@ def smart_search_item(user_id, item_name, op_type=None):
                 "article": global_match[3].strip()
             }
 
-        # -------------------------------------------------------------
         # 3. ПРОВЕРКА ПО ИМЕНАМ ПОДКАТЕГОРИЙ И КАТЕГОРИЙ
-        # -------------------------------------------------------------
         group_sql = f"""
             SELECT type, category, subcategory, article
             FROM (
@@ -145,9 +139,7 @@ def smart_search_item(user_id, item_name, op_type=None):
                 "article": item_name.strip()
             }
 
-        # -------------------------------------------------------------
         # 4. НЕЧЁТКИЙ ТРИГРАММНЫЙ ПОИСК (pg_trgm)
-        # -------------------------------------------------------------
         fuzzy_sql = f"""
             SELECT type, category, subcategory, article, synonym, 1 - (synonym <-> %s) AS similarity_score
             FROM (
@@ -266,21 +258,22 @@ def get_full_menu(user_id):
         conn.close()
 
 def get_unverified_transactions(user_id):
+    """Возвращает сгруппированные нераспознанные операции."""
     conn = get_db_connection()
     cur = conn.cursor()
     try:
+        uid = _resolve_internal_user_id(cur, user_id)
         cur.execute("""
             SELECT t.id, t.type, t.original_text, t.amount, t.comment
             FROM transactions t
-            JOIN users u ON u.id = t.user_id
-            WHERE (u.id = %s OR u.vk_id = %s)
+            WHERE t.user_id = %s
               AND (
                   t.status = 'needs_review'
                   OR LOWER(t.subcategory) = 'требует проверки'
                   OR LOWER(t.category) = 'разное'
               )
             ORDER BY t.id DESC;
-        """, (user_id, user_id))
+        """, (uid,))
         rows = cur.fetchall()
         result = []
         for r in rows:
@@ -297,22 +290,23 @@ def get_unverified_transactions(user_id):
         conn.close()
 
 def get_unreviewed_count(user_id):
+    """Счетчик неразобранных операций для кнопки."""
     if not user_id:
         return 0
     conn = get_db_connection()
     cur = conn.cursor()
     try:
+        uid = _resolve_internal_user_id(cur, user_id)
         cur.execute("""
             SELECT COUNT(*)
             FROM transactions t
-            JOIN users u ON u.id = t.user_id
-            WHERE (u.id = %s OR u.vk_id = %s)
+            WHERE t.user_id = %s
               AND (
                   t.status = 'needs_review'
                   OR LOWER(t.subcategory) = 'требует проверки'
                   OR LOWER(t.category) = 'разное'
               );
-        """, (user_id, user_id))
+        """, (uid,))
         res = cur.fetchone()
         return res[0] if res else 0
     except Exception as e:
@@ -323,26 +317,100 @@ def get_unreviewed_count(user_id):
         conn.close()
 
 def resolve_unverified_item(user_id, original_item, op_type, category, subcategory):
+    """
+    Подтверждает операцию, обучает личный словарь и МГНОВЕННО каскадно
+    обновляет ВСЕ транзакции с таким текстом у этого пользователя!
+    """
     conn = get_db_connection()
     cur = conn.cursor()
     try:
+        uid = _resolve_internal_user_id(cur, user_id)
+        clean_text = original_item.strip()
+        
+        # Обновляем абсолютно все совпадения по тексту у этого пользователя
         cur.execute("""
             UPDATE transactions
-            SET category = %s, subcategory = %s, article = %s, status = 'verified'
-            WHERE user_id IN (SELECT id FROM users WHERE id = %s OR vk_id = %s)
-              AND original_text = %s
+            SET category = %s, subcategory = %s, article = %s, type = %s, status = 'verified'
+            WHERE user_id = %s
+              AND LOWER(TRIM(original_text)) = LOWER(TRIM(%s))
               AND (
                   status = 'needs_review'
                   OR LOWER(subcategory) = 'требует проверки'
                   OR LOWER(category) = 'разное'
               );
-        """, (category, subcategory, original_item, user_id, user_id, original_item))
+        """, (category, subcategory, clean_text, op_type, uid, clean_text))
         updated_count = cur.rowcount
         conn.commit()
-        learn_user_word(user_id, op_type, category, subcategory, original_item, original_item)
+        
+        # Обучаем словарь
+        learn_user_word(uid, op_type, category, subcategory, clean_text, clean_text)
         return updated_count
     except Exception as e:
         print(f"Ошибка разрешения завалов: {e}")
+        return 0
+    finally:
+        cur.close()
+        conn.close()
+
+def delete_unverified_by_text(user_id, original_item, op_type=None):
+    """
+    Удаляет ВСЕ транзакции с данным текстом (мусорные заголовки выписок)
+    и заносит слово в теневой фильтр (is_deleted = TRUE), чтобы не появлялось вновь.
+    """
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        uid = _resolve_internal_user_id(cur, user_id)
+        clean_text = original_item.strip()
+        
+        # 1. Удаляем все транзакции с этим текстом у пользователя
+        cur.execute("""
+            DELETE FROM transactions
+            WHERE user_id = %s
+              AND LOWER(TRIM(original_text)) = LOWER(TRIM(%s));
+        """, (uid, clean_text))
+        deleted_count = cur.rowcount
+        
+        # 2. Помечаем как удаленное в словаре пользователя (черный список)
+        target_types = [op_type] if op_type else ["Расход", "Доход"]
+        for t in target_types:
+            cur.execute("""
+                INSERT INTO user_dictionary (user_id, type, category, subcategory, article, synonym, is_deleted)
+                VALUES (%s, %s, 'Мусор', 'Мусор', %s, %s, TRUE)
+                ON CONFLICT (user_id, type, category, subcategory, article, synonym)
+                DO UPDATE SET is_deleted = TRUE;
+            """, (uid, t, clean_text, clean_text.lower()))
+            
+        conn.commit()
+        return deleted_count
+    except Exception as e:
+        print(f"Ошибка удаления мусора из завалов: {e}")
+        return 0
+    finally:
+        cur.close()
+        conn.close()
+
+def skip_unverified_by_text(user_id, original_item):
+    """
+    Пропускает нераспознанную операцию (помечает как skipped, исключая из очереди разбора).
+    """
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        uid = _resolve_internal_user_id(cur, user_id)
+        clean_text = original_item.strip()
+        cur.execute("""
+            UPDATE transactions
+            SET status = 'skipped'
+            WHERE user_id = %s
+              AND LOWER(TRIM(original_text)) = LOWER(TRIM(%s))
+              AND status = 'needs_review';
+        """, (uid, clean_text))
+        updated_count = cur.rowcount
+        conn.commit()
+        return updated_count
+    except Exception as e:
+        print(f"Ошибка пропуска операции: {e}")
         return 0
     finally:
         cur.close()
