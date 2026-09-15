@@ -14,7 +14,6 @@ from handlers_queue import handle_queue_and_learning
 from handlers_receipt import handle_receipt
 from handlers_transaction import handle_transaction
 from handlers_voice_commands import handle_list_voice_commands
-from handlers_analytics import handle_analytics
 from db import (
     get_or_create_user,
     import_parsed_operations,
@@ -199,9 +198,6 @@ for event in longpoll.listen():
         # ==============================================================
         # 3. МАРШРУТИЗАЦИЯ (STATE MACHINE / РОУТЕР)
         # ==============================================================
-        if handle_analytics(user_id, user_text_lower):
-            continue
-
         if handle_list_voice_commands(user_id, user_text, user_text_lower, state, user_states):
             continue
 
