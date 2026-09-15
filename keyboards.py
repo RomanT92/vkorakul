@@ -141,7 +141,7 @@ def get_receipt_review_keyboard(count, show_back=True):
 
 def get_queue_review_keyboard(count, show_apply_all=False, show_back=True):
     """
-    Клавиатура разбора операций с поддержкой выбора номеров, сохранения и управления мусором.
+    Клавиатура очереди разбора с кнопками: Сохранить пакет, Удалить мусор, Всё в мусор.
     """
     keyboard = VkKeyboard(one_time=False)
     limit = min(count, 36)
@@ -154,7 +154,9 @@ def get_queue_review_keyboard(count, show_apply_all=False, show_back=True):
         keyboard.add_button('⚡ Применить для всех оставшихся', color=VkKeyboardColor.PRIMARY)
         keyboard.add_line()
     keyboard.add_button('💾 Сохранить пакет', color=VkKeyboardColor.POSITIVE)
+    keyboard.add_line()
     keyboard.add_button('🗑 Удалить мусор', color=VkKeyboardColor.NEGATIVE)
+    keyboard.add_button('💥 Всё в мусор', color=VkKeyboardColor.NEGATIVE)
     keyboard.add_line()
     if show_back:
         keyboard.add_button('🔙 Назад', color=VkKeyboardColor.NEGATIVE)
