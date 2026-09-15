@@ -83,7 +83,7 @@ def find_entity_in_menu(menu, target_name):
 def clean_fallback_item(user_text):
     """Вырезает из текста пользователя сумму и служебные слова, оставляя реальное название."""
     text = re.sub(r'\d+([.,]\d+)?', '', user_text).strip()
-    stop_words = ["руб", "рублей", "р", "к", "k", "приход", "доход", "расход", "трата", "купил", "оплатил", "исправь", "измени", "категорию", "сумма", "на"]
+    stop_words = ["руб", "рублей", "р", "к", "k", "приход", "доход", "расход", "трата", "купил", "оплатил", "исправь", "измени", "категорию", "подкатегорию", "сумма", "на"]
     words = [w for w in text.split() if w.lower() not in stop_words]
     clean = " ".join(words).strip()
     return clean if clean else "Операция"
@@ -268,12 +268,12 @@ def handle_transaction(user_id, user_text, state, user_states):
                 get_cancel_keyboard(show_back=True)
             )
             return True
-        elif "категорию" in user_text_lower:
+        elif "категорию" in user_text_lower or "подкатегорию" in user_text_lower:
             user_states[user_id]["state"] = "history_edit_category"
             send_vk_message(
                 user_id,
                 f"📂 Текущая категория: {sel_op['category']} -> {sel_op['subcategory']}\n"
-                f"Напишите или надиктуйте правильную категорию или статью (например: «Кафе» или «Продукты»):",
+                f"Напишите или надиктуйте правильную категорию или подкатегорию (например: «Мелкая электроника» или «Продукты»):",
                 get_cancel_keyboard(show_back=True)
             )
             return True
@@ -307,12 +307,15 @@ def handle_transaction(user_id, user_text, state, user_states):
             return True
 
     # =========================================================
-    # ВВОД НОВОЙ КАТЕГОРИИ ДЛЯ ОПЕРАЦИИ
+    # ВВОД НОВОЙ КАТЕГОРИИ ДЛЯ ОПЕРАЦИИ (БЕРЕЖНО К НАЗВАНИЮ СТАТЬИ)
     # =========================================================
     if state == "history_edit_category":
         sel_op = user_states[user_id].get("sel_op")
         op_type, is_exp_inc = detect_operation_type(user_text, sel_op.get("type", "Расход"))
         menu_full = get_full_menu(internal_uid)
+
+        # Сохраняем реальное название статьи
+        original_article = sel_op["article"]
 
         db_match = smart_search_item(internal_uid, user_text, op_type=op_type)
         if db_match["status"] != "FOUND" and not is_exp_inc:
@@ -321,26 +324,26 @@ def handle_transaction(user_id, user_text, state, user_states):
         if db_match["status"] == "FOUND":
             target_cat = db_match["category"]
             target_sub = db_match["subcategory"]
-            target_art = db_match["article"]
         else:
             c_tree, s_tree = _match_category_tree(menu_full, op_type, user_text)
             if c_tree and s_tree:
-                target_cat, target_sub, target_art = c_tree, s_tree, sel_op["article"]
+                target_cat, target_sub = c_tree, s_tree
             else:
                 send_vk_message(user_id, "🧠 Подбираю категорию с помощью ИИ...", get_cancel_keyboard(show_back=True))
                 type_menu = menu_full.get(op_type, {})
                 menu_str = f"[{op_type}]\n" + "\n".join([f"{c}: {', '.join(subs.keys() if isinstance(subs, dict) else subs)}" for c, subs in type_menu.items()])
-                ai_cat, ai_sub = categorize_with_ai(sel_op["article"], menu_str, context=user_text)
-                target_cat, target_sub, target_art = ai_cat, ai_sub, sel_op["article"]
+                ai_cat, ai_sub = categorize_with_ai(original_article, menu_str, context=user_text)
+                target_cat, target_sub = ai_cat, ai_sub
 
-        ok = update_transaction_category(internal_uid, sel_op["id"], target_cat, target_sub, target_art)
+        ok = update_transaction_category(internal_uid, sel_op["id"], target_cat, target_sub, original_article)
         if ok:
             if target_cat != "Разное" and target_sub != "Требует проверки":
-                learn_user_word(internal_uid, op_type, target_cat, target_sub, target_art, user_text)
-                learn_user_word(internal_uid, op_type, target_cat, target_sub, target_art, target_art)
+                # Обучаем личный словарь привязке исходной статьи к новой категории!
+                learn_user_word(internal_uid, op_type, target_cat, target_sub, original_article, original_article)
+                learn_user_word(internal_uid, op_type, target_cat, target_sub, original_article, user_text)
             send_vk_message(
                 user_id,
-                f"✅ Категория операции «{target_art}» успешно изменена:\n"
+                f"✅ Категория операции «{original_article}» успешно изменена:\n"
                 f"📂 {target_cat} -> {target_sub}",
                 get_main_keyboard(user_id)
             )
@@ -370,7 +373,7 @@ def handle_transaction(user_id, user_text, state, user_states):
                 if state_data.get("raw_hint"):
                     learn_user_word(internal_uid, n_type, n_cat, n_sub, n_art, state_data["raw_hint"])
 
-            send_vk_message(user_id, "✅ Изменения успешно применены к операции!", get_main_keyboard(user_id))
+            send_vk_message(user_id, f"✅ Изменения сохранены!\n«{n_art}» теперь относится к:\n📂 {n_cat} -> {n_sub}", get_main_keyboard(user_id))
             del user_states[user_id]
             return True
         elif any(w in user_text_lower for w in ["нет", "отмена", "неверно", "не", "назад"]):
@@ -567,7 +570,6 @@ def handle_transaction(user_id, user_text, state, user_states):
                 new_type = parsed_data.get("new_type")
                 new_item_name = parsed_data.get("new_item_name")
 
-                # Находим нужную операцию
                 tx_to_edit = None
                 if target == "last" or not target:
                     tx_to_edit = get_last_transaction(internal_uid)
@@ -577,7 +579,6 @@ def handle_transaction(user_id, user_text, state, user_states):
                     if 0 < idx <= len(hist["items"]):
                         tx_to_edit = hist["items"][idx - 1]
                 else:
-                    # Поиск по названию
                     hist = get_user_history(internal_uid, limit=30)
                     for item in hist["items"]:
                         if str(target).lower().strip() in item["article"].lower():
@@ -612,7 +613,6 @@ def handle_transaction(user_id, user_text, state, user_states):
                             ai_c, ai_s = categorize_with_ai(final_art, menu_str, context=cat_hint)
                             final_cat, final_sub = ai_c, ai_s
 
-                # Собираем красивую карточку изменений
                 old_amt_str = f"{tx_to_edit['amount']:g} руб."
                 new_amt_val = float(new_amt) if new_amt else tx_to_edit["amount"]
                 new_amt_str = f"{new_amt_val:g} руб."
