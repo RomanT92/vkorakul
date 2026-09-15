@@ -13,14 +13,12 @@ def get_main_keyboard(user_id=None, count=None):
         except Exception as e:
             print(f"Ошибка получения счетчика в клавиатуре: {e}")
             unreviewed_count = 0
-
+            
     keyboard = VkKeyboard(one_time=False)
-    
     if unreviewed_count > 0:
         btn_text = f"📥 Разобрать операции ({unreviewed_count})"
     else:
         btn_text = "📥 Разобрать операции"
-        
     keyboard.add_button(btn_text, color=VkKeyboardColor.SECONDARY)
     keyboard.add_line()
     keyboard.add_button('📊 Импорт статистики прошлого', color=VkKeyboardColor.PRIMARY)
@@ -81,7 +79,7 @@ def get_numbered_keyboard(count, show_back=True):
     keyboard.add_line()
     if show_back:
         keyboard.add_button('🔙 Назад', color=VkKeyboardColor.NEGATIVE)
-    keyboard.add_button('🚫 Отмена', color=VkKeyboardColor.NEGATIVE)
+        keyboard.add_button('🚫 Отмена', color=VkKeyboardColor.NEGATIVE)
     return keyboard
 
 def get_yes_no_keyboard(show_back=True):
@@ -92,7 +90,7 @@ def get_yes_no_keyboard(show_back=True):
     keyboard.add_line()
     if show_back:
         keyboard.add_button('🔙 Назад', color=VkKeyboardColor.NEGATIVE)
-    keyboard.add_button('🚫 Отмена', color=VkKeyboardColor.NEGATIVE)
+        keyboard.add_button('🚫 Отмена', color=VkKeyboardColor.NEGATIVE)
     return keyboard
 
 def type_keyboard(show_back=True):
@@ -103,7 +101,7 @@ def type_keyboard(show_back=True):
     keyboard.add_line()
     if show_back:
         keyboard.add_button('🔙 Назад', color=VkKeyboardColor.NEGATIVE)
-    keyboard.add_button('🚫 Отмена', color=VkKeyboardColor.NEGATIVE)
+        keyboard.add_button('🚫 Отмена', color=VkKeyboardColor.NEGATIVE)
     return keyboard
 
 def get_cancel_keyboard(show_back=False):
@@ -122,7 +120,7 @@ def get_receipt_mode_keyboard(show_back=True):
     keyboard.add_line()
     if show_back:
         keyboard.add_button('🔙 Назад', color=VkKeyboardColor.NEGATIVE)
-    keyboard.add_button('🚫 Отмена', color=VkKeyboardColor.NEGATIVE)
+        keyboard.add_button('🚫 Отмена', color=VkKeyboardColor.NEGATIVE)
     return keyboard
 
 def get_receipt_review_keyboard(count, show_back=True):
@@ -138,28 +136,39 @@ def get_receipt_review_keyboard(count, show_back=True):
     keyboard.add_line()
     if show_back:
         keyboard.add_button('🔙 Назад', color=VkKeyboardColor.NEGATIVE)
-    keyboard.add_button('🚫 Отмена', color=VkKeyboardColor.NEGATIVE)
+        keyboard.add_button('🚫 Отмена', color=VkKeyboardColor.NEGATIVE)
     return keyboard
 
 def get_queue_review_keyboard(count, show_apply_all=False, show_back=True):
-    """Клавиатура разбора операций"""
+    """
+    Клавиатура разбора операций с поддержкой выбора номеров, сохранения и управления мусором.
+    """
     keyboard = VkKeyboard(one_time=False)
     limit = min(count, 36)
     for i in range(1, limit + 1):
         keyboard.add_button(str(i), color=VkKeyboardColor.SECONDARY)
         if i % 4 == 0 and i != limit:
             keyboard.add_line()
-
     keyboard.add_line()
     if show_apply_all:
         keyboard.add_button('⚡ Применить для всех оставшихся', color=VkKeyboardColor.PRIMARY)
         keyboard.add_line()
-
     keyboard.add_button('💾 Сохранить пакет', color=VkKeyboardColor.POSITIVE)
+    keyboard.add_button('🗑 Удалить мусор', color=VkKeyboardColor.NEGATIVE)
     keyboard.add_line()
     if show_back:
         keyboard.add_button('🔙 Назад', color=VkKeyboardColor.NEGATIVE)
-    keyboard.add_button('🚫 Отмена', color=VkKeyboardColor.NEGATIVE)
+        keyboard.add_button('🚫 Отмена', color=VkKeyboardColor.NEGATIVE)
+    return keyboard
+
+def get_queue_item_action_keyboard():
+    """Клавиатура действия над конкретным пунктом из очереди разбора"""
+    keyboard = VkKeyboard(one_time=False)
+    keyboard.add_button('📂 Изменить категорию', color=VkKeyboardColor.PRIMARY)
+    keyboard.add_button('🗑 Удалить как мусор', color=VkKeyboardColor.NEGATIVE)
+    keyboard.add_line()
+    keyboard.add_button('⏩ Пропустить', color=VkKeyboardColor.SECONDARY)
+    keyboard.add_button('🔙 Назад к списку', color=VkKeyboardColor.NEGATIVE)
     return keyboard
 
 def get_multi_tx_review_keyboard(count, show_apply_all=False, show_back=True):
@@ -170,27 +179,19 @@ def get_multi_tx_review_keyboard(count, show_apply_all=False, show_back=True):
         keyboard.add_button(str(i), color=VkKeyboardColor.SECONDARY)
         if i % 4 == 0 and i != limit:
             keyboard.add_line()
-
     keyboard.add_line()
     if show_apply_all:
         keyboard.add_button('⚡ Применить для всех оставшихся', color=VkKeyboardColor.PRIMARY)
         keyboard.add_line()
-
     keyboard.add_button('✅ Готово', color=VkKeyboardColor.POSITIVE)
     keyboard.add_line()
     if show_back:
         keyboard.add_button('🔙 Назад', color=VkKeyboardColor.NEGATIVE)
-    keyboard.add_button('🚫 Отмена', color=VkKeyboardColor.NEGATIVE)
+        keyboard.add_button('🚫 Отмена', color=VkKeyboardColor.NEGATIVE)
     return keyboard
 
 def get_tx_action_keyboard():
-    """
-    Клавиатура действий над конкретной операцией:
-    - Изменить сумму
-    - Изменить категорию
-    - Удалить
-    - Назад / Отмена
-    """
+    """Клавиатура действий над конкретной операцией"""
     keyboard = VkKeyboard(one_time=False)
     keyboard.add_button('✏️ Изменить сумму', color=VkKeyboardColor.PRIMARY)
     keyboard.add_button('📂 Изменить категорию', color=VkKeyboardColor.PRIMARY)
