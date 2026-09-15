@@ -45,16 +45,16 @@ INCOME_KEYWORDS = [
 
 def detect_operation_type(user_text="", raw_type="Расход", item_name="", comment=""):
     """
-    Надежно определяет тип операции:
-    Если есть хоть один признак Дохода -> Доход. Иначе -> Расход.
+    Определяет тип операции и возвращает кортеж: (op_type, is_explicit_income)
+    Если пользователь явно указал признак дохода -> (Доход, True).
     """
     check_str = f"{user_text} {raw_type} {item_name} {comment}".lower()
     for kw in INCOME_KEYWORDS:
         if re.search(r'\b' + re.escape(kw) + r'\b', check_str) or kw in check_str:
-            return "Доход"
+            return "Доход", True
     if str(raw_type).strip().lower() in ["доход", "приход", "income"]:
-        return "Доход"
-    return "Расход"
+        return "Доход", True
+    return "Расход", False
 
 def find_entity_in_menu(menu, target_name):
     """Поиск сущности любого уровня (категория, подкатегория, статья) по названию."""
@@ -189,9 +189,7 @@ def _show_history_screen(user_id, items, title_period, total_expense, total_inco
     send_vk_message(user_id, msg, get_numbered_keyboard(min(len(items), 15), show_back=True))
 
 def _match_category_tree(menu_full, op_type, text):
-    """
-    Быстрый локальный поиск по дереву категорий и подкатегорий.
-    """
+    """Быстрый локальный поиск по дереву категорий и подкатегорий."""
     clean = text.lower().strip()
     type_menu = menu_full.get(op_type, {})
     for cat, subs in type_menu.items():
@@ -313,12 +311,12 @@ def handle_transaction(user_id, user_text, state, user_states):
     # =========================================================
     if state == "history_edit_category":
         sel_op = user_states[user_id].get("sel_op")
-        op_type = sel_op.get("type", "Расход")
+        op_type, is_exp_inc = detect_operation_type(user_text, sel_op.get("type", "Расход"))
         menu_full = get_full_menu(internal_uid)
 
-        # 1. Полноценный поиск по БД
+        # 1. Поиск по БД строго в рамках целевого типа
         db_match = smart_search_item(internal_uid, user_text, op_type=op_type)
-        if db_match["status"] != "FOUND":
+        if db_match["status"] != "FOUND" and not is_exp_inc:
             db_match = smart_search_item(internal_uid, user_text, op_type=None)
 
         if db_match["status"] == "FOUND":
@@ -480,12 +478,12 @@ def handle_transaction(user_id, user_text, state, user_states):
         idx = state_data["edit_idx"]
         items = state_data["items"]
         sel_item = items[idx]
-        op_type = detect_operation_type(user_text, sel_item.get("type", "Расход"))
+        op_type, is_exp_inc = detect_operation_type(user_text, sel_item.get("type", "Расход"))
         sel_item["type"] = op_type
         menu_full = get_full_menu(internal_uid)
 
         db_match = smart_search_item(internal_uid, user_text, op_type=op_type)
-        if db_match["status"] != "FOUND":
+        if db_match["status"] != "FOUND" and not is_exp_inc:
             db_match = smart_search_item(internal_uid, user_text, op_type=None)
 
         if db_match["status"] == "FOUND":
@@ -723,37 +721,43 @@ def handle_transaction(user_id, user_text, state, user_states):
                 amount = float(op.get("amount", 0))
                 comment = op.get("comment", "").strip()
 
-                # Надежное определение типа операции: сканируем сырой ввод, ответ ИИ, item и comment
-                op_type = detect_operation_type(user_text, op.get("type", "Расход"), current_item, comment)
+                # Надежное определение типа операции:
+                op_type, is_explicit_income = detect_operation_type(user_text, op.get("type", "Расход"), current_item, comment)
 
-                # 1. Полноценный поиск по БД
+                # 1. Полноценный поиск по БД:
+                # Если явно указан ДОХОД — ищем ТОЛЬКО в Доходах! В Расходы не подглядываем!
                 search_res = smart_search_item(internal_uid, current_item, op_type=op_type)
-                if search_res["status"] != "FOUND":
+                if search_res["status"] != "FOUND" and not is_explicit_income:
                     search_res = smart_search_item(internal_uid, current_item, op_type=None)
 
                 # Поиск по фразе вместе с комментарием
                 if search_res["status"] != "FOUND" and comment:
                     full_phrase = f"{current_item} {comment}".strip()
                     phrase_res = smart_search_item(internal_uid, full_phrase, op_type=op_type)
-                    if phrase_res["status"] != "FOUND":
+                    if phrase_res["status"] != "FOUND" and not is_explicit_income:
                         phrase_res = smart_search_item(internal_uid, full_phrase, op_type=None)
                     if phrase_res["status"] == "FOUND":
                         search_res = phrase_res
                         current_item = full_phrase
                         comment = ""
 
+                # КРИТИЧЕСКАЯ ЗАЩИТА: Если пользователь сказал "Доход", результат поиска не может быть "Расход"
+                if search_res["status"] == "FOUND":
+                    if is_explicit_income and search_res.get("type") == "Расход":
+                        search_res = {"status": "NOT_FOUND"}
+
                 if search_res["status"] == "FOUND":
                     processed_items.append({
                         "item": current_item,
                         "amount": amount,
-                        "type": search_res.get("type", op_type),
+                        "type": op_type if is_explicit_income else search_res.get("type", op_type),
                         "category": search_res["category"],
                         "subcategory": search_res["subcategory"],
                         "comment": comment,
                         "is_known": True
                     })
                 else:
-                    # 2. Локальный поиск по дереву категорий и подкатегорий
+                    # 2. Локальный поиск по дереву категорий и подкатегорий (строго в op_type)
                     c_tree, s_tree = _match_category_tree(menu_full, op_type, current_item)
                     if c_tree and s_tree:
                         processed_items.append({
@@ -766,7 +770,7 @@ def handle_transaction(user_id, user_text, state, user_states):
                             "is_known": True
                         })
                     else:
-                        # 3. Резервный подбор ИИ по меню
+                        # 3. Резервный подбор ИИ строго по меню выбранного типа (op_type)
                         type_menu = menu_full.get(op_type, {})
                         menu_str = f"[{op_type}]\n" + "\n".join([f"{c}: {', '.join(subs.keys() if isinstance(subs, dict) else subs)}" for c, subs in type_menu.items()])
                         ai_cat, ai_sub = categorize_with_ai(current_item, menu_str)
@@ -793,7 +797,7 @@ def handle_transaction(user_id, user_text, state, user_states):
             if len(processed_items) == 1:
                 single = processed_items[0]
 
-                # 1. Известна в базе (по синониму, статье или подкатегории) -> мгновенная запись!
+                # 1. Известна в базе -> мгновенная запись
                 if single["is_known"]:
                     save_transaction(
                         user_id=internal_uid,
@@ -813,7 +817,7 @@ def handle_transaction(user_id, user_text, state, user_states):
                     )
                     return True
 
-                # 2. Неизвестна точно, но ИИ подобрал конкретную категорию -> переспрашиваем "Да/Нет"
+                # 2. Неизвестна точно, но ИИ подобрал категорию -> переспрашиваем "Да/Нет"
                 if single["category"] != "Разное" and single["subcategory"] != "Требует проверки":
                     user_states[user_id] = {
                         "state": "confirm_category",
@@ -841,7 +845,7 @@ def handle_transaction(user_id, user_text, state, user_states):
                 }
                 send_vk_message(
                     user_id,
-                    f"🤔 Я пока не знаю статью «{single['item']}» ({single['amount']:g} руб.).\n"
+                    f"🤔 Я пока не знаю статью «{single['item']}» ({single['type']}, {single['amount']:g} руб.).\n"
                     f"Подскажи в двух словах, к чему это относится (или назови категорию):",
                     get_cancel_keyboard(show_back=True)
                 )
