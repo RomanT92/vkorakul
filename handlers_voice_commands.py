@@ -14,6 +14,7 @@ from db import (
 from db.transactions import delete_unverified_by_text
 
 def _find_category_in_menu(menu_full, hint_text):
+    """Полноценный трехуровневый поиск по меню категорий и подкатегорий."""
     clean = hint_text.lower().strip()
     cat_candidates = []
     sub_candidates = []
@@ -67,25 +68,42 @@ def _find_category_in_menu(menu_full, hint_text):
     return False, None, None, None
 
 def _apply_category_to_item(internal_uid, it, hint_text, menu_full, state):
+    """
+    Определяет правильную пару Категория -> Подкатегория по подсказке пользователя:
+    1. Поиск по БД через smart_search_item (знает 'подарок', 'мясо', 'аптека')
+    2. Поиск по дереву категорий
+    3. Резерв через ИИ
+    """
     current_art_name = it.get("article") or it.get("original_item") or it.get("item") or "Операция"
     op_type = it.get("type", "Расход")
+    found_cat, found_sub = None, None
+    m_type = op_type
 
-    is_match, m_type, found_cat, found_sub = _find_category_in_menu(menu_full, hint_text)
-
-    if not is_match:
+    # 1. ПРИОРИТЕТ: Поиск подсказки в базе данных синонимов
+    db_match = smart_search_item(internal_uid, hint_text, op_type=op_type)
+    if db_match["status"] != "FOUND":
         db_match = smart_search_item(internal_uid, hint_text, op_type=None)
-        if db_match["status"] == "FOUND":
-            is_match = True
-            m_type = db_match.get("type", "Расход")
-            found_cat = db_match["category"]
-            found_sub = db_match["subcategory"]
 
-    if not is_match:
-        type_menu = menu_full.get(op_type, {})
-        menu_str = f"[{op_type}]\n" + "\n".join([f"{c}: {', '.join(subs.keys() if isinstance(subs, dict) else subs)}" for c, subs in type_menu.items()])
-        ai_c, ai_sub = categorize_with_ai(current_art_name, menu_str, context=hint_text)
-        m_type, found_cat, found_sub = op_type, ai_c, ai_sub
+    if db_match["status"] == "FOUND":
+        m_type = db_match.get("type", op_type)
+        found_cat = db_match["category"]
+        found_sub = db_match["subcategory"]
+    else:
+        # 2. Поиск по дереву меню
+        is_match, menu_m_type, c_name, s_name = _find_category_in_menu(menu_full, hint_text)
+        if is_match:
+            m_type = menu_m_type
+            found_cat = c_name
+            found_sub = s_name
+        else:
+            # 3. Резерв через ИИ
+            type_menu = menu_full.get(op_type, {})
+            menu_str = f"[{op_type}]\n" + "\n".join([f"{c}: {', '.join(subs.keys() if isinstance(subs, dict) else subs)}" for c, subs in type_menu.items()])
+            ai_c, ai_s = categorize_with_ai(current_art_name, menu_str, context=hint_text)
+            found_cat = ai_c
+            found_sub = ai_s
 
+    # Сохраняем результат
     if state == "history_view":
         update_transaction_category(internal_uid, it["id"], found_cat, found_sub, it.get("article", current_art_name))
         it["category"] = found_cat
@@ -124,7 +142,6 @@ def handle_list_voice_commands(user_id, user_text, user_text_lower, state, user_
                 return True
 
             elif prev_state == "queue_batch_review":
-                # УДАЛЕНИЕ ИЗ ОЧЕРЕДИ РАЗБОРА: чистим базу и заносим в черный список!
                 batch = state_data["current_batch"]
                 total_deleted = 0
                 del_names = []
@@ -219,6 +236,10 @@ def handle_list_voice_commands(user_id, user_text, user_text_lower, state, user_
     # 2. SET CATEGORY
     if action == "set_category":
         hint_text = (parsed_cmd.get("hint") or "").strip()
+        # Если команда типа "это всё подарок", а indices пустые — применяем ко ВСЕМ элементам!
+        if not valid_indices and any(w in user_text_lower for w in ["все", "всё"]):
+            valid_indices = list(range(len(items)))
+
         if valid_indices and hint_text:
             found_cat, found_sub = None, None
             for idx in valid_indices:
