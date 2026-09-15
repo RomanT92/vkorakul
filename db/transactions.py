@@ -12,115 +12,160 @@ def _resolve_internal_user_id(cur, user_id):
 
 def smart_search_item(user_id, item_name, op_type=None):
     """
-    Умный многоуровневый поиск:
-    1. По синонимам и точным названиям статей (user_dictionary + global_dictionary)
-    2. По названиям подкатегорий и категорий (если пользователь назвал имя группы)
-    3. Нечёткий поиск через pg_trgm (сходство >= 0.65)
+    Сверхнадежный поиск по базам (личной и глобальной).
+    Ищет по цепочке:
+    1. Прямое точное совпадение по synonym или article с учетом регистра и пробелов
+    2. Прямое совпадение по названию подкатегории или категории
+    3. Нечеткий поиск триграммами pg_trgm (сходство >= 0.65)
     """
     conn = get_db_connection()
     cur = conn.cursor()
     clean_item = item_name.lower().strip()
+    clean_type = op_type.lower().strip() if op_type else None
     
     try:
         uid = _resolve_internal_user_id(cur, user_id)
         
-        not_deleted_clause = """
-            NOT EXISTS (
-                SELECT 1 FROM user_dictionary u 
-                WHERE u.user_id = %s 
-                  AND u.type = g.type
-                  AND (
-                      (u.category = g.category AND (u.subcategory = '' OR u.subcategory IS NULL) AND u.is_deleted = TRUE)
-                      OR (u.category = g.category AND u.subcategory = g.subcategory AND (u.article = '' OR u.article IS NULL) AND u.is_deleted = TRUE)
-                      OR (u.category = g.category AND u.subcategory = g.subcategory AND u.article = g.article AND u.is_deleted = TRUE)
-                      OR (LOWER(u.synonym) = LOWER(g.synonym) AND u.is_deleted = TRUE)
-                  )
-            )
-        """
-        
-        type_filter_user = "AND type = %s" if op_type else ""
-        type_filter_global = "AND g.type = %s" if op_type else ""
-        
-        combined_source = f"""
-            SELECT type, category, subcategory, article, LOWER(synonym) AS syn, LOWER(article) AS art_low
-            FROM user_dictionary
-            WHERE user_id = %s AND is_deleted = FALSE {type_filter_user}
-            UNION ALL
-            SELECT g.type, g.category, g.subcategory, g.article, LOWER(g.synonym) AS syn, LOWER(g.article) AS art_low
-            FROM global_dictionary g
-            WHERE is_default = TRUE {type_filter_global} AND {not_deleted_clause}
-        """
-        
-        if op_type:
-            base_params = (uid, op_type, op_type, uid)
+        # -------------------------------------------------------------
+        # 1. ПРИОРИТЕТНЫЙ ПРЯМОЙ ПОИСК В ЛИЧНОМ СЛОВАРЕ ПОЛЬЗОВАТЕЛЯ
+        # -------------------------------------------------------------
+        if clean_type:
+            user_sql = """
+                SELECT type, category, subcategory, article
+                FROM user_dictionary
+                WHERE user_id = %s 
+                  AND is_deleted = FALSE 
+                  AND LOWER(TRIM(type)) = %s
+                  AND (LOWER(TRIM(synonym)) = %s OR LOWER(TRIM(article)) = %s)
+                LIMIT 1;
+            """
+            cur.execute(user_sql, (uid, clean_type, clean_item, clean_item))
         else:
-            base_params = (uid, uid)
+            user_sql = """
+                SELECT type, category, subcategory, article
+                FROM user_dictionary
+                WHERE user_id = %s 
+                  AND is_deleted = FALSE 
+                  AND (LOWER(TRIM(synonym)) = %s OR LOWER(TRIM(article)) = %s)
+                LIMIT 1;
+            """
+            cur.execute(user_sql, (uid, clean_item, clean_item))
             
-        # -------------------------------------------------------------
-        # ШАГ 1: ТОЧНЫЙ ПОИСК ПО СИНОНИМАМ И НАЗВАНИЯМ СТАТЕЙ
-        # -------------------------------------------------------------
-        exact_query = f"""
-            SELECT type, category, subcategory, article
-            FROM ({combined_source}) AS combined
-            WHERE syn = %s OR art_low = %s
-            LIMIT 1;
-        """
-        cur.execute(exact_query, base_params + (clean_item, clean_item))
-        exact_match = cur.fetchone()
-        if exact_match:
+        user_match = cur.fetchone()
+        if user_match:
             return {
                 "status": "FOUND",
-                "type": exact_match[0],
-                "category": exact_match[1],
-                "subcategory": exact_match[2],
-                "article": exact_match[3]
+                "type": user_match[0].strip(),
+                "category": user_match[1].strip(),
+                "subcategory": user_match[2].strip(),
+                "article": user_match[3].strip()
             }
 
         # -------------------------------------------------------------
-        # ШАГ 2: ПРОВЕРКА ПО НАЗВАНИЯМ ПОДКАТЕГОРИЙ И КАТЕГОРИЙ
-        # (Например: "Интернет и связь", "Транспорт", "Фастфуд")
+        # 2. ПОИСК В ГЛОБАЛЬНОМ ЭТАЛОНЕ (с проверкой на теневое удаление)
         # -------------------------------------------------------------
-        group_query = f"""
+        type_clause_global = "AND LOWER(TRIM(g.type)) = %s" if clean_type else ""
+        
+        global_sql = f"""
+            SELECT g.type, g.category, g.subcategory, g.article
+            FROM global_dictionary g
+            WHERE (LOWER(TRIM(g.synonym)) = %s OR LOWER(TRIM(g.article)) = %s)
+              {type_clause_global}
+              AND NOT EXISTS (
+                  SELECT 1 FROM user_dictionary u
+                  WHERE u.user_id = %s
+                    AND LOWER(TRIM(u.type)) = LOWER(TRIM(g.type))
+                    AND u.is_deleted = TRUE
+                    AND (
+                        (LOWER(TRIM(u.category)) = LOWER(TRIM(g.category)) AND (u.subcategory = '' OR u.subcategory IS NULL))
+                        OR (LOWER(TRIM(u.category)) = LOWER(TRIM(g.category)) AND LOWER(TRIM(u.subcategory)) = LOWER(TRIM(g.subcategory)) AND (u.article = '' OR u.article IS NULL))
+                        OR (LOWER(TRIM(u.category)) = LOWER(TRIM(g.category)) AND LOWER(TRIM(u.subcategory)) = LOWER(TRIM(g.subcategory)) AND LOWER(TRIM(u.article)) = LOWER(TRIM(g.article)))
+                        OR (LOWER(TRIM(u.synonym)) = LOWER(TRIM(g.synonym)))
+                    )
+              )
+            LIMIT 1;
+        """
+        
+        if clean_type:
+            cur.execute(global_sql, (clean_item, clean_item, clean_type, uid))
+        else:
+            cur.execute(global_sql, (clean_item, clean_item, uid))
+            
+        global_match = cur.fetchone()
+        if global_match:
+            return {
+                "status": "FOUND",
+                "type": global_match[0].strip(),
+                "category": global_match[1].strip(),
+                "subcategory": global_match[2].strip(),
+                "article": global_match[3].strip()
+            }
+
+        # -------------------------------------------------------------
+        # 3. ПРОВЕРКА ПО ИМЕНАМ ПОДКАТЕГОРИЙ И КАТЕГОРИЙ
+        # (Если назвали подкатегорию или категорию целиком)
+        # -------------------------------------------------------------
+        group_sql = f"""
             SELECT type, category, subcategory, article
-            FROM ({combined_source}) AS combined
-            WHERE LOWER(subcategory) = %s OR LOWER(category) = %s
+            FROM (
+                SELECT type, category, subcategory, article FROM user_dictionary WHERE user_id = %s AND is_deleted = FALSE
+                UNION ALL
+                SELECT type, category, subcategory, article FROM global_dictionary WHERE is_default IS NOT FALSE
+            ) AS combined
+            WHERE (LOWER(TRIM(subcategory)) = %s OR LOWER(TRIM(category)) = %s)
+              {'AND LOWER(TRIM(type)) = %s' if clean_type else ''}
             ORDER BY 
                 CASE 
-                    WHEN LOWER(subcategory) = %s THEN 1 
-                    WHEN LOWER(category) = %s THEN 2 
+                    WHEN LOWER(TRIM(subcategory)) = %s THEN 1 
+                    WHEN LOWER(TRIM(category)) = %s THEN 2 
                     ELSE 3 
                 END
             LIMIT 1;
         """
-        cur.execute(group_query, base_params + (clean_item, clean_item, clean_item, clean_item))
+        if clean_type:
+            cur.execute(group_sql, (uid, clean_item, clean_item, clean_type, clean_item, clean_item))
+        else:
+            cur.execute(group_sql, (uid, clean_item, clean_item, clean_item, clean_item))
+            
         group_match = cur.fetchone()
         if group_match:
             return {
                 "status": "FOUND",
-                "type": group_match[0],
-                "category": group_match[1],
-                "subcategory": group_match[2],
+                "type": group_match[0].strip(),
+                "category": group_match[1].strip(),
+                "subcategory": group_match[2].strip(),
                 "article": item_name.strip()
             }
 
         # -------------------------------------------------------------
-        # ШАГ 3: НЕЧЁТКИЙ ПОИСК (PG_TRGM) ПО СИНОНИМАМ И СТАТЬЯМ
+        # 4. НЕЧЁТКИЙ ТРИГРАММНЫЙ ПОИСК (pg_trgm)
         # -------------------------------------------------------------
-        fuzzy_query = f"""
-            SELECT type, category, subcategory, article, syn, 1 - (syn <-> %s) AS similarity_score
-            FROM ({combined_source}) AS combined
-            ORDER BY syn <-> %s
+        fuzzy_sql = f"""
+            SELECT type, category, subcategory, article, synonym, 1 - (synonym <-> %s) AS similarity_score
+            FROM (
+                SELECT type, category, subcategory, article, LOWER(TRIM(synonym)) as synonym 
+                FROM user_dictionary WHERE user_id = %s AND is_deleted = FALSE
+                UNION ALL
+                SELECT type, category, subcategory, article, LOWER(TRIM(synonym)) as synonym 
+                FROM global_dictionary WHERE is_default IS NOT FALSE
+            ) AS combined
+            WHERE 1=1 {'AND LOWER(TRIM(type)) = %s' if clean_type else ''}
+            ORDER BY synonym <-> %s
             LIMIT 1;
         """
-        cur.execute(fuzzy_query, (clean_item,) + base_params + (clean_item,))
-        fuzzy_result = cur.fetchone()
-        if fuzzy_result and fuzzy_result[5] is not None and fuzzy_result[5] >= 0.65:
+        if clean_type:
+            cur.execute(fuzzy_sql, (clean_item, uid, clean_type, clean_item))
+        else:
+            cur.execute(fuzzy_sql, (clean_item, uid, clean_item))
+            
+        fuzzy_match = cur.fetchone()
+        if fuzzy_match and fuzzy_match[5] is not None and fuzzy_match[5] >= 0.65:
             return {
                 "status": "FOUND",
-                "type": fuzzy_result[0],
-                "category": fuzzy_result[1],
-                "subcategory": fuzzy_result[2],
-                "article": fuzzy_result[3]
+                "type": fuzzy_match[0].strip(),
+                "category": fuzzy_match[1].strip(),
+                "subcategory": fuzzy_match[2].strip(),
+                "article": fuzzy_match[3].strip()
             }
 
         return {"status": "NOT_FOUND"}
@@ -187,11 +232,11 @@ def get_full_menu(user_id):
             WHERE NOT EXISTS (
                 SELECT 1 FROM user_dictionary u
                 WHERE u.user_id = %s
-                  AND u.type = g.type
+                  AND LOWER(TRIM(u.type)) = LOWER(TRIM(g.type))
                   AND (
-                      (u.category = g.category AND (u.subcategory = '' OR u.subcategory IS NULL) AND u.is_deleted = TRUE)
-                      OR (u.category = g.category AND u.subcategory = g.subcategory AND (u.article = '' OR u.article IS NULL) AND u.is_deleted = TRUE)
-                      OR (u.category = g.category AND u.subcategory = g.subcategory AND u.article = g.article AND u.is_deleted = TRUE)
+                      (LOWER(TRIM(u.category)) = LOWER(TRIM(g.category)) AND (u.subcategory = '' OR u.subcategory IS NULL) AND u.is_deleted = TRUE)
+                      OR (LOWER(TRIM(u.category)) = LOWER(TRIM(g.category)) AND LOWER(TRIM(u.subcategory)) = LOWER(TRIM(g.subcategory)) AND (u.article = '' OR u.article IS NULL) AND u.is_deleted = TRUE)
+                      OR (LOWER(TRIM(u.category)) = LOWER(TRIM(g.category)) AND LOWER(TRIM(u.subcategory)) = LOWER(TRIM(g.subcategory)) AND LOWER(TRIM(u.article)) = LOWER(TRIM(g.article)) AND u.is_deleted = TRUE)
                   )
             )
             UNION
@@ -201,7 +246,7 @@ def get_full_menu(user_id):
         """
         cur.execute(query, (uid, uid))
         for row in cur.fetchall():
-            t, c, s, a = row[0], row[1], row[2], row[3]
+            t, c, s, a = row[0].strip(), row[1].strip(), row[2].strip(), (row[3] or "").strip()
             if t not in menu:
                 menu[t] = {}
             if c not in menu[t]:
