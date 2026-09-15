@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+import re
 from keyboards import (
     get_main_keyboard,
     get_yes_no_keyboard,
@@ -26,15 +27,26 @@ from db.transactions import delete_unverified_by_text, skip_unverified_by_text
 
 BATCH_SIZE = 7
 
+def _format_amt(amount):
+    """Форматирует число без экспоненциальной записи (например 3 114 590 вместо 3.11e+06)."""
+    try:
+        val = float(amount)
+        if val.is_integer():
+            return f"{int(val):,}".replace(",", " ")
+        return f"{val:,.2f}".replace(",", " ")
+    except Exception:
+        return str(amount)
+
 def _show_batch_items(user_id, batch, total_left, show_apply_all=False):
     """Выводит пронумерованный список пакета операций с кнопками управления."""
     msg = f"📋 Пакет операций (осталось распределить: {total_left + len(batch)}):\n\n"
     for i, item in enumerate(batch):
-        msg += f"{i+1}. {item['original_item']} ({item['count']} шт., ~{item['amount']:g} руб.)\n"
+        amt_str = _format_amt(item['amount'])
+        msg += f"{i+1}. {item['original_item']} ({item['count']} шт., ~{amt_str} руб.)\n"
         msg += f"   📂 {item.get('category', '?')} -> {item.get('subcategory', '?')}\n\n"
 
     msg += "👉 Если всё верно — жмите «💾 Сохранить пакет».\n"
-    msg += "👉 Если здесь есть мусор (заголовки, лишние слова) — напишите «Удали 2 и 3» или нажмите «🗑 Удалить мусор».\n"
+    msg += "👉 Если здесь мусор (заголовки выписки) — скажите «Всё в мусор», «Удали 2 и 3» или нажмите «🗑 Удалить мусор».\n"
     if show_apply_all:
         msg += "👉 Нажмите «⚡ Применить для всех оставшихся», чтобы продублировать категорию.\n"
     msg += "👉 Для изменения категории — отправьте НОМЕР позиции."
@@ -46,7 +58,6 @@ def _process_next_batch(user_id, user_states):
     internal_uid = get_or_create_user(user_id)
     queue = state_data.get("queue", [])
 
-    # Перед показом пакета фильтруем очередь: если слово уже выучено или удалено, решаем на лету
     filtered_queue = []
     for item in queue:
         match = smart_search_item(internal_uid, item["original_item"], op_type=item.get("type"))
@@ -138,7 +149,7 @@ def handle_queue_and_learning(user_id, user_text, user_text_lower, state, user_s
     # ОБРАБОТКА «НАЗАД» В ОЧЕРЕДИ
     # =========================================================
     if "назад" in user_text_lower:
-        if state in ["queue_batch_edit_hint", "queue_item_action_select", "queue_select_trash_numbers"]:
+        if state in ["queue_batch_edit_hint", "queue_item_action_select", "queue_select_trash_numbers", "confirm_delete_all_batch_trash"]:
             user_states[user_id]["state"] = "queue_batch_review"
             _show_batch_items(user_id, user_states[user_id]["current_batch"], len(user_states[user_id]["queue"]), show_apply_all=False)
             return True
@@ -185,7 +196,23 @@ def handle_queue_and_learning(user_id, user_text, user_text_lower, state, user_s
             _process_next_batch(user_id, user_states)
             return True
 
-        # --- УДАЛЕНИЕ МУСОРА (КНОПКА ИЛИ ТЕКСТ "УДАЛИ МУСОР") ---
+        # --- УДАЛЕНИЕ ВСЕГО ПАКЕТА В МУСОР («отправь все эти операции в мусор», «всё в мусор», «удали все») ---
+        all_trash_triggers = [
+            "все эти операции в мусор", "все в мусор", "всё в мусор", "в мусор всё",
+            "в мусор все", "это всё мусор", "это все мусор", "в корзину все", "в корзину всё",
+            "удали всё", "удали все", "стереть всё", "очисти пакет", "удалить все эти"
+        ]
+        if any(trig in user_text_lower for trig in all_trash_triggers):
+            user_states[user_id]["state"] = "confirm_delete_all_batch_trash"
+            send_vk_message(
+                user_id,
+                f"⚠️ Вы уверены, что хотите отправить ВСЕ {len(batch)} позиций текущего пакета в мусор?\n"
+                f"Они будут удалены из журнала и больше никогда не появятся.",
+                get_yes_no_keyboard(show_back=True)
+            )
+            return True
+
+        # --- УДАЛЕНИЕ МУСОРА ПО КНОПКЕ («🗑 Удалить мусор») ---
         if "удалить мусор" in user_text_lower or "удали мусор" in user_text_lower:
             user_states[user_id]["state"] = "queue_select_trash_numbers"
             send_vk_message(
@@ -195,8 +222,8 @@ def handle_queue_and_learning(user_id, user_text, user_text_lower, state, user_s
             )
             return True
 
-        # --- ПРЯМАЯ КОМАНДА: "УДАЛИ 1 И 3", "УДАЛИ ВТОРУЮ" ---
-        if "удали" in user_text_lower or "исключи" in user_text_lower:
+        # --- КОМАНДЫ С НОМЕРАМИ: «удали 1 и 3», «в мусор 2, 4», «мусор 3» ---
+        if any(w in user_text_lower for w in ["удали", "мусор", "исключи", "выкинь", "убери"]):
             raw_nums = re.findall(r'\d+', user_text)
             del_indices = [int(n) - 1 for n in raw_nums if 0 <= int(n) - 1 < len(batch)]
             if del_indices:
@@ -206,7 +233,11 @@ def handle_queue_and_learning(user_id, user_text, user_text_lower, state, user_s
                     it = batch.pop(idx)
                     del_names.append(it["original_item"])
                     total_deleted += delete_unverified_by_text(internal_uid, it["original_item"], it.get("type"))
-                send_vk_message(user_id, f"🗑 Удалено {len(del_names)} мусорных позиций ({total_deleted} транзакций из базы)!\nОни больше никогда не побеспокоят.")
+                send_vk_message(
+                    user_id,
+                    f"🗑 Удалено {len(del_names)} мусорных позиций ({total_deleted} транзакций из базы)!\n"
+                    f"Они занесены в чёрный список."
+                )
                 if not batch:
                     _process_next_batch(user_id, user_states)
                 else:
@@ -242,10 +273,11 @@ def handle_queue_and_learning(user_id, user_text, user_text_lower, state, user_s
                 state_data["edit_idx"] = idx
                 sel_item = batch[idx]
                 user_states[user_id]["state"] = "queue_item_action_select"
+                amt_str = _format_amt(sel_item['amount'])
                 msg = (
                     f"📌 **Позиция №{idx+1}: «{sel_item['original_item']}»**\n"
                     f"• Повторений: {sel_item['count']} шт.\n"
-                    f"• Примерная сумма: {sel_item['amount']:g} руб.\n"
+                    f"• Примерная сумма: {amt_str} руб.\n"
                     f"• Текущая категория: {sel_item.get('category')} -> {sel_item.get('subcategory')}\n\n"
                     f"Что сделать с этой позицией?"
                 )
@@ -253,7 +285,27 @@ def handle_queue_and_learning(user_id, user_text, user_text_lower, state, user_s
                 return True
 
     # =========================================================
-    # 2.0 МЕНЮ ДЕЙСТВИЯ НАД КОНКРЕТНОЙ ПОЗИЦИЕЙ В ОЧЕРЕДИ
+    # 2.0 ПОДТВЕРЖДЕНИЕ УДАЛЕНИЯ ВСЕХ ОПЕРАЦИЙ ПАКЕТА В МУСОР
+    # =========================================================
+    if state == "confirm_delete_all_batch_trash":
+        if any(w in user_text_lower for w in ["да", "верно", "ага", "yes", "+", "в мусор", "удалить"]):
+            state_data = user_states[user_id]
+            batch = state_data["current_batch"]
+            total_del = 0
+            for it in batch:
+                total_del += delete_unverified_by_text(internal_uid, it["original_item"], it.get("type"))
+            send_vk_message(user_id, f"🗑 Все {len(batch)} позиций ({total_del} транзакций) отправлены в мусор и занесены в чёрный список!")
+            state_data["current_batch"] = []
+            _process_next_batch(user_id, user_states)
+            return True
+        elif any(w in user_text_lower for w in ["нет", "отмена", "не", "назад"]):
+            user_states[user_id]["state"] = "queue_batch_review"
+            send_vk_message(user_id, "Удаление отменено.")
+            _show_batch_items(user_id, user_states[user_id]["current_batch"], len(user_states[user_id]["queue"]), show_apply_all=False)
+            return True
+
+    # =========================================================
+    # 2.0.1 ДЕЙСТВИЕ НАД КОНКРЕТНОЙ ПОЗИЦИЕЙ В ОЧЕРЕДИ
     # =========================================================
     if state == "queue_item_action_select":
         state_data = user_states[user_id]
@@ -291,7 +343,7 @@ def handle_queue_and_learning(user_id, user_text, user_text_lower, state, user_s
             return True
 
     # =========================================================
-    # 2.0.1 ВЫБОР НОМЕРОВ МУСОРА ДЛЯ МАССОВОГО УДАЛЕНИЯ
+    # 2.0.2 ВЫБОР НОМЕРОВ МУСОРА ДЛЯ МАССОВОГО УДАЛЕНИЯ
     # =========================================================
     if state == "queue_select_trash_numbers":
         state_data = user_states[user_id]
