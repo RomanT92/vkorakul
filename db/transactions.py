@@ -10,29 +10,127 @@ def _resolve_internal_user_id(cur, user_id):
     row = cur.fetchone()
     return row[0] if row else user_id
 
+def bulk_check_dictionary_matches(user_id, items_list):
+    """
+    Массово проверяет список названий по словарю за 1 SQL-запрос.
+    Исключает проблему N+1 запросов при разборе завалов и импорте выписок.
+    Приоритет: 1) Личный словарь юзера -> 2) Глобальный словарь.
+    """
+    if not items_list:
+        return {}
+
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        uid = _resolve_internal_user_id(cur, user_id)
+
+        clean_terms = list({it.lower().strip() for it in items_list if it and isinstance(it, str)})
+        if not clean_terms:
+            return {}
+
+        query = """
+            WITH combined_dict AS (
+                SELECT type, category, subcategory, article, LOWER(TRIM(synonym)) as syn, 1 as prio
+                FROM user_dictionary
+                WHERE user_id = %s AND is_deleted = FALSE
+                UNION ALL
+                SELECT type, category, subcategory, article, LOWER(TRIM(synonym)) as syn, 2 as prio
+                FROM global_dictionary
+                WHERE is_default IS NOT FALSE
+            )
+            SELECT DISTINCT ON (syn) syn, type, category, subcategory, article
+            FROM combined_dict
+            WHERE syn = ANY(%s)
+            ORDER BY syn, prio ASC;
+        """
+        cur.execute(query, (uid, clean_terms))
+        rows = cur.fetchall()
+
+        results = {}
+        for r in rows:
+            results[r[0]] = {
+                "type": r[1],
+                "category": r[2],
+                "subcategory": r[3],
+                "article": r[4]
+            }
+        return results
+    except Exception as e:
+        print(f"Ошибка в bulk_check_dictionary_matches: {e}")
+        return {}
+    finally:
+        cur.close()
+        conn.close()
+
+def get_analytics_summary(user_id, period="month"):
+    """
+    Мгновенная SQL-агрегация расходов и доходов по категориям.
+    period: 'today', 'week', 'month'
+    """
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        uid = _resolve_internal_user_id(cur, user_id)
+
+        interval_map = {
+            "today": "0 days",
+            "week": "7 days",
+            "month": "30 days"
+        }
+        interval = interval_map.get(period, "30 days")
+
+        query = f"""
+            SELECT type, category, SUM(amount) as total
+            FROM transactions
+            WHERE user_id = %s
+              AND status = 'verified'
+              AND operation_date >= CURRENT_DATE - INTERVAL '{interval}'
+            GROUP BY type, category
+            ORDER BY type ASC, total DESC;
+        """
+        cur.execute(query, (uid,))
+        rows = cur.fetchall()
+
+        summary = {"Расход": {}, "Доход": {}, "total_expense": 0.0, "total_income": 0.0}
+        for r in rows:
+            op_type, cat, total = r[0], r[1], float(r[2])
+            summary[op_type][cat] = total
+            if op_type == "Расход":
+                summary["total_expense"] += total
+            else:
+                summary["total_income"] += total
+
+        return summary
+    except Exception as e:
+        print(f"Ошибка получения аналитики: {e}")
+        return {"Расход": {}, "Доход": {}, "total_expense": 0.0, "total_income": 0.0}
+    finally:
+        cur.close()
+        conn.close()
+
 def smart_search_item(user_id, item_name, op_type=None):
     """
     Поиск с наивысшим приоритетом персонального словаря пользователя:
     1. Точное совпадение в user_dictionary (синоним или статья)
     2. Поиск в global_dictionary (с фильтрацией удаленных и переопределенных пользователем слов)
     3. Поиск по названиям подкатегорий и категорий
-    4. Нечёткий поиск триграммами pg_trgm (сходство >= 0.65)
+    4. Нечёткий поиск триграммами pg_trgm (порог сходства восстанавливаем до >= 0.70)
     """
     conn = get_db_connection()
     cur = conn.cursor()
     clean_item = item_name.lower().strip()
     clean_type = op_type.lower().strip() if op_type else None
-    
+
     try:
         uid = _resolve_internal_user_id(cur, user_id)
-        
+
         # 1. АБСОЛЮТНЫЙ ПРИОРИТЕТ: ЛИЧНЫЙ СЛОВАРЬ ПОЛЬЗОВАТЕЛЯ
         if clean_type:
             user_sql = """
                 SELECT type, category, subcategory, article
                 FROM user_dictionary
-                WHERE user_id = %s 
-                  AND is_deleted = FALSE 
+                WHERE user_id = %s
+                  AND is_deleted = FALSE
                   AND LOWER(TRIM(type)) = %s
                   AND (LOWER(TRIM(synonym)) = %s OR LOWER(TRIM(article)) = %s)
                 ORDER BY id DESC
@@ -43,14 +141,14 @@ def smart_search_item(user_id, item_name, op_type=None):
             user_sql = """
                 SELECT type, category, subcategory, article
                 FROM user_dictionary
-                WHERE user_id = %s 
-                  AND is_deleted = FALSE 
+                WHERE user_id = %s
+                  AND is_deleted = FALSE
                   AND (LOWER(TRIM(synonym)) = %s OR LOWER(TRIM(article)) = %s)
                 ORDER BY id DESC
                 LIMIT 1;
             """
             cur.execute(user_sql, (uid, clean_item, clean_item))
-            
+
         user_match = cur.fetchone()
         if user_match:
             return {
@@ -63,7 +161,7 @@ def smart_search_item(user_id, item_name, op_type=None):
 
         # 2. ГЛОБАЛЬНЫЙ ЭТАЛОН
         type_clause_global = "AND LOWER(TRIM(g.type)) = %s" if clean_type else ""
-        
+
         global_sql = f"""
             SELECT g.type, g.category, g.subcategory, g.article
             FROM global_dictionary g
@@ -77,14 +175,14 @@ def smart_search_item(user_id, item_name, op_type=None):
                         u.is_deleted = TRUE
                         OR (LOWER(TRIM(u.synonym)) = LOWER(TRIM(g.synonym)) AND u.is_deleted = FALSE)
                         OR (
-                            LOWER(TRIM(u.category)) = LOWER(TRIM(g.category)) 
-                            AND (u.subcategory = '' OR u.subcategory IS NULL) 
+                            LOWER(TRIM(u.category)) = LOWER(TRIM(g.category))
+                            AND (u.subcategory = '' OR u.subcategory IS NULL)
                             AND u.is_deleted = TRUE
                         )
                         OR (
-                            LOWER(TRIM(u.category)) = LOWER(TRIM(g.category)) 
-                            AND LOWER(TRIM(u.subcategory)) = LOWER(TRIM(g.subcategory)) 
-                            AND (u.article = '' OR u.article IS NULL) 
+                            LOWER(TRIM(u.category)) = LOWER(TRIM(g.category))
+                            AND LOWER(TRIM(u.subcategory)) = LOWER(TRIM(g.subcategory))
+                            AND (u.article = '' OR u.article IS NULL)
                             AND u.is_deleted = TRUE
                         )
                     )
@@ -95,7 +193,7 @@ def smart_search_item(user_id, item_name, op_type=None):
             cur.execute(global_sql, (clean_item, clean_item, clean_type, uid))
         else:
             cur.execute(global_sql, (clean_item, clean_item, uid))
-            
+
         global_match = cur.fetchone()
         if global_match:
             return {
@@ -116,11 +214,11 @@ def smart_search_item(user_id, item_name, op_type=None):
             ) AS combined
             WHERE (LOWER(TRIM(subcategory)) = %s OR LOWER(TRIM(category)) = %s)
               {'AND LOWER(TRIM(type)) = %s' if clean_type else ''}
-            ORDER BY 
-                CASE 
-                    WHEN LOWER(TRIM(subcategory)) = %s THEN 1 
-                    WHEN LOWER(TRIM(category)) = %s THEN 2 
-                    ELSE 3 
+            ORDER BY
+                CASE
+                    WHEN LOWER(TRIM(subcategory)) = %s THEN 1
+                    WHEN LOWER(TRIM(category)) = %s THEN 2
+                    ELSE 3
                 END
             LIMIT 1;
         """
@@ -128,7 +226,7 @@ def smart_search_item(user_id, item_name, op_type=None):
             cur.execute(group_sql, (uid, clean_item, clean_item, clean_type, clean_item, clean_item))
         else:
             cur.execute(group_sql, (uid, clean_item, clean_item, clean_item, clean_item))
-            
+
         group_match = cur.fetchone()
         if group_match:
             return {
@@ -139,7 +237,7 @@ def smart_search_item(user_id, item_name, op_type=None):
                 "article": item_name.strip()
             }
 
-        # 4. НЕЧЁТКИЙ ТРИГРАММНЫЙ ПОИСК (pg_trgm)
+        # 4. НЕЧЁТКИЙ ТРИГРАММНЫЙ ПОИСК (pg_trgm) - порог сохранен на высоком уровне 0.70
         fuzzy_sql = f"""
             SELECT type, category, subcategory, article, synonym, 1 - (synonym <-> %s) AS similarity_score
             FROM (
@@ -157,9 +255,9 @@ def smart_search_item(user_id, item_name, op_type=None):
             cur.execute(fuzzy_sql, (clean_item, uid, clean_type, clean_item))
         else:
             cur.execute(fuzzy_sql, (clean_item, uid, clean_item))
-            
+
         fuzzy_match = cur.fetchone()
-        if fuzzy_match and fuzzy_match[5] is not None and fuzzy_match[5] >= 0.65:
+        if fuzzy_match and fuzzy_match[5] is not None and fuzzy_match[5] >= 0.70:
             return {
                 "status": "FOUND",
                 "type": fuzzy_match[0].strip(),
@@ -326,8 +424,7 @@ def resolve_unverified_item(user_id, original_item, op_type, category, subcatego
     try:
         uid = _resolve_internal_user_id(cur, user_id)
         clean_text = original_item.strip()
-        
-        # Обновляем абсолютно все совпадения по тексту у этого пользователя
+
         cur.execute("""
             UPDATE transactions
             SET category = %s, subcategory = %s, article = %s, type = %s, status = 'verified'
@@ -341,8 +438,7 @@ def resolve_unverified_item(user_id, original_item, op_type, category, subcatego
         """, (category, subcategory, clean_text, op_type, uid, clean_text))
         updated_count = cur.rowcount
         conn.commit()
-        
-        # Обучаем словарь
+
         learn_user_word(uid, op_type, category, subcategory, clean_text, clean_text)
         return updated_count
     except Exception as e:
@@ -362,16 +458,14 @@ def delete_unverified_by_text(user_id, original_item, op_type=None):
     try:
         uid = _resolve_internal_user_id(cur, user_id)
         clean_text = original_item.strip()
-        
-        # 1. Удаляем все транзакции с этим текстом у пользователя
+
         cur.execute("""
             DELETE FROM transactions
             WHERE user_id = %s
               AND LOWER(TRIM(original_text)) = LOWER(TRIM(%s));
         """, (uid, clean_text))
         deleted_count = cur.rowcount
-        
-        # 2. Помечаем как удаленное в словаре пользователя (черный список)
+
         target_types = [op_type] if op_type else ["Расход", "Доход"]
         for t in target_types:
             cur.execute("""
@@ -380,7 +474,7 @@ def delete_unverified_by_text(user_id, original_item, op_type=None):
                 ON CONFLICT (user_id, type, category, subcategory, article, synonym)
                 DO UPDATE SET is_deleted = TRUE;
             """, (uid, t, clean_text, clean_text.lower()))
-            
+
         conn.commit()
         return deleted_count
     except Exception as e:
