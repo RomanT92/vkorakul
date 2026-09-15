@@ -28,7 +28,7 @@ from db.transactions import delete_unverified_by_text, skip_unverified_by_text
 BATCH_SIZE = 7
 
 def _format_amt(amount):
-    """Форматирует число без экспоненциальной записи (например 3 114 590 вместо 3.11e+06)."""
+    """Форматирует число без экспоненциальной записи."""
     try:
         val = float(amount)
         if val.is_integer():
@@ -39,6 +39,9 @@ def _format_amt(amount):
 
 def _show_batch_items(user_id, batch, total_left, show_apply_all=False):
     """Выводит пронумерованный список пакета операций с кнопками управления."""
+    if not batch:
+        return
+
     msg = f"📋 Пакет операций (осталось распределить: {total_left + len(batch)}):\n\n"
     for i, item in enumerate(batch):
         amt_str = _format_amt(item['amount'])
@@ -54,6 +57,9 @@ def _show_batch_items(user_id, batch, total_left, show_apply_all=False):
 
 def _process_next_batch(user_id, user_states):
     """Запускает следующий пакет, автоматически фильтруя уже выученные статьи."""
+    if user_id not in user_states:
+        return
+
     state_data = user_states[user_id]
     internal_uid = get_or_create_user(user_id)
     queue = state_data.get("queue", [])
@@ -176,14 +182,19 @@ def handle_queue_and_learning(user_id, user_text, user_text_lower, state, user_s
     # =========================================================
     if state == "queue_batch_review":
         state_data = user_states[user_id]
-        batch = state_data["current_batch"]
+        batch = state_data.get("current_batch", [])
 
-        # --- СОХРАНЕНИЕ ПАКЕТА ---
-        if "сохранить пакет" in user_text_lower or any(w in user_text_lower for w in ["сохранить", "готово", "ок", "+"]):
+        # Если пакет пуст — сразу переходим к следующему
+        if not batch:
+            _process_next_batch(user_id, user_states)
+            return True
+
+        # --- СОХРАНЕНИЕ ПАКЕТА (включая "Да") ---
+        if any(w in user_text_lower for w in ["сохранить пакет", "сохранить", "готово", "ок", "+", "да", "верно"]):
             send_vk_message(user_id, "⏳ Сохраняю и каскадно обновляю базу...", get_cancel_keyboard(show_back=False))
             saved_count = 0
             for item in batch:
-                if item["category"] != "Разное":
+                if item.get("category") != "Разное":
                     resolve_unverified_item(
                         user_id=internal_uid,
                         original_item=item["original_item"],
@@ -196,11 +207,11 @@ def handle_queue_and_learning(user_id, user_text, user_text_lower, state, user_s
             _process_next_batch(user_id, user_states)
             return True
 
-        # --- УДАЛЕНИЕ ВСЕГО ПАКЕТА В МУСОР («отправь все эти операции в мусор», «всё в мусор», «удали все») ---
+        # --- УДАЛЕНИЕ ВСЕГО ПАКЕТА В МУСОР ---
         all_trash_triggers = [
             "все эти операции в мусор", "все в мусор", "всё в мусор", "в мусор всё",
             "в мусор все", "это всё мусор", "это все мусор", "в корзину все", "в корзину всё",
-            "удали всё", "удали все", "стереть всё", "очисти пакет", "удалить все эти"
+            "удали всё", "удали все", "стереть всё", "очисти пакет", "удалить все эти", "всё в корзину", "все в корзину"
         ]
         if any(trig in user_text_lower for trig in all_trash_triggers):
             user_states[user_id]["state"] = "confirm_delete_all_batch_trash"
