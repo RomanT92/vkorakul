@@ -83,13 +83,16 @@ def find_entity_in_menu(menu, target_name):
 def clean_fallback_item(user_text):
     """Вырезает из текста пользователя сумму и служебные слова, оставляя реальное название."""
     text = re.sub(r'\d+([.,]\d+)?', '', user_text).strip()
-    stop_words = ["руб", "рублей", "р", "к", "k", "приход", "доход", "расход", "трата", "купил", "оплатил", "исправь", "измени", "категорию", "подкатегорию", "сумма", "на"]
+    stop_words = [
+        "руб", "рублей", "р", "к", "k", "приход", "доход", "расход", "трата",
+        "купил", "оплатил", "исправь", "измени", "категорию", "подкатегорию",
+        "сумма", "на", "покажи", "последнюю", "операцию", "операции"
+    ]
     words = [w for w in text.split() if w.lower() not in stop_words]
     clean = " ".join(words).strip()
     return clean if clean else "Операция"
 
 def _clean_json_string(text):
-    """Очищает строку от маркдауна ```json ... ``` если ИИ его добавил"""
     text = text.strip()
     if text.startswith("```json"):
         text = text[7:-3].strip()
@@ -98,7 +101,6 @@ def _clean_json_string(text):
     return text
 
 def _extract_json_data(text):
-    """Надежно извлекает JSON объект или массив из текста с помощью регулярных выражений."""
     if not text:
         return None
     match = re.search(r'(\{.*\}|\[.*\])', text, re.DOTALL)
@@ -203,8 +205,84 @@ def _match_category_tree(menu_full, op_type, text):
     return None, None
 
 def handle_transaction(user_id, user_text, state, user_states):
-    user_text_lower = user_text.lower()
+    user_text_lower = user_text.lower().strip()
     internal_uid = get_or_create_user(user_id)
+
+    # ====================================================================
+    # 0. СВЕРХБЫСТРЫЙ ДЕТЕРМИНИРОВАННЫЙ ПЕРЕХВАТ (БЕЗ ВЫЗОВА ИИ)
+    # Гарантирует мгновенное выполнение команд истории и удаления
+    # ====================================================================
+
+    # --- А. БЫСТРЫЙ ПРОСМОТР ПОСЛЕДНЕЙ ОПЕРАЦИИ ИЛИ ИСТОРИИ ---
+    history_fast_triggers = [
+        "покажи последнюю операцию", "покажи последнюю", "последняя операция",
+        "покажи последние операции", "покажи историю", "история операций",
+        "история трат", "покажи траты", "покажи расходы", "мои операции", "мои расходы"
+    ]
+    if state == "" and any(user_text_lower == trig or user_text_lower.startswith(trig) for trig in history_fast_triggers):
+        limit = 1 if ("последнюю операцию" in user_text_lower or "последняя операция" in user_text_lower) else 10
+        send_vk_message(user_id, "⏳ Загружаю историю операций...")
+        history_data = get_user_history(internal_uid, limit=limit, period=None)
+        items = history_data.get("items", [])
+        if not items:
+            send_vk_message(user_id, "📭 В журнале пока нет записанных операций.", get_main_keyboard(user_id))
+            return True
+        title = "последняя операция" if limit == 1 else f"последние {len(items)}"
+        history_data["title_period"] = title
+        user_states[user_id] = {
+            "state": "history_view",
+            "history_data": history_data
+        }
+        _show_history_screen(user_id, items, title, history_data["total_expense"], history_data["total_income"], total_count=history_data.get("count"))
+        return True
+
+    # --- Б. БЫСТРОЕ МАССОВОЕ УДАЛЕНИЕ («Удали все операции») ---
+    delete_all_fast_triggers = [
+        "удали все операции", "удалить все операции", "очисти историю",
+        "очистить историю", "удали все траты", "удалить все траты", "очисти журнал", "стереть все операции"
+    ]
+    if state == "" and any(user_text_lower == trig for trig in delete_all_fast_triggers):
+        check_hist = get_user_history(internal_uid, limit=50, period=None)
+        total_ops = check_hist.get("count", 0)
+        if total_ops == 0:
+            send_vk_message(user_id, "📭 В журнале пока нет операций для удаления.", get_main_keyboard(user_id))
+            return True
+        user_states[user_id] = {
+            "state": "confirm_delete_all_tx",
+            "period": "all"
+        }
+        send_vk_message(
+            user_id,
+            f"⚠️ ВНИМАНИЕ: Вы уверены, что хотите удалить ВСЕ операции за всё время?\n\n"
+            f"• Найдено операций: {total_ops} шт.\n"
+            f"• Данные будут удалены безвозвратно!",
+            get_yes_no_keyboard(show_back=True)
+        )
+        return True
+
+    # --- В. БЫСТРОЕ УДАЛЕНИЕ ОДНОЙ ПОСЛЕДНЕЙ ОПЕРАЦИИ ---
+    delete_last_fast_triggers = [
+        "удали последнюю операцию", "удалить последнюю операцию", "отмени последнюю запись",
+        "удали последнюю трату", "удалить последнюю", "удали последнюю"
+    ]
+    if state == "" and any(user_text_lower == trig for trig in delete_last_fast_triggers):
+        last_op = get_last_transaction(internal_uid)
+        if not last_op:
+            send_vk_message(user_id, "📭 В журнале пока нет операций для удаления.", get_main_keyboard(user_id))
+            return True
+        user_states[user_id] = {
+            "state": "confirm_delete_tx",
+            "tx_id": last_op["id"],
+            "desc": f"{last_op['article']} ({last_op['amount']:g} руб.)"
+        }
+        send_vk_message(
+            user_id,
+            f"⚠️ Вы уверены, что хотите удалить последнюю операцию?\n\n"
+            f"• {last_op['article']} — {last_op['amount']:g} руб. ({last_op['type']})\n"
+            f"• Категория: {last_op['category']} -> {last_op['subcategory']}",
+            get_yes_no_keyboard(show_back=True)
+        )
+        return True
 
     # =========================================================
     # ОБРАБОТКА «НАЗАД»
@@ -307,14 +385,12 @@ def handle_transaction(user_id, user_text, state, user_states):
             return True
 
     # =========================================================
-    # ВВОД НОВОЙ КАТЕГОРИИ ДЛЯ ОПЕРАЦИИ (БЕРЕЖНО К НАЗВАНИЮ СТАТЬИ)
+    # ВВОД НОВОЙ КАТЕГОРИИ ДЛЯ ОПЕРАЦИИ
     # =========================================================
     if state == "history_edit_category":
         sel_op = user_states[user_id].get("sel_op")
         op_type, is_exp_inc = detect_operation_type(user_text, sel_op.get("type", "Расход"))
         menu_full = get_full_menu(internal_uid)
-
-        # Сохраняем реальное название статьи! Не подменяем его на подсказку!
         original_article = sel_op["article"]
 
         db_match = smart_search_item(internal_uid, user_text, op_type=op_type)
@@ -338,7 +414,6 @@ def handle_transaction(user_id, user_text, state, user_states):
         ok = update_transaction_category(internal_uid, sel_op["id"], target_cat, target_sub, original_article)
         if ok:
             if target_cat != "Разное" and target_sub != "Требует проверки":
-                # Обучаем личный словарь привязке исходной статьи к новой категории
                 learn_user_word(internal_uid, op_type, target_cat, target_sub, original_article, original_article)
                 learn_user_word(internal_uid, op_type, target_cat, target_sub, original_article, user_text)
             send_vk_message(
@@ -827,11 +902,15 @@ def handle_transaction(user_id, user_text, state, user_states):
             processed_items = []
 
             for op in raw_ops:
+                amount = float(op.get("amount", 0))
+                # ЗАЩИТА: Не создавать операцию без суммы, если текст похож на команду
+                if amount <= 0 and not re.search(r'\d+', user_text):
+                    continue
+
                 current_item = op.get("item", "").strip()
                 if not current_item or current_item.lower() in ["приход", "доход", "расход", "трата", "поступление"]:
                     current_item = clean_fallback_item(user_text)
 
-                amount = float(op.get("amount", 0))
                 comment = op.get("comment", "").strip()
 
                 op_type, is_explicit_income = detect_operation_type(user_text, op.get("type", "Расход"), current_item, comment)
@@ -897,6 +976,9 @@ def handle_transaction(user_id, user_text, state, user_states):
                             "comment": comment,
                             "is_known": False
                         })
+
+            if not processed_items:
+                return False
 
             # =========================================================
             # СЦЕНАРИЙ А: РОВНО 1 ОПЕРАЦИЯ
