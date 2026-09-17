@@ -23,7 +23,6 @@ except ImportError:
 import vk_api
 from vk_api.longpoll import VkLongPoll
 from openai import OpenAI
-
 from config import (
     VK_TOKEN,
     AI_TUNNEL_KEY,
@@ -72,8 +71,7 @@ def get_image_base64_uri(image_url):
 def send_vk_message(user_id, text, keyboard=None):
     """
     Отправляет сообщение пользователю ВКонтакте.
-    Защищает от лимита 4096 символов (разбивает сообщение на части) и
-    корректно сериализует клавиатуру.
+    Защищает от лимита 4096 символов (разбивает сообщение на части) и корректно сериализует клавиатуру.
     """
     try:
         max_len = 3800
@@ -132,7 +130,6 @@ def parse_voice_list_command_with_ai(user_text):
         print(f"Ошибка парсинга голосовой команды списка: {e}")
         return {"action": "unknown"}
 
-# Алиас для обратной совместимости
 parse_list_command_with_ai = parse_voice_list_command_with_ai
 
 def categorize_with_ai(item, menu_str, context=""):
@@ -176,7 +173,6 @@ def extract_transaction_with_ai(user_text):
         print(f"Ошибка AI при извлечении/общении: {e}")
         return None
 
-# Алиас для обратной совместимости
 extract_operations_with_ai = extract_transaction_with_ai
 
 def transcribe_audio_with_ai(audio_url):
@@ -195,6 +191,7 @@ def transcribe_audio_with_ai(audio_url):
                 model="whisper-1",
                 file=audio_file
             )
+
         os.remove(temp_audio_path)
         return transcript.text.strip()
     except Exception as e:
@@ -207,6 +204,7 @@ def extract_receipt_total_with_ai(image_url):
         base64_uri = get_image_base64_uri(image_url)
         if not base64_uri:
             return None
+
         response = ai_client.chat.completions.create(
             model="gpt-4o",
             temperature=0.0,
@@ -215,7 +213,7 @@ def extract_receipt_total_with_ai(image_url):
                     "role": "user",
                     "content": [
                         {"type": "text", "text": PROMPT_RECEIPT_TOTAL},
-                        {"type": "image_url", "image_url": {"url": base64_uri}}
+                        {"type": "image_url", "image_url": {"url": base64_uri, "detail": "high"}}
                     ]
                 }
             ]
@@ -225,13 +223,16 @@ def extract_receipt_total_with_ai(image_url):
         print(f"Ошибка AI при чтении итога чека: {e}")
         return None
 
-def extract_receipt_items_with_ai(image_url, menu_str):
-    """Извлекает все товары из чека и распределяет их по меню (GPT-4o Vision)."""
+def extract_receipt_items_with_ai(image_url):
+    """
+    ЭТАП 1: Чистое чтение позиций чека (GPT-4o Vision) без нагрузки классификацией.
+    Извлекает список товаров с точными итоговыми суммами.
+    """
     try:
         base64_uri = get_image_base64_uri(image_url)
         if not base64_uri:
             return None
-        prompt = PROMPT_RECEIPT_ITEMS.replace("{menu_str}", menu_str)
+
         response = ai_client.chat.completions.create(
             model="gpt-4o",
             temperature=0.0,
@@ -239,8 +240,8 @@ def extract_receipt_items_with_ai(image_url, menu_str):
                 {
                     "role": "user",
                     "content": [
-                        {"type": "text", "text": prompt},
-                        {"type": "image_url", "image_url": {"url": base64_uri}}
+                        {"type": "text", "text": PROMPT_RECEIPT_ITEMS},
+                        {"type": "image_url", "image_url": {"url": base64_uri, "detail": "high"}}
                     ]
                 }
             ]
@@ -250,9 +251,9 @@ def extract_receipt_items_with_ai(image_url, menu_str):
         print(f"Ошибка AI при чтении позиций чека: {e}")
         return None
 
-def extract_receipt_items_pipeline(image_url, menu_str):
-    """Фолбэк-конвейер для совместимости."""
-    reply = extract_receipt_items_with_ai(image_url, menu_str)
+def extract_receipt_items_pipeline(image_url, menu_str=None):
+    """Фолбэк-функция для обратной совместимости."""
+    reply = extract_receipt_items_with_ai(image_url)
     if not reply:
         return []
     match = re.search(r'\[.*\]', reply, re.DOTALL)
@@ -263,10 +264,12 @@ def extract_receipt_items_pipeline(image_url, menu_str):
         return []
 
 def categorize_batch_with_ai(items_list, menu_str):
-    """Отправляет список операций в ИИ для массовой категоризации."""
+    """
+    ЭТАП 2: Массовая быстрая категоризация списка товаров через меню.
+    """
     prompt = f"Меню:\n{menu_str}\n\nОперации:\n"
     for item in items_list:
-        orig = item.get('original_item', '')
+        orig = item.get('original_item') or item.get('item', '')
         amt = item.get('amount', 0)
         prompt += f"- {orig} ({amt} руб.)\n"
 
@@ -516,6 +519,7 @@ def parse_bank_file_with_ai(file_url, file_ext):
 
         if not parsed_operations:
             return {"status": "ERROR", "message": "Не удалось найти финансовые операции в файле."}
+
         return {"status": "SUCCESS", "operations": parsed_operations}
     except Exception as e:
         print(f"Критическая ошибка парсинга: {e}")
