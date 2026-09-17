@@ -20,14 +20,14 @@ from config import (
 )
 
 # ====================================================================
-# ИНИЦИАЛИЗАЦИЯ VK API (ДЛЯ main.py)
+# ИНИЦИАЛИЗАЦИЯ СЕССИИ И LONGPOLL VK (ТРЕБУЕТСЯ ДЛЯ main.py)
 # ====================================================================
 vk_session = vk_api.VkApi(token=VK_TOKEN)
 vk = vk_session.get_api()
 longpoll = VkLongPoll(vk_session)
 
 def send_vk_message(user_id, message, keyboard=None):
-    """Отправка сообщения пользователю ВКонтакте."""
+    """Отправка текстового сообщения с опциональной клавиатурой в чат ВКонтакте."""
     url = "https://api.vk.com/method/messages.send"
     data = {
         "user_id": user_id,
@@ -44,7 +44,7 @@ def send_vk_message(user_id, message, keyboard=None):
         print(f"Ошибка отправки VK: {e}")
 
 def send_to_google_sheets(payload):
-    """Отправка вебхука в Google Apps Script."""
+    """Отправка запроса на Webhook Google Apps Script."""
     try:
         resp = requests.post(GOOGLE_SHEETS_URL, json=payload, timeout=25)
         return resp.json()
@@ -52,7 +52,7 @@ def send_to_google_sheets(payload):
         return {"status": "ERROR", "message": str(e)}
 
 def _call_llm(messages, model="gpt-4o", max_tokens=2500, temperature=0.1):
-    """Единая точка вызова моделей ИИ через AI Tunnel."""
+    """Базовый сетевой коннектор к языковым моделям через AI Tunnel."""
     headers = {
         "Authorization": f"Bearer {AI_TUNNEL_KEY}",
         "Content-Type": "application/json"
@@ -71,42 +71,42 @@ def _call_llm(messages, model="gpt-4o", max_tokens=2500, temperature=0.1):
         print(f"Ошибка LLM API ({resp.status_code}): {resp.text}")
         return ""
     except Exception as e:
-        print(f"Исключение при вызове LLM: {e}")
+        print(f"Исключение при обращении к LLM: {e}")
         return ""
 
 # ====================================================================
 # ИЗВЛЕЧЕНИЕ ОПЕРАЦИЙ (ДЛЯ handlers_transaction.py)
 # ====================================================================
 def extract_operations_with_ai(user_text):
-    """Извлечение операций из текста пользователя."""
+    """Извлекает массив операций из свободной речи пользователя."""
     messages = [
         {"role": "system", "content": PROMPT_EXTRACT},
         {"role": "user", "content": user_text}
     ]
     return _call_llm(messages, model="gpt-4o", temperature=0.0)
 
-# Прямой алиас имени для handlers_transaction.py
+# Прямой синоним имени функции для handlers_transaction.py
 extract_transaction_with_ai = extract_operations_with_ai
 
 # ====================================================================
-# РАЗБОР КОМАНД К СПИСКУ (ДЛЯ handlers_voice_commands.py)
+# РАЗБОР КОМАНД УПРАВЛЕНИЯ СПИСКОМ (ДЛЯ handlers_voice_commands.py)
 # ====================================================================
 def parse_list_command_with_ai(user_text):
-    """Разбор голосовой/текстовой команды к списку операций."""
+    """Парсит комплексные команды к выведенным спискам транзакций."""
     messages = [
         {"role": "system", "content": PROMPT_LIST_COMMAND},
         {"role": "user", "content": user_text}
     ]
     return _call_llm(messages, model="gpt-4o-mini", temperature=0.0)
 
-# Прямой алиас имени для handlers_voice_commands.py
+# Прямой синоним имени функции для handlers_voice_commands.py
 parse_voice_list_command_with_ai = parse_list_command_with_ai
 
 # ====================================================================
-# КЛАССИФИКАЦИЯ (ДЛЯ handlers_receipt.py и handlers_transaction.py)
+# КЛАССИФИКАЦИЯ ОПЕРАЦИЙ (ДЛЯ handlers_transaction.py и handlers_receipt.py)
 # ====================================================================
 def categorize_with_ai(item_name, menu_str, context=""):
-    """Классификация одной операции по меню."""
+    """Классифицирует единичную операцию по переданному дереву категорий."""
     sys_prompt = PROMPT_CATEGORIZE + f"\n\nМЕНЮ КАТЕГОРИЙ:\n{menu_str}"
     user_prompt = f"Название: {item_name}"
     if context:
@@ -129,7 +129,7 @@ def categorize_with_ai(item_name, menu_str, context=""):
 # ПАКЕТНАЯ КЛАССИФИКАЦИЯ (ДЛЯ handlers_queue.py)
 # ====================================================================
 def categorize_batch_with_ai(batch, menu_str):
-    """Пакетная классификация списка операций из очереди разбора."""
+    """Пакетно сопоставляет список нераспознанных операций с категориями меню."""
     items_names = [it.get("original_item", "") for it in batch]
     cat_prompt = PROMPT_BATCH_CATEGORIZE.format(
         menu_str=menu_str,
@@ -153,7 +153,7 @@ def categorize_batch_with_ai(batch, menu_str):
                 "subcategory": c_info.get("subcategory", "Требует проверки")
             })
     except Exception as e:
-        print(f"Ошибка categorize_batch_with_ai: {e}")
+        print(f"Ошибка в categorize_batch_with_ai: {e}")
         for item in batch:
             results.append({
                 "original_item": item.get("original_item", ""),
@@ -163,10 +163,10 @@ def categorize_batch_with_ai(batch, menu_str):
     return results
 
 # ====================================================================
-# РАБОТА С ЧЕКАМИ (ДЛЯ handlers_receipt.py)
+# ОБРАБОТКА ЧЕКОВ (ДЛЯ handlers_receipt.py)
 # ====================================================================
 def extract_receipt_total_with_ai(photo_url):
-    """Быстрое чтение общего итога чека (магазин + итоговая сумма)."""
+    """Распознает общий итог чека и название заведения/магазина."""
     messages = [
         {
             "role": "user",
@@ -179,8 +179,11 @@ def extract_receipt_total_with_ai(photo_url):
     return _call_llm(messages, model="gpt-4o", temperature=0.0)
 
 def extract_receipt_items_pipeline(photo_url, menu_str):
-    """Двухэтапный конвейер разбора чека (OCR -> Текстовая классификация)."""
-    # 1 этап: Чистое чтение позиций и сумм (GPT-4o Vision)
+    """
+    Двухэтапный конвейер:
+    Этап 1: GPT-4o Vision считывает товары, сверяет суммы со знаком '=' и правой колонкой.
+    Этап 2: Текстовая модель связывает полученный список с меню категорий.
+    """
     ocr_messages = [
         {
             "role": "user",
@@ -200,7 +203,7 @@ def extract_receipt_items_pipeline(photo_url, menu_str):
         data = json.loads(clean_json)
         raw_items = data.get("items", [])
     except Exception as e:
-        print(f"Ошибка парсинга JSON OCR: {e}")
+        print(f"Ошибка парсинга JSON OCR Этапа 1: {e}")
         return []
 
     if not raw_items:
@@ -221,7 +224,6 @@ def extract_receipt_items_pipeline(photo_url, menu_str):
     if not items_for_cat:
         return []
 
-    # 2 этап: Быстрая текстовая категоризация по меню
     cat_prompt = PROMPT_BATCH_CATEGORIZE.format(
         menu_str=menu_str,
         items_json=json.dumps([x["item"] for x in items_for_cat], ensure_ascii=False)
@@ -252,10 +254,10 @@ def extract_receipt_items_pipeline(photo_url, menu_str):
     return final_results
 
 # ====================================================================
-# ГОЛОСОВЫЕ СООБЩЕНИЯ (ДЛЯ main.py)
+# ТРАНСКРИБАЦИЯ ГОЛОСОВЫХ СООБЩЕНИЙ (ДЛЯ main.py)
 # ====================================================================
 def transcribe_audio_with_ai(audio_url):
-    """Распознавание голосовых сообщений через Whisper API."""
+    """Распознавание аудиосообщения через Whisper API."""
     try:
         resp_audio = requests.get(audio_url, timeout=30)
         if resp_audio.status_code != 200:
@@ -281,10 +283,10 @@ def transcribe_audio_with_ai(audio_url):
         return ""
 
 # ====================================================================
-# ИМПОРТ ВЫПИСОК (ДЛЯ main.py)
+# ПАРСИНГ ФАЙЛОВ БАНКОВСКИХ ВЫПИСОК (ДЛЯ main.py)
 # ====================================================================
 def parse_bank_file_with_ai(doc_url, doc_ext):
-    """Парсинг банковской выписки (CSV/XLSX)."""
+    """Скачивание и преобразование CSV / XLSX выписки в плоский массив операций."""
     try:
         import pandas as pd
         resp = requests.get(doc_url, timeout=30)
@@ -334,3 +336,4 @@ def parse_bank_file_with_ai(doc_url, doc_ext):
         return {"status": "SUCCESS", "operations": operations}
     except Exception as e:
         return {"status": "ERROR", "message": str(e)}
+        
