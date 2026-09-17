@@ -32,13 +32,32 @@ def _extract_json_array(text):
     match = re.search(r'\[.*\]', text, re.DOTALL)
     return match.group(0) if match else text.strip()
 
+def _format_amt(amount):
+    """Форматирует число без лишних нулей для удобного чтения."""
+    try:
+        val = float(amount)
+        if val.is_integer():
+            return f"{int(val)}"
+        return f"{val:.2f}"
+    except Exception:
+        return str(amount)
+
 def _show_receipt_items(user_id, items):
-    """Выводит пронумерованный список товаров из чека."""
-    msg = "📋 Распознанные позиции:\n\n"
+    """Выводит пронумерованный список товаров из чека с подсчетом общей суммы."""
+    msg = "📋 Распознанные позиции чека:\n\n"
+    total_sum = 0.0
     for i, item in enumerate(items):
-        msg += f"{i+1}. {item.get('item')} — {item.get('amount')} руб.\n"
-        msg += f" 📂 {item.get('category', '?')} -> {item.get('subcategory', '?')}\n\n"
-    msg += "Если всё верно, жмите «✅ Готово».\nЕсли есть ошибка — отправьте НОМЕР товара, чтобы дать подсказку."
+        amt = float(item.get('amount', 0))
+        total_sum += amt
+        amt_str = _format_amt(amt)
+        cat = item.get('category', '?')
+        sub = item.get('subcategory', '?')
+        msg += f"{i+1}. {item.get('item')} — {amt_str} руб.\n"
+        msg += f"   📁 {cat} ➔ {sub}\n\n"
+
+    msg += f"💰 Сумма распознанных позиций: {_format_amt(total_sum)} руб.\n\n"
+    msg += "👉 Если всё верно — нажмите «✅ Готово».\n"
+    msg += "👉 Если нужно исправить категорию или товар — отправьте его НОМЕР."
     send_vk_message(user_id, msg, get_receipt_review_keyboard(len(items), show_back=True))
 
 def handle_receipt(user_id, user_text, user_text_lower, state, user_states):
@@ -78,9 +97,9 @@ def handle_receipt(user_id, user_text, user_text_lower, state, user_states):
                 clean_json = _extract_json_object(reply_text)
                 try:
                     parsed_data = json.loads(clean_json)
-                    shop_name = parsed_data.get('item', 'Покупка по чеку')
-                    amount = float(parsed_data.get('amount', 0))
-                    comment = parsed_data.get('comment', '')
+                    shop_name = str(parsed_data.get('item', 'Покупка по чеку')).strip()
+                    amount = abs(float(parsed_data.get('amount', 0)))
+                    comment = str(parsed_data.get('comment', '')).strip()
 
                     send_vk_message(user_id, f"⚡ Ищу '{shop_name}' в базе...")
                     search_res = smart_search_item(internal_uid, shop_name, "Расход")
@@ -99,7 +118,7 @@ def handle_receipt(user_id, user_text, user_text_lower, state, user_states):
                         )
                         send_vk_message(
                             user_id,
-                            f"✅ Чек успешно записан!\n📂 {search_res['category']} -> {search_res['subcategory']}",
+                            f"✅ Чек успешно записан!\n📁 {search_res['category']} ➔ {search_res['subcategory']}\nСумма: {_format_amt(amount)} руб.",
                             get_main_keyboard(user_id)
                         )
                     else:
@@ -120,7 +139,7 @@ def handle_receipt(user_id, user_text, user_text_lower, state, user_states):
                                 "ai_sub": ai_sub,
                                 "attempts": 1
                             }
-                            send_vk_message(user_id, f"🤖 Думаю, '{shop_name}' относится к:\n📂 {ai_cat} -> {ai_sub}\n\nВсё верно?", get_yes_no_keyboard(show_back=True))
+                            send_vk_message(user_id, f"🤖 Думаю, '{shop_name}' относится к:\n📁 {ai_cat} ➔ {ai_sub}\n\nВсё верно?", get_yes_no_keyboard(show_back=True))
                         else:
                             user_states[user_id] = {
                                 "state": "provide_context",
@@ -149,23 +168,45 @@ def handle_receipt(user_id, user_text, user_text_lower, state, user_states):
                 sub_list = subs.keys() if isinstance(subs, dict) else subs
                 menu_str += f"{c}: {', '.join(sub_list)}\n"
 
-            send_vk_message(user_id, "👀 Изучаю каждую позицию в чеке (GPT-4o Vision)...")
+            send_vk_message(user_id, "👀 Изучаю каждую позицию чека (GPT-4o Vision)... Это займет 10-15 секунд.")
             reply_text = extract_receipt_items_with_ai(photo_url, menu_str)
 
             if reply_text:
                 clean_json = _extract_json_array(reply_text)
                 try:
-                    items = json.loads(clean_json)
-                    if isinstance(items, list) and len(items) > 0:
-                        user_states[user_id] = {
-                            "state": "receipt_review",
-                            "items": items,
-                            "menu": menu_full,
-                            "menu_str": menu_str
-                        }
-                        _show_receipt_items(user_id, items)
+                    raw_items = json.loads(clean_json)
+                    if isinstance(raw_items, list) and len(raw_items) > 0:
+                        # Санитизация и фильтрация промежуточных строк
+                        valid_items = []
+                        for it in raw_items:
+                            name = str(it.get("item", "")).strip()
+                            try:
+                                amt = abs(float(it.get("amount", 0)))
+                            except Exception:
+                                amt = 0.0
+
+                            # Исключаем мусорные строки с нулевой ценой или техническими заголовками
+                            if amt > 0 and name and not any(w in name.lower() for w in ["итог", "итогр", "всего к оплате", "сумма ндс", "скидка"]):
+                                valid_items.append({
+                                    "item": name,
+                                    "amount": amt,
+                                    "category": it.get("category", "Разное"),
+                                    "subcategory": it.get("subcategory", "Требует проверки")
+                                })
+
+                        if valid_items:
+                            user_states[user_id] = {
+                                "state": "receipt_review",
+                                "items": valid_items,
+                                "menu": menu_full,
+                                "menu_str": menu_str
+                            }
+                            _show_receipt_items(user_id, valid_items)
+                        else:
+                            send_vk_message(user_id, "❌ Не удалось распознать товарные позиции на чеке.", get_main_keyboard(user_id))
+                            del user_states[user_id]
                     else:
-                        send_vk_message(user_id, "❌ Не удалось найти позиции на чеке.", get_main_keyboard(user_id))
+                        send_vk_message(user_id, "❌ На чеке не обнаружено товарных позиций.", get_main_keyboard(user_id))
                         del user_states[user_id]
                 except json.JSONDecodeError:
                     send_vk_message(user_id, "❌ Ошибка: ИИ вернул неверный формат списка позиций.", get_main_keyboard(user_id))
@@ -187,7 +228,7 @@ def handle_receipt(user_id, user_text, user_text_lower, state, user_states):
 
             for item in items:
                 item_name = item.get("item", "Товар")
-                amount = float(item.get("amount", 0))
+                amount = abs(float(item.get("amount", 0)))
                 cat = item.get("category", "Разное")
                 sub = item.get("subcategory", "Требует проверки")
 
@@ -231,21 +272,21 @@ def handle_receipt(user_id, user_text, user_text_lower, state, user_states):
                 sel_item = items[idx]
                 send_vk_message(
                     user_id,
-                    f"✏️ Исправляем: «{sel_item.get('item')}»\n"
+                    f"✏️ Исправляем: «{sel_item.get('item')}» ({_format_amt(sel_item.get('amount'))} руб.)\n"
                     f"Напишите правильную категорию или точное название статьи (например: «Хлеб», «Молоко»):",
                     get_cancel_keyboard(show_back=True)
                 )
-            return True
+                return True
 
     # =========================================================
-    # 3. ИСПРАВЛЕНИЕ КАТЕГОРИИ У КОНКРЕТНОГО ТОВАРА (ПОИСК В БД ПЕРВЫМ!)
+    # 3. ИСПРАВЛЕНИЕ КАТЕГОРИИ У КОНКРЕТНОГО ТОВАРА (СНАЧАЛА ПО БД)
     # =========================================================
     if state == "receipt_edit_hint":
         idx = user_states[user_id]["edit_idx"]
         items = user_states[user_id]["items"]
         sel_item = items[idx]
 
-        # 1. Поиск подсказки по БД
+        # 1. Поиск подсказки в персональной и глобальной БД
         db_match = smart_search_item(internal_uid, user_text, op_type="Расход")
         if db_match["status"] != "FOUND":
             db_match = smart_search_item(internal_uid, user_text, op_type=None)
@@ -277,7 +318,7 @@ def handle_receipt(user_id, user_text, user_text_lower, state, user_states):
                 if found_in_tree:
                     break
 
-            # 3. Резерв через ИИ
+            # 3. Резервный подбор через ИИ
             if not found_in_tree:
                 send_vk_message(user_id, "🧠 Подбираю категорию с помощью ИИ...", get_cancel_keyboard(show_back=True))
                 menu_str = user_states[user_id]["menu_str"]
