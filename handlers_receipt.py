@@ -55,7 +55,7 @@ def _show_receipt_items(user_id, items):
         msg += f"{i+1}. {item.get('item')} — {amt_str} руб.\n"
         msg += f"   📁 {cat} ➔ {sub}\n\n"
 
-    msg += f"💰 Сумма распознанных позиций: {_format_amt(total_sum)} руб.\n\n"
+    msg += f"💰 Сумма всех позиций: {_format_amt(total_sum)} руб.\n\n"
     msg += "👉 Если всё верно — нажмите «✅ Готово».\n"
     msg += "👉 Если нужно исправить категорию или товар — отправьте его НОМЕР."
     send_vk_message(user_id, msg, get_receipt_review_keyboard(len(items), show_back=True))
@@ -161,14 +161,14 @@ def handle_receipt(user_id, user_text, user_text_lower, state, user_states):
         elif "по позициям" in user_text_lower:
             send_vk_message(user_id, "⏳ Загружаю структуру категорий...", get_cancel_keyboard(show_back=True))
             menu_full = get_full_menu(internal_uid)
-            
+
             exp_menu = menu_full.get("Расход", {})
             menu_str = "[Расход]\n"
             for c, subs in exp_menu.items():
                 sub_list = subs.keys() if isinstance(subs, dict) else subs
                 menu_str += f"{c}: {', '.join(sub_list)}\n"
 
-            send_vk_message(user_id, "👀 Изучаю каждую позицию чека (GPT-4o Vision)... Это займет 10-15 секунд.")
+            send_vk_message(user_id, "👀 Изучаю чек построчно с правилом знака «=» и правой колонки... Это займет 10-15 секунд.")
             reply_text = extract_receipt_items_with_ai(photo_url, menu_str)
 
             if reply_text:
@@ -176,8 +176,10 @@ def handle_receipt(user_id, user_text, user_text_lower, state, user_states):
                 try:
                     raw_items = json.loads(clean_json)
                     if isinstance(raw_items, list) and len(raw_items) > 0:
-                        # Санитизация и фильтрация промежуточных строк
+                        # Санитизация и строгая фильтрация не-товарных строк
                         valid_items = []
+                        stop_patterns = ["итог", "итогр", "всего к оплате", "сумма ндс", "скидка", "безналич", "карта", "сдача"]
+
                         for it in raw_items:
                             name = str(it.get("item", "")).strip()
                             try:
@@ -185,8 +187,9 @@ def handle_receipt(user_id, user_text, user_text_lower, state, user_states):
                             except Exception:
                                 amt = 0.0
 
-                            # Исключаем мусорные строки с нулевой ценой или техническими заголовками
-                            if amt > 0 and name and not any(w in name.lower() for w in ["итог", "итогр", "всего к оплате", "сумма ндс", "скидка"]):
+                            is_stop = any(p in name.lower() for p in stop_patterns)
+
+                            if amt > 0 and name and not is_stop:
                                 valid_items.append({
                                     "item": name,
                                     "amount": amt,
@@ -251,14 +254,14 @@ def handle_receipt(user_id, user_text, user_text_lower, state, user_states):
                 )
                 if ok:
                     success_count += 1
-                
+
                 if op_status == 'verified':
                     learn_user_word(internal_uid, "Расход", cat, sub, item_name, item_name)
 
             report_msg = f"🎉 Успешно сохранено {success_count} позиций!"
             if needs_review_count > 0:
                 report_msg += f"\n\n⚠️ {needs_review_count} позиций требуют уточнения. Вы можете распределить их кнопкой «📥 Разобрать операции»."
-            
+
             send_vk_message(user_id, report_msg, get_main_keyboard(user_id))
             del user_states[user_id]
             return True
@@ -279,7 +282,7 @@ def handle_receipt(user_id, user_text, user_text_lower, state, user_states):
                 return True
 
     # =========================================================
-    # 3. ИСПРАВЛЕНИЕ КАТЕГОРИИ У КОНКРЕТНОГО ТОВАРА (СНАЧАЛА ПО БД)
+    # 3. ИСПРАВЛЕНИЕ КАТЕГОРИИ У КОНКРЕТНОГО ТОВАРА
     # =========================================================
     if state == "receipt_edit_hint":
         idx = user_states[user_id]["edit_idx"]
