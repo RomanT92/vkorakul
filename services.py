@@ -1,567 +1,195 @@
 # -*- coding: utf-8 -*-
-import os
-import sys
-import subprocess
-import base64
-import re
-import io
-
-# ====================================================================
-# АВТОУСТАНОВКА БИБЛИОТЕК (Хак для Bothost)
-# ====================================================================
-try:
-    import pandas as pd
-except ImportError:
-    print("Библиотеки не найдены. Запускаю автоустановку...")
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "pandas", "openpyxl"])
-    print("Установка завершена! Перезапускаю скрипт, чтобы применить изменения...")
-    os.execv(sys.executable, [sys.executable] + sys.argv)
-
-import vk_api
-from vk_api.longpoll import VkLongPoll
-from openai import OpenAI
 import requests
 import json
-import tempfile
-
+import re
 from config import (
     VK_TOKEN,
     AI_TUNNEL_KEY,
     GOOGLE_SHEETS_URL,
     AI_BASE_URL,
-    PROMPT_CATEGORIZE,
     PROMPT_EXTRACT,
     PROMPT_LIST_COMMAND,
+    PROMPT_CATEGORIZE,
     PROMPT_RECEIPT_TOTAL,
-    PROMPT_RECEIPT_ITEMS,
+    PROMPT_RECEIPT_OCR_ONLY,
     PROMPT_BATCH_CATEGORIZE,
     PROMPT_FILE_MAPPING
 )
 
-# ====================================================================
-# ИНИЦИАЛИЗАЦИЯ КЛИЕНТОВ (ВК и ИИ)
-# ====================================================================
-vk_session = vk_api.VkApi(token=VK_TOKEN, api_version='5.131')
-longpoll = VkLongPoll(vk_session)
-vk = vk_session.get_api()
-ai_client = OpenAI(api_key=AI_TUNNEL_KEY, base_url=AI_BASE_URL)
-
-# ====================================================================
-# ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ДЛЯ РАБОТЫ С ФОТО
-# ====================================================================
-def get_image_base64_uri(image_url):
-    """Скачивает изображение из ВК через Python и кодирует в Base64."""
+def send_vk_message(user_id, message, keyboard=None):
+    """Отправка сообщения в чат ВКонтакте."""
+    url = "https://api.vk.com/method/messages.send"
+    data = {
+        "user_id": user_id,
+        "message": message,
+        "random_id": 0,
+        "access_token": VK_TOKEN,
+        "v": "5.131"
+    }
+    if keyboard:
+        data["keyboard"] = keyboard
     try:
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        }
-        res = requests.get(image_url, headers=headers, timeout=25)
-        if res.status_code == 200:
-            b64_data = base64.b64encode(res.content).decode("utf-8")
-            return f"data:image/jpeg;base64,{b64_data}"
-        else:
-            print(f"Ошибка загрузки фото из ВК: HTTP {res.status_code}")
-            return None
+        requests.post(url, data=data, timeout=10)
     except Exception as e:
-        print(f"Исключение при скачивании фото: {e}")
-        return None
-
-# ====================================================================
-# ФУНКЦИИ СВЯЗИ С ВК (С ЗАЩИТОЙ ОТ ЗАВИСАНИЯ И ДЛИННЫХ ТЕКСТОВ)
-# ====================================================================
-def send_vk_message(user_id, text, keyboard=None):
-    """
-    Отправляет сообщение пользователю ВКонтакте.
-    Защищает от лимита 4096 символов (разбивает сообщение на части).
-    """
-    try:
-        max_len = 3800
-        if len(text) > max_len:
-            parts = [text[i:i+max_len] for i in range(0, len(text), max_len)]
-            for idx, part in enumerate(parts):
-                kb = keyboard if idx == len(parts) - 1 else None
-                post = {'user_id': user_id, 'message': part, 'random_id': 0}
-                if kb is not None:
-                    post['keyboard'] = kb.get_keyboard()
-                vk.messages.send(**post)
-            return
-
-        post = {'user_id': user_id, 'message': text, 'random_id': 0}
-        if keyboard is not None:
-            post['keyboard'] = keyboard.get_keyboard()
-        vk.messages.send(**post)
-    except Exception as e:
-        print(f"Ошибка отправки сообщения ВК с клавиатурой: {e}")
-        try:
-            vk.messages.send(user_id=user_id, message=text[:3800], random_id=0)
-        except Exception as e2:
-            print(f"Критическая ошибка отправки: {e2}")
+        print(f"Ошибка отправки VK: {e}")
 
 def send_to_google_sheets(payload):
-    """Отправляет JSON-данные в Google Таблицу и возвращает ответ."""
+    """Отправка вебхука в Google Apps Script."""
     try:
-        response = requests.post(GOOGLE_SHEETS_URL, json=payload, timeout=20)
-        return response.json()
+        resp = requests.post(GOOGLE_SHEETS_URL, json=payload, timeout=25)
+        return resp.json()
     except Exception as e:
         return {"status": "ERROR", "message": str(e)}
 
-# ====================================================================
-# ФУНКЦИИ ОБРАБОТКИ ЧЕРЕЗ ИИ
-# ====================================================================
-def parse_voice_list_command_with_ai(user_text):
-    """Распознает голосовые/текстовые команды управления элементами списков."""
+def _call_llm(messages, model="gpt-4o", max_tokens=2500, temperature=0.1):
+    """Единая точка вызова языковых моделей через AI Tunnel."""
+    headers = {
+        "Authorization": f"Bearer {AI_TUNNEL_KEY}",
+        "Content-Type": "application/json"
+    }
+    body = {
+        "model": model,
+        "messages": messages,
+        "temperature": temperature,
+        "max_tokens": max_tokens
+    }
     try:
-        response = ai_client.chat.completions.create(
-            model="gpt-3.5-turbo",
-            temperature=0.0,
-            messages=[
-                {"role": "system", "content": PROMPT_LIST_COMMAND},
-                {"role": "user", "content": user_text}
-            ]
-        )
-        text = response.choices[0].message.content.strip()
-        match = re.search(r'\{.*\}', text, re.DOTALL)
-        if match:
-            return json.loads(match.group(0))
-        return json.loads(text)
+        resp = requests.post(f"{AI_BASE_URL}chat/completions", headers=headers, json=body, timeout=60)
+        if resp.status_code == 200:
+            res_json = resp.json()
+            return res_json["choices"][0]["message"]["content"].strip()
+        print(f"Ошибка LLM API ({resp.status_code}): {resp.text}")
+        return ""
     except Exception as e:
-        print(f"Ошибка парсинга голосовой команды списка: {e}")
-        return {"action": "unknown"}
+        print(f"Исключение при вызове LLM: {e}")
+        return ""
 
-def categorize_with_ai(item, menu_str, context=""):
-    """Просит ИИ подобрать категорию из меню с учетом контекста."""
-    prompt = f"Операция: {item}\n"
+def extract_operations_with_ai(user_text):
+    """Извлечение операций из текста пользователя."""
+    messages = [
+        {"role": "system", "content": PROMPT_EXTRACT},
+        {"role": "user", "content": user_text}
+    ]
+    return _call_llm(messages, model="gpt-4o", temperature=0.0)
+
+def parse_list_command_with_ai(user_text):
+    """Разбор голосовой/текстовой команды к списку операций."""
+    messages = [
+        {"role": "system", "content": PROMPT_LIST_COMMAND},
+        {"role": "user", "content": user_text}
+    ]
+    return _call_llm(messages, model="gpt-4o-mini", temperature=0.0)
+
+def categorize_with_ai(item_name, menu_str, context=""):
+    """Классификация одной операции по меню."""
+    sys_prompt = PROMPT_CATEGORIZE + f"\n\nМЕНЮ КАТЕГОРИЙ:\n{menu_str}"
+    user_prompt = f"Название: {item_name}"
     if context:
-        prompt += f"Подсказка пользователя: {context}\n"
-    prompt += f"\nМеню:\n{menu_str}"
+        user_prompt += f"\nПодсказка пользователя: {context}"
 
+    messages = [
+        {"role": "system", "content": sys_prompt},
+        {"role": "user", "content": user_prompt}
+    ]
+    raw = _call_llm(messages, model="gpt-4o-mini", temperature=0.0)
     try:
-        response = ai_client.chat.completions.create(
-            model="gpt-3.5-turbo",
-            temperature=0.2,
-            messages=[
-                {"role": "system", "content": PROMPT_CATEGORIZE},
-                {"role": "user", "content": prompt}
+        match = re.search(r'\{.*\}', raw, re.DOTALL)
+        clean = match.group(0) if match else raw
+        d = json.loads(clean)
+        return d.get("category", "Разное"), d.get("subcategory", "Требует проверки")
+    except Exception:
+        return "Разное", "Требует проверки"
+
+def extract_receipt_total_with_ai(photo_url):
+    """Быстрое чтение общего итога чека (магазин + итоговая сумма)."""
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": PROMPT_RECEIPT_TOTAL},
+                {"type": "image_url", "image_url": {"url": photo_url}}
             ]
-        )
-        text = response.choices[0].message.content.strip()
-        match = re.search(r'\{.*\}', text, re.DOTALL)
-        if match:
-            data = json.loads(match.group(0))
-            return data.get("category", "UNKNOWN"), data.get("subcategory", "UNKNOWN")
-    except Exception as e:
-        print(f"Ошибка AI при категоризации: {e}")
-    return "UNKNOWN", "UNKNOWN"
-
-def extract_transaction_with_ai(user_text):
-    """Парсит финансовые операции, команды истории/удаления или общается."""
-    try:
-        response = ai_client.chat.completions.create(
-            model="gpt-3.5-turbo",
-            temperature=0.2,
-            messages=[
-                {"role": "system", "content": PROMPT_EXTRACT},
-                {"role": "user", "content": user_text}
-            ]
-        )
-        return response.choices[0].message.content.strip()
-    except Exception as e:
-        print(f"Ошибка AI при извлечении/общении: {e}")
-        return None
-
-def transcribe_audio_with_ai(audio_url):
-    """Скачивает голосовое сообщение из ВК и переводит его в текст."""
-    try:
-        response = requests.get(audio_url, timeout=20)
-        if response.status_code != 200:
-            return None
-
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".ogg") as temp_audio:
-            temp_audio.write(response.content)
-            temp_audio_path = temp_audio.name
-
-        with open(temp_audio_path, "rb") as audio_file:
-            transcript = ai_client.audio.transcriptions.create(
-                model="whisper-1",
-                file=audio_file
-            )
-
-        os.remove(temp_audio_path)
-        return transcript.text.strip()
-    except Exception as e:
-        print(f"Ошибка распознавания голоса: {e}")
-        return None
-
-def extract_receipt_total_with_ai(image_url):
-    """Извлекает общий итог и магазин из чека (GPT-4o Vision)."""
-    try:
-        base64_uri = get_image_base64_uri(image_url)
-        if not base64_uri:
-            return None
-
-        response = ai_client.chat.completions.create(
-            model="gpt-4o",
-            temperature=0.0,
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": PROMPT_RECEIPT_TOTAL},
-                        {"type": "image_url", "image_url": {"url": base64_uri}}
-                    ]
-                }
-            ]
-        )
-        return response.choices[0].message.content.strip()
-    except Exception as e:
-        print(f"Ошибка AI при чтении итога чека: {e}")
-        return None
-
-def extract_receipt_items_with_ai(image_url, menu_str):
-    """Извлекает все товары из чека и распределяет их по меню."""
-    try:
-        base64_uri = get_image_base64_uri(image_url)
-        if not base64_uri:
-            return None
-
-        prompt = PROMPT_RECEIPT_ITEMS.replace("{menu_str}", menu_str)
-        response = ai_client.chat.completions.create(
-            model="gpt-4o",
-            temperature=0.0,
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": prompt},
-                        {"type": "image_url", "image_url": {"url": base64_uri}}
-                    ]
-                }
-            ]
-        )
-        return response.choices[0].message.content.strip()
-    except Exception as e:
-        print(f"Ошибка AI при чтении позиций чека: {e}")
-        return None
-
-def categorize_batch_with_ai(items_list, menu_str):
-    """Отправляет список операций в ИИ для массовой категоризации."""
-    prompt = f"Меню:\n{menu_str}\n\nОперации:\n"
-    for item in items_list:
-        prompt += f"- {item['original_item']} ({item['amount']} руб.)\n"
-
-    try:
-        response = ai_client.chat.completions.create(
-            model="gpt-3.5-turbo",
-            temperature=0.2,
-            messages=[
-                {"role": "system", "content": PROMPT_BATCH_CATEGORIZE},
-                {"role": "user", "content": prompt}
-            ]
-        )
-        text = response.choices[0].message.content.strip()
-        match = re.search(r'\[.*\]', text, re.DOTALL)
-        if match:
-            return json.loads(match.group(0))
-        return json.loads(text)
-    except Exception as e:
-        print(f"Ошибка AI при пакетной категоризации: {e}")
-    return []
-
-# ====================================================================
-# УМНЫЙ ПАРСИНГ ВЫПИСОК (БАНКИ РФ + ПАНДАС + ИИ)
-# ====================================================================
-
-def _clean_amount(raw_val):
-    """
-    Очищает строку от любых значков валют (₽, руб, $), разделителей тысяч и пробелов.
-    Корректно преобразует ' -1 500,50 ₽ ' -> -1500.5
-    """
-    if raw_val is None:
-        return 0.0
-    s = str(raw_val).strip()
-    if not s or s.lower() in ["nan", "none", "null", ""]:
-        return 0.0
-
-    # Проверяем, есть ли знак минус в начале или в конце (бывает '1500.00-')
-    is_negative = ('-' in s) or ('CR' in s.upper())
-
-    # Убираем все нечисловые символы, кроме точки и запятой
-    clean_s = re.sub(r'[^\d.,]', '', s)
-    if not clean_s:
-        return 0.0
-
-    # Обработка разделителей: если есть и точка, и запятая (например 1.500,50)
-    if '.' in clean_s and ',' in clean_s:
-        if clean_s.rfind(',') > clean_s.rfind('.'):
-            clean_s = clean_s.replace('.', '').replace(',', '.')
-        else:
-            clean_s = clean_s.replace(',', '')
-    elif ',' in clean_s:
-        clean_s = clean_s.replace(',', '.')
-
-    try:
-        val = float(clean_s)
-        return -val if is_negative else val
-    except ValueError:
-        return 0.0
-
-def _detect_bank_columns(df):
-    """
-    Сканирует первые 25 строк таблицы в поисках стандартных заголовков банков РФ.
-    Возвращает словарь индексов колонок или None, если стандартная шапка не найдена.
-    """
-    date_keywords = ["дата операции", "дата платежа", "дата проводки", "дата", "date"]
-    amount_keywords = ["сумма операции", "сумма платежа", "сумма в валюте счета", "сумма", "amount"]
-    expense_keywords = ["сумма списания", "списание", "расход", "дебет", "debit", "снятие"]
-    income_keywords = ["сумма зачисления", "зачисление", "пополнение", "приход", "доход", "кредит", "credit"]
-    desc_keywords = ["описание операции", "назначение платежа", "детали платежа", "контрагент", "описание", "получатель", "категория", "merchant", "description"]
-
-    max_scan_rows = min(25, len(df))
-    for r_idx in range(max_scan_rows):
-        row_cells = [str(cell).lower().strip() for cell in df.iloc[r_idx].values]
-
-        found_date = None
-        found_amount = None
-        found_expense = None
-        found_income = None
-        found_desc = None
-
-        for c_idx, cell in enumerate(row_cells):
-            if not cell:
-                continue
-            # Ищем дату
-            if found_date is None and any(kw in cell for kw in date_keywords):
-                found_date = c_idx
-                continue
-            # Ищем раздельные колонки расхода/дохода
-            if found_expense is None and any(kw in cell for kw in expense_keywords):
-                found_expense = c_idx
-                continue
-            if found_income is None and any(kw in cell for kw in income_keywords):
-                found_income = c_idx
-                continue
-            # Ищем общую колонку суммы
-            if found_amount is None and any(kw in cell for kw in amount_keywords):
-                found_amount = c_idx
-                continue
-            # Ищем описание
-            if found_desc is None and any(kw in cell for kw in desc_keywords):
-                found_desc = c_idx
-                continue
-
-        # Условие успешного автоопределения шапки:
-        has_amount = (found_amount is not None) or (found_expense is not None and found_income is not None)
-        if found_date is not None and has_amount and found_desc is not None:
-            return {
-                "header_row": r_idx,
-                "date_col": found_date,
-                "desc_col": found_desc,
-                "amount_col": found_amount,
-                "expense_col": found_expense,
-                "income_col": found_income
-            }
-
-    return None
-
-def parse_bank_file_with_ai(file_url, file_ext):
-    """
-    Скачивает файл выписки, автоматически определяет кодировку и структуру (flat/matrix),
-    извлекая операции в формате [[date, op_type, amount, desc], ...].
-    """
-    try:
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
         }
-        response = requests.get(file_url, headers=headers, timeout=35)
-        if response.status_code != 200:
-            return {"status": "ERROR", "message": f"Не удалось скачать файл от ВК (HTTP {response.status_code})"}
+    ]
+    return _call_llm(messages, model="gpt-4o", temperature=0.0)
 
-        with tempfile.NamedTemporaryFile(delete=False, suffix=file_ext) as temp_file:
-            temp_file.write(response.content)
-            temp_file_path = temp_file.name
+# ====================================================================
+# ДВУХЭТАПНЫЙ ПАЙПЛАЙН ЧТЕНИЯ ЧЕКА (OCR -> BATCH CATEGORIZE)
+# ====================================================================
+def extract_receipt_items_pipeline(photo_url, menu_str):
+    """
+    Двухэтапный разбор чека:
+    Этап 1: GPT-4o Vision только считывает все позиции и точные цены (с правилом '=').
+    Этап 2: Текстовая модель пакетно проставляет категории из menu_str.
+    """
+    # --- ЭТАП 1: Vision OCR ---
+    ocr_messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": PROMPT_RECEIPT_OCR_ONLY},
+                {"type": "image_url", "image_url": {"url": photo_url}}
+            ]
+        }
+    ]
+    raw_ocr = _call_llm(ocr_messages, model="gpt-4o", temperature=0.0, max_tokens=3000)
+    if not raw_ocr:
+        return []
 
-        dfs = {}
-        if file_ext == ".csv":
-            # Перебираем кодировки и разделители банков РФ
-            loaded_df = None
-            for enc in ["utf-8-sig", "windows-1251", "utf-8", "cp1251"]:
-                for sep in [";", ",", "\t"]:
-                    try:
-                        test_df = pd.read_csv(temp_file_path, header=None, dtype=str, encoding=enc, sep=sep, on_bad_lines='skip')
-                        if test_df.shape[1] > 1 and len(test_df) > 0:
-                            loaded_df = test_df
-                            break
-                    except Exception:
-                        continue
-                if loaded_df is not None:
-                    break
-            
-            if loaded_df is None:
-                loaded_df = pd.read_csv(temp_file_path, header=None, dtype=str, errors='replace')
-            dfs = {"Выписка": loaded_df}
-        else:
-            # Excel (.xlsx / .xls)
-            try:
-                dfs = pd.read_excel(temp_file_path, sheet_name=None, header=None, dtype=str)
-            except Exception:
-                # Фолбэк на openpyxl / xlrd
-                dfs = pd.read_excel(temp_file_path, sheet_name=None, header=None, dtype=str, engine='openpyxl')
-
-        os.remove(temp_file_path)
-
-        parsed_operations = []
-
-        for sheet_name, df in dfs.items():
-            if df is None or df.empty or len(df) < 2:
-                continue
-
-            # -------------------------------------------------------------
-            # ЭТАП 1: БЫСТРЫЙ ДЕТЕКТОР ВЫПИСОК БАНКОВ РФ (Сбер, Т-Банк, ВТБ, Альфа)
-            # -------------------------------------------------------------
-            auto_meta = _detect_bank_columns(df)
-            if auto_meta is not None:
-                h_idx = auto_meta["header_row"]
-                d_col = auto_meta["date_col"]
-                desc_col = auto_meta["desc_col"]
-                amt_col = auto_meta["amount_col"]
-                exp_col = auto_meta["expense_col"]
-                inc_col = auto_meta["income_col"]
-
-                for i in range(h_idx + 1, len(df)):
-                    row = df.iloc[i].values
-                    if d_col >= len(row) or desc_col >= len(row):
-                        continue
-
-                    date_val = str(row[d_col]).strip()
-                    desc_val = str(row[desc_col]).strip()
-
-                    if not date_val or not desc_val or date_val.lower() in ["nan", "none", "nat", "дата"]:
-                        continue
-
-                    final_amount = 0.0
-                    op_type = "Расход"
-
-                    # Если раздельные колонки (Списание и Зачисление)
-                    if exp_col is not None and inc_col is not None:
-                        exp_amt = abs(_clean_amount(row[exp_col])) if exp_col < len(row) else 0.0
-                        inc_amt = abs(_clean_amount(row[inc_col])) if inc_col < len(row) else 0.0
-
-                        if inc_amt > 0:
-                            final_amount = inc_amt
-                            op_type = "Доход"
-                        elif exp_amt > 0:
-                            final_amount = exp_amt
-                            op_type = "Расход"
-                    # Если одна общая колонка суммы
-                    elif amt_col is not None and amt_col < len(row):
-                        raw_amt = _clean_amount(row[amt_col])
-                        if raw_amt > 0:
-                            # Проверяем, может в описании или знаке есть указание
-                            final_amount = raw_amt
-                            op_type = "Доход" if any(w in desc_val.lower() for w in ["зарплата", "пополнение", "перевод от", "аванс"]) else "Расход"
-                        elif raw_amt < 0:
-                            final_amount = abs(raw_amt)
-                            op_type = "Расход"
-
-                    if final_amount > 0:
-                        parsed_operations.append([date_val, op_type, final_amount, desc_val])
-
-                if len(parsed_operations) > 0:
-                    # Успешно извлечено быстрым парсером
-                    continue
-
-            # -------------------------------------------------------------
-            # ЭТАП 2: РЕЗЕРВНЫЙ АНАЛИЗ ЧЕРЕЗ ИИ (ДЛЯ МАТРИЦ И НЕСТАНДАРТНЫХ ТАБЛИЦ)
-            # -------------------------------------------------------------
-            sample_df = df.head(50).fillna("")
-            csv_sample = sample_df.to_csv(index=False, sep=";")
-
-            try:
-                ai_response = ai_client.chat.completions.create(
-                    model="gpt-4o",
-                    temperature=0.0,
-                    messages=[
-                        {"role": "system", "content": PROMPT_FILE_MAPPING},
-                        {"role": "user", "content": f"Вкладка: {sheet_name}\nСтроки файла:\n{csv_sample}"}
-                    ]
-                )
-                mapping_text = ai_response.choices[0].message.content.strip()
-                match = re.search(r'\{.*\}', mapping_text, re.DOTALL)
-                if not match:
-                    continue
-
-                mapping = json.loads(match.group(0))
-                file_type = mapping.get("file_type")
-
-                if file_type == "flat":
-                    h_idx = int(mapping.get("header_row_index") or 0)
-                    d_col = int(mapping.get("date_col_idx") or 0)
-                    desc_col = int(mapping.get("desc_col_idx") or 1)
-                    amt_col = mapping.get("amount_col_idx")
-                    amt_col = int(amt_col) if amt_col is not None else None
-                    is_signed = mapping.get("is_amount_signed", False)
-
-                    for i in range(h_idx + 1, len(df)):
-                        row = df.iloc[i].values
-                        if d_col >= len(row) or desc_col >= len(row):
-                            continue
-
-                        date_val = str(row[d_col]).strip()
-                        desc_val = str(row[desc_col]).strip()
-
-                        if not date_val or not desc_val or date_val.lower() in ["nan", "none", "nat"]:
-                            continue
-
-                        if amt_col is not None and amt_col < len(row):
-                            val = _clean_amount(row[amt_col])
-                            op_type = "Доход" if (is_signed and val > 0) else "Расход"
-                            final_amt = abs(val)
-
-                            if final_amt > 0:
-                                parsed_operations.append([date_val, op_type, final_amt, desc_val])
-
-                elif file_type == "matrix":
-                    h_idx = int(mapping.get("header_row_index") or 0)
-                    cat_col = int(mapping.get("category_col_idx") or 0)
-                    start_col = int(mapping.get("date_start_col_idx") or 1)
-                    days_row = df.iloc[h_idx].values
-
-                    stop_words = ["план", "факт", "баланс", "итого", "максимум", "минимум", "средне", "осталось", "резерв", "долг"]
-
-                    for i in range(h_idx + 1, len(df)):
-                        row = df.iloc[i].values
-                        if cat_col >= len(row):
-                            continue
-                        cat_name = str(row[cat_col]).strip()
-
-                        if not cat_name or cat_name.lower() in ["nan", "none"]:
-                            continue
-                        if any(w in cat_name.lower() for w in stop_words):
-                            continue
-
-                        for col_idx in range(start_col, len(row)):
-                            day_val = str(days_row[col_idx]).strip() if col_idx < len(days_row) else ""
-                            amt = abs(_clean_amount(row[col_idx]))
-                            if amt > 0 and day_val and day_val.lower() not in ["nan", "none"]:
-                                parsed_operations.append([f"{day_val} число ({sheet_name})", "Расход", amt, cat_name])
-
-            except Exception as e_sheet:
-                print(f"Ошибка ИИ-маппинга листа {sheet_name}: {e_sheet}")
-                continue
-
-        if not parsed_operations:
-            return {
-                "status": "ERROR",
-                "message": "Не удалось найти финансовые операции. Убедитесь, что в файле есть строки с датами, суммами и описанием платежей."
-            }
-
-        if len(parsed_operations) > 50000:
-            return {
-                "status": "ERROR",
-                "message": f"Найдено слишком много строк ({len(parsed_operations)}). Лимит — 50 000 за раз."
-            }
-
-        return {"status": "SUCCESS", "operations": parsed_operations}
+    try:
+        match = re.search(r'\{.*\}', raw_ocr, re.DOTALL)
+        clean_json = match.group(0) if match else raw_ocr
+        data = json.loads(clean_json)
+        raw_items = data.get("items", [])
     except Exception as e:
-        print(f"Критическая ошибка парсинга: {e}")
-        return {"status": "ERROR", "message": str(e)}
+        print(f"Ошибка парсинга JSON OCR Этапа 1: {e}")
+        return []
+
+    if not raw_items:
+        return []
+
+    # Очищаем позиции и фильтруем стоп-слова
+    items_for_cat = []
+    stop_words = ["итог", "итогр", "всего к оплате", "сумма ндс", "скидка", "безналич", "карта", "сдача"]
+    for it in raw_items:
+        name = str(it.get("name", "")).strip()
+        try:
+            amt = abs(float(it.get("amount", 0)))
+        except Exception:
+            amt = 0.0
+
+        if amt > 0 and name and not any(w in name.lower() for w in stop_words):
+            items_for_cat.append({"item": name, "amount": amt})
+
+    if not items_for_cat:
+        return []
+
+    # --- ЭТАП 2: Текстовая пакетная категоризация ---
+    cat_prompt = PROMPT_BATCH_CATEGORIZE.format(
+        menu_str=menu_str,
+        items_json=json.dumps([x["item"] for x in items_for_cat], ensure_ascii=False)
+    )
+    cat_messages = [
+        {"role": "system", "content": cat_prompt},
+        {"role": "user", "content": "Классифицируй товары по предоставленному меню."}
+    ]
+    raw_cats = _call_llm(cat_messages, model="gpt-4o-mini", temperature=0.0)
+
+    final_results = []
+    try:
+        match_arr = re.search(r'\[.*\]', raw_cats, re.DOTALL)
+        clean_arr = match_arr.group(0) if match_arr else raw_cats
+        cat_list = json.loads(clean_arr)
+    except Exception:
+        cat_list = []
+
+    for idx, it in enumerate(items_for_cat):
+        c_info = cat_list[idx] if idx < len(cat_list) else {}
+        final_results.append({
+            "item": it["item"],
+            "amount": it["amount"],
+            "category": c_info.get("category", "Разное"),
+            "subcategory": c_info.get("subcategory", "Требует проверки")
+        })
+
+    return final_results
