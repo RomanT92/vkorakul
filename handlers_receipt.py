@@ -12,6 +12,7 @@ from services import (
     send_vk_message,
     extract_receipt_total_with_ai,
     extract_receipt_items_with_ai,
+    categorize_batch_with_ai,
     categorize_with_ai
 )
 from db import (
@@ -144,42 +145,99 @@ def handle_receipt(user_id, user_text, user_text_lower, state, user_states):
                 send_vk_message(user_id, "❌ Не удалось прочитать чек.", get_main_keyboard(user_id))
             return True
 
-        # --- РЕЖИМ 2: ПО ПОЗИЦИЯМ ---
+        # --- РЕЖИМ 2: ПО ПОЗИЦИЯМ (ДВУХЭТАПНЫЙ БЕСШОВНЫЙ КОНВЕЙЕР) ---
         elif "по позициям" in user_text_lower:
-            send_vk_message(user_id, "⏳ Загружаю структуру категорий...", get_cancel_keyboard(show_back=True))
-            menu_full = get_full_menu(internal_uid)
+            send_vk_message(user_id, "👀 Изучаю чек и считываю товары (GPT-4o Vision)...", get_cancel_keyboard(show_back=True))
 
-            exp_menu = menu_full.get("Расход", {})
-            menu_str = "[Расход]\n"
-            for c, subs in exp_menu.items():
-                sub_list = subs.keys() if isinstance(subs, dict) else subs
-                menu_str += f"{c}: {', '.join(sub_list)}\\n"
-
-            send_vk_message(user_id, "👀 Изучаю каждую позицию в чеке (GPT-4o Vision)... Это займет около 10 секунд.")
-            reply_text = extract_receipt_items_with_ai(photo_url, menu_str)
+            # ЭТАП 1: Чистый OCR строк и сумм
+            reply_text = extract_receipt_items_with_ai(photo_url)
 
             if reply_text:
                 clean_json = _extract_json_array(reply_text)
                 try:
-                    items = json.loads(clean_json)
-                    if isinstance(items, list) and len(items) > 0:
-                        user_states[user_id] = {
-                            "state": "receipt_review",
-                            "items": items,
-                            "menu": menu_full,
-                            "menu_str": menu_str
-                        }
-                        _show_receipt_items(user_id, items)
-                    else:
-                        send_vk_message(user_id, "❌ Не удалось найти позиции на чеке.", get_main_keyboard(user_id))
+                    raw_items = json.loads(clean_json)
+                    if not isinstance(raw_items, list) or len(raw_items) == 0:
+                        send_vk_message(user_id, "❌ Не удалось распознать позиции на чеке. Попробуйте сфотографировать ровнее или ближе.", get_main_keyboard(user_id))
                         del user_states[user_id]
+                        return True
+
+                    # ЭТАП 2: Умная гибридная классификация (БД + быстрый батч ИИ)
+                    menu_full = get_full_menu(internal_uid)
+                    exp_menu = menu_full.get("Расход", {})
+                    menu_str = "[Расход]\n" + "\n".join([f"{c}: {', '.join(subs.keys() if isinstance(subs, dict) else subs)}" for c, subs in exp_menu.items()])
+
+                    final_items = []
+                    unknown_items_for_ai = []
+
+                    for it in raw_items:
+                        item_name = str(it.get("item", "")).strip()
+                        try:
+                            amt = float(it.get("amount", 0))
+                        except (ValueError, TypeError):
+                            amt = 0.0
+
+                        if not item_name or amt <= 0:
+                            continue
+
+                        # 1. Поиск в персональной базе синонимов
+                        db_match = smart_search_item(internal_uid, item_name, op_type="Расход")
+                        if db_match.get("status") != "FOUND":
+                            db_match = smart_search_item(internal_uid, item_name, op_type=None)
+
+                        if db_match.get("status") == "FOUND":
+                            final_items.append({
+                                "item": item_name,
+                                "amount": amt,
+                                "category": db_match["category"],
+                                "subcategory": db_match["subcategory"]
+                            })
+                        else:
+                            # Товар неизвестен базе — добавляем в очередь на классификацию
+                            item_obj = {
+                                "item": item_name,
+                                "original_item": item_name,
+                                "amount": amt,
+                                "category": "Разное",
+                                "subcategory": "Требует проверки"
+                            }
+                            final_items.append(item_obj)
+                            unknown_items_for_ai.append(item_obj)
+
+                    # 2. Пакетная классификация неизвестных позиций через легкую модель
+                    if unknown_items_for_ai:
+                        ai_categorized = categorize_batch_with_ai(unknown_items_for_ai, menu_str)
+                        for unk in unknown_items_for_ai:
+                            for res in ai_categorized:
+                                if res.get("original_item") == unk["item"]:
+                                    c = res.get("category", "Разное")
+                                    s = res.get("subcategory", "Требует проверки")
+                                    if c in exp_menu:
+                                        unk["category"] = c
+                                        unk["subcategory"] = s
+                                    break
+
+                    if not final_items:
+                        send_vk_message(user_id, "⚠️ В чеке не найдено товаров с суммами больше нуля.", get_main_keyboard(user_id))
+                        del user_states[user_id]
+                        return True
+
+                    user_states[user_id] = {
+                        "state": "receipt_review",
+                        "items": final_items,
+                        "menu": menu_full,
+                        "menu_str": menu_str
+                    }
+                    _show_receipt_items(user_id, final_items)
+                    return True
+
                 except json.JSONDecodeError:
-                    send_vk_message(user_id, "❌ Ошибка: неверный формат списка позиций.", get_main_keyboard(user_id))
+                    send_vk_message(user_id, "❌ Ошибка: ИИ вернул поврежденный список товаров. Попробуйте еще раз.", get_main_keyboard(user_id))
                     del user_states[user_id]
+                    return True
             else:
-                send_vk_message(user_id, "❌ Ошибка связи с ИИ при чтении чека.", get_main_keyboard(user_id))
+                send_vk_message(user_id, "❌ Ошибка связи с сервером распознавания чеков.", get_main_keyboard(user_id))
                 del user_states[user_id]
-            return True
+                return True
 
     # =========================================================
     # 2. РЕВЬЮ ПОЗИЦИЙ (Кнопка "Готово" или выбор номера)
