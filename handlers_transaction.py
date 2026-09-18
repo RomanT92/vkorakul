@@ -34,6 +34,7 @@ from db import (
     update_transaction_amount,
     update_transaction_category
 )
+from db.transactions import promote_synonym_to_article, get_canonical_article_for_sub
 
 INCOME_KEYWORDS = [
     "доход", "приход", "поступление", "поступило", "пополнил", "пополнение",
@@ -119,10 +120,11 @@ def _show_multi_tx_items(user_id, items, show_apply_all=False):
         op_type = item.get("type", "Расход")
         cat = item.get("category", "?")
         sub = item.get("subcategory", "?")
+        art = item.get("article", item_name)
         comm = f" ({item['comment']})" if item.get("comment") else ""
         type_icon = "📉" if op_type == "Расход" else "📈"
         msg += f"{i+1}. {item_name} — {amount} руб. {type_icon}{comm}\n"
-        msg += f"   📂 {cat} -> {sub}\n\n"
+        msg += f"   📂 {cat} -> {sub} (статья: {art})\n\n"
 
     msg += "Если всё верно, жмите «✅ Готово».\n"
     if show_apply_all:
@@ -137,7 +139,8 @@ def _save_items_batch(internal_uid, items):
     for item in items:
         cat = item.get("category", "Разное")
         sub = item.get("subcategory", "Требует проверки")
-        art = item.get("item", "Операция")
+        orig_text = item.get("item", "Операция")
+        art = item.get("article") or get_canonical_article_for_sub(internal_uid, item.get("type", "Расход"), cat, sub, orig_text)
         amount = float(item.get("amount", 0))
         op_type = item.get("type", "Расход")
         comment = item.get("comment", "")
@@ -156,13 +159,13 @@ def _save_items_batch(internal_uid, items):
             article=art,
             amount=amount,
             comment=comment,
-            original_text=art,
+            original_text=orig_text,
             status=op_status
         )
         if ok:
             saved_count += 1
         if op_status == 'verified':
-            learn_user_word(internal_uid, op_type, cat, sub, art, art)
+            learn_user_word(internal_uid, op_type, cat, sub, art, orig_text)
 
     return saved_count, needs_review_count
 
@@ -204,10 +207,8 @@ def _try_fast_single_transaction_parse(user_text):
     """
     Детерминированный парсер простых фраз вида:
     'Шиномонтаж 2600', 'такси 450', '250 кофе', 'зарплата 50000'
-    Возвращает dict с полями или None, если фраза сложная.
     """
     text = user_text.strip()
-    # Регулярка для поиска одной суммы в начале или в конце строки
     match_end = re.search(r'^(.*?)\s+(\d+(?:[.,]\d+)?)\s*(?:руб|р)?$', text, re.IGNORECASE)
     match_start = re.search(r'^(\d+(?:[.,]\d+)?)\s*(?:руб|р)?\s+(.*?)$', text, re.IGNORECASE)
 
@@ -235,8 +236,31 @@ def handle_transaction(user_id, user_text, state, user_states):
     internal_uid = get_or_create_user(user_id)
 
     # ====================================================================
-    # 0. СВЕРХБЫСТРЫЙ ДЕТЕРМИНИРОВАННЫЙ ПЕРЕХВАТ (БЕЗ ВЫЗОВА ИИ)
+    # 0. БЫСТРЫЙ ПЕРЕХВАТ: «СДЕЛАТЬ ОТДЕЛЬНОЙ СТАТЬЕЙ»
     # ====================================================================
+    promote_triggers = [
+        "сделать отдельной статьей", "сделать отдельной статьёй", "создать статью",
+        "отдельной статьей", "отдельной статьёй", "сделай статьей", "сделай статьёй"
+    ]
+    if any(t in user_text_lower for t in promote_triggers):
+        last_op = get_last_transaction(internal_uid)
+        if last_op:
+            orig = last_op.get("original_text") or last_op["article"]
+            promote_synonym_to_article(
+                internal_uid,
+                last_op["type"],
+                last_op["category"],
+                last_op["subcategory"],
+                orig
+            )
+            send_vk_message(
+                user_id,
+                f"✅ Готово! Слово «{orig.capitalize()}» теперь сохранено как **самостоятельная статья** в подкатегории «{last_op['subcategory']}».",
+                get_main_keyboard(user_id)
+            )
+            if user_id in user_states:
+                del user_states[user_id]
+            return True
 
     # --- А. БЫСТРЫЙ ПРОСМОТР ПОСЛЕДНЕЙ ОПЕРАЦИИ ИЛИ ИСТОРИИ ---
     history_fast_triggers = [
@@ -380,6 +404,16 @@ def handle_transaction(user_id, user_text, state, user_states):
                 get_cancel_keyboard(show_back=True)
             )
             return True
+        elif any(t in user_text_lower for t in promote_triggers):
+            orig = sel_op.get("original_text") or sel_op["article"]
+            promote_synonym_to_article(internal_uid, sel_op["type"], sel_op["category"], sel_op["subcategory"], orig)
+            send_vk_message(
+                user_id,
+                f"✅ Готово! Статья «{orig.capitalize()}» создана в подкатегории «{sel_op['subcategory']}».",
+                get_main_keyboard(user_id)
+            )
+            del user_states[user_id]
+            return True
 
     # =========================================================
     # ВВОД НОВОЙ СУММЫ ДЛЯ ОПЕРАЦИИ
@@ -425,26 +459,30 @@ def handle_transaction(user_id, user_text, state, user_states):
         if db_match["status"] == "FOUND":
             target_cat = db_match["category"]
             target_sub = db_match["subcategory"]
+            target_art = db_match.get("article", original_article)
         else:
             c_tree, s_tree = _match_category_tree(menu_full, op_type, user_text)
             if c_tree and s_tree:
                 target_cat, target_sub = c_tree, s_tree
+                target_art = get_canonical_article_for_sub(internal_uid, op_type, target_cat, target_sub, original_article)
             else:
                 send_vk_message(user_id, "🧠 Подбираю категорию с помощью ИИ...", get_cancel_keyboard(show_back=True))
                 type_menu = menu_full.get(op_type, {})
                 menu_str = f"[{op_type}]\n" + "\n".join([f"{c}: {', '.join(subs.keys() if isinstance(subs, dict) else subs)}" for c, subs in type_menu.items()])
                 ai_cat, ai_sub = categorize_with_ai(original_article, menu_str, context=user_text)
                 target_cat, target_sub = ai_cat, ai_sub
+                target_art = get_canonical_article_for_sub(internal_uid, op_type, target_cat, target_sub, original_article)
 
-        ok = update_transaction_category(internal_uid, sel_op["id"], target_cat, target_sub, original_article)
+        ok = update_transaction_category(internal_uid, sel_op["id"], target_cat, target_sub, target_art)
         if ok:
             if target_cat != "Разное" and target_sub != "Требует проверки":
-                learn_user_word(internal_uid, op_type, target_cat, target_sub, original_article, original_article)
-                learn_user_word(internal_uid, op_type, target_cat, target_sub, original_article, user_text)
+                # Записываем как синоним к найденной канонической статье
+                learn_user_word(internal_uid, op_type, target_cat, target_sub, target_art, original_article)
+                learn_user_word(internal_uid, op_type, target_cat, target_sub, target_art, user_text)
             send_vk_message(
                 user_id,
                 f"✅ Категория операции «{original_article}» успешно изменена:\n"
-                f"📂 {target_cat} -> {target_sub}",
+                f"📂 {target_cat} -> {target_sub} (статья: «{target_art}»)",
                 get_main_keyboard(user_id)
             )
         else:
@@ -561,6 +599,7 @@ def handle_transaction(user_id, user_text, state, user_states):
         elif any(phrase in user_text_lower for phrase in ["применить для всех", "применить ко всем"]):
             last_cat = state_data.get("last_category")
             last_sub = state_data.get("last_subcategory")
+            last_art = state_data.get("last_article")
             start_idx = state_data.get("last_edit_idx", 0) + 1
             if not last_cat or not last_sub:
                 send_vk_message(user_id, "⚠️ Сначала измените какую-нибудь одну операцию из списка.")
@@ -569,11 +608,15 @@ def handle_transaction(user_id, user_text, state, user_states):
             for i in range(start_idx, len(items)):
                 items[i]["category"] = last_cat
                 items[i]["subcategory"] = last_sub
+                if last_art:
+                    items[i]["article"] = last_art
                 applied += 1
             if applied == 0:
                 for it in items:
                     it["category"] = last_cat
                     it["subcategory"] = last_sub
+                    if last_art:
+                        it["article"] = last_art
                 applied = len(items)
             send_vk_message(user_id, f"⚡ Категория «{last_cat} -> {last_sub}» применена к {applied} операциям!")
             _show_multi_tx_items(user_id, items, show_apply_all=True)
@@ -617,22 +660,27 @@ def handle_transaction(user_id, user_text, state, user_states):
         if db_match["status"] == "FOUND":
             ai_cat = db_match["category"]
             ai_sub = db_match["subcategory"]
+            ai_art = db_match.get("article", sel_item.get("item"))
             if db_match.get("type"):
                 sel_item["type"] = db_match["type"]
         else:
             c_tree, s_tree = _match_category_tree(menu_full, op_type, user_text)
             if c_tree and s_tree:
                 ai_cat, ai_sub = c_tree, s_tree
+                ai_art = get_canonical_article_for_sub(internal_uid, op_type, ai_cat, ai_sub, sel_item.get("item"))
             else:
                 send_vk_message(user_id, "🧠 Подбираю категорию с помощью ИИ...", get_cancel_keyboard(show_back=True))
                 type_menu = menu_full.get(op_type, {})
                 menu_str = f"[{op_type}]\n" + "\n".join([f"{c}: {', '.join(subs.keys() if isinstance(subs, dict) else subs)}" for c, subs in type_menu.items()])
                 ai_cat, ai_sub = categorize_with_ai(sel_item.get("item"), menu_str, context=user_text)
+                ai_art = get_canonical_article_for_sub(internal_uid, op_type, ai_cat, ai_sub, sel_item.get("item"))
 
         sel_item["category"] = ai_cat
         sel_item["subcategory"] = ai_sub
+        sel_item["article"] = ai_art
         state_data["last_category"] = ai_cat
         state_data["last_subcategory"] = ai_sub
+        state_data["last_article"] = ai_art
         state_data["last_edit_idx"] = idx
         state_data["state"] = "multi_tx_review"
         _show_multi_tx_items(user_id, items, show_apply_all=True)
@@ -640,11 +688,9 @@ def handle_transaction(user_id, user_text, state, user_states):
 
     # ====================================================================
     # ⚡ СВЕРХБЫСТРЫЙ ДЕТЕРМИНИРОВАННЫЙ ВВОД ОПЕРАЦИИ (FAST-PATH)
-    # Если пользователь прислал простую фразу типа «Шиномонтаж 2600»
     # ====================================================================
     fast_parsed = _try_fast_single_transaction_parse(user_text)
     if fast_parsed:
-        # Принудительно сбрасываем залипшие стейты
         if user_id in user_states:
             del user_states[user_id]
         state = ""
@@ -653,7 +699,7 @@ def handle_transaction(user_id, user_text, state, user_states):
         f_amt = fast_parsed["amount"]
         f_op_type, _ = detect_operation_type(user_text, "Расход", f_item)
 
-        # Мгновенная проверка в базе данных
+        # Проверка в базе данных
         db_res = smart_search_item(internal_uid, f_item, op_type=f_op_type)
         if db_res.get("status") != "FOUND":
             db_res = smart_search_item(internal_uid, f_item, op_type=None)
@@ -662,28 +708,31 @@ def handle_transaction(user_id, user_text, state, user_states):
             final_type = db_res.get("type", f_op_type)
             cat = db_res["category"]
             sub = db_res["subcategory"]
-            art = db_res.get("article", f_item)
+            # Каноническая статья из базы
+            canonical_art = db_res.get("article") or get_canonical_article_for_sub(internal_uid, final_type, cat, sub, f_item)
 
             save_transaction(
                 user_id=internal_uid,
                 op_type=final_type,
                 category=cat,
                 subcategory=sub,
-                article=art,
+                article=canonical_art,
                 amount=f_amt,
                 comment="",
                 original_text=f_item,
                 status='verified'
             )
-            learn_user_word(internal_uid, final_type, cat, sub, art, f_item)
+            # Привязываем введенное пользователем слово как синоним к канонической статье!
+            learn_user_word(internal_uid, final_type, cat, sub, canonical_art, f_item)
+            
+            syn_info = f" (статья: «{canonical_art}»)" if canonical_art.lower() != f_item.lower() else ""
             send_vk_message(
                 user_id,
-                f"✅ Успешно записано! ({final_type})\n📂 {cat} -> {sub}\n💰 {f_amt:g} руб.",
+                f"✅ Успешно записано! ({final_type})\n📂 {cat} -> {sub}{syn_info}\n💰 {f_amt:g} руб.",
                 get_main_keyboard(user_id)
             )
             return True
 
-    # Если есть активный стейт и это не быстрый ввод — не перехватываем
     if state != "":
         return False
 
@@ -692,7 +741,6 @@ def handle_transaction(user_id, user_text, state, user_states):
     # =========================================================
     reply_text = extract_transaction_with_ai(user_text)
     if not reply_text:
-        # Если ИИ временно недоступен, но пользователь ввел сумму — пробуем спасти операцию
         if re.search(r'\d+', user_text):
             clean_item = clean_fallback_item(user_text)
             nums = re.findall(r'\d+(?:[.,]\d+)?', user_text)
@@ -765,15 +813,18 @@ def handle_transaction(user_id, user_text, state, user_states):
                     if db_m["status"] == "FOUND":
                         final_cat = db_m["category"]
                         final_sub = db_m["subcategory"]
+                        final_art = db_m.get("article", final_art)
                     else:
                         c_t, s_t = _match_category_tree(menu_full, op_type, cat_hint)
                         if c_t and s_t:
                             final_cat, final_sub = c_t, s_t
+                            final_art = get_canonical_article_for_sub(internal_uid, op_type, final_cat, final_sub, final_art)
                         else:
                             type_menu = menu_full.get(op_type, {})
                             menu_str = f"[{op_type}]\n" + "\n".join([f"{c}: {', '.join(subs.keys() if isinstance(subs, dict) else subs)}" for c, subs in type_menu.items()])
                             ai_c, ai_s = categorize_with_ai(final_art, menu_str, context=cat_hint)
                             final_cat, final_sub = ai_c, ai_s
+                            final_art = get_canonical_article_for_sub(internal_uid, op_type, final_cat, final_sub, final_art)
 
                 old_amt_str = f"{tx_to_edit['amount']:g} руб."
                 new_amt_val = float(new_amt) if new_amt else tx_to_edit["amount"]
@@ -1013,8 +1064,10 @@ def handle_transaction(user_id, user_text, state, user_states):
                         search_res = {"status": "NOT_FOUND"}
 
                 if search_res["status"] == "FOUND":
+                    canonical_art = search_res.get("article") or current_item
                     processed_items.append({
                         "item": current_item,
+                        "article": canonical_art,
                         "amount": amount,
                         "type": op_type if is_explicit_income else search_res.get("type", op_type),
                         "category": search_res["category"],
@@ -1025,8 +1078,10 @@ def handle_transaction(user_id, user_text, state, user_states):
                 else:
                     c_tree, s_tree = _match_category_tree(menu_full, op_type, current_item)
                     if c_tree and s_tree:
+                        canonical_art = get_canonical_article_for_sub(internal_uid, op_type, c_tree, s_tree, current_item)
                         processed_items.append({
                             "item": current_item,
+                            "article": canonical_art,
                             "amount": amount,
                             "type": op_type,
                             "category": c_tree,
@@ -1042,11 +1097,14 @@ def handle_transaction(user_id, user_text, state, user_states):
                         valid_cat = ai_cat in type_menu and ai_sub in (type_menu[ai_cat].keys() if isinstance(type_menu[ai_cat], dict) else type_menu[ai_cat])
                         if valid_cat and ai_sub != "Требует проверки":
                             cat_res, sub_res = ai_cat, ai_sub
+                            canonical_art = get_canonical_article_for_sub(internal_uid, op_type, cat_res, sub_res, current_item)
                         else:
                             cat_res, sub_res = "Разное", "Требует проверки"
+                            canonical_art = current_item
 
                         processed_items.append({
                             "item": current_item,
+                            "article": canonical_art,
                             "amount": amount,
                             "type": op_type,
                             "category": cat_res,
@@ -1063,21 +1121,27 @@ def handle_transaction(user_id, user_text, state, user_states):
             # =========================================================
             if len(processed_items) == 1:
                 single = processed_items[0]
+                orig_name = single["item"]
+                canon_art = single["article"]
+
                 if single["is_known"]:
                     save_transaction(
                         user_id=internal_uid,
                         op_type=single["type"],
                         category=single["category"],
                         subcategory=single["subcategory"],
-                        article=single["item"],
+                        article=canon_art,
                         amount=single["amount"],
                         comment=single["comment"],
-                        original_text=single["item"],
+                        original_text=orig_name,
                         status='verified'
                     )
+                    learn_user_word(internal_uid, single["type"], single["category"], single["subcategory"], canon_art, orig_name)
+
+                    art_notice = f" (статья: «{canon_art}»)" if canon_art.lower() != orig_name.lower() else ""
                     send_vk_message(
                         user_id,
-                        f"✅ Успешно записано! ({single['type']})\n📂 {single['category']} -> {single['subcategory']}\n💰 {single['amount']:g} руб.",
+                        f"✅ Успешно записано! ({single['type']})\n📂 {single['category']} -> {single['subcategory']}{art_notice}\n💰 {single['amount']:g} руб.",
                         get_main_keyboard(user_id)
                     )
                     return True
@@ -1089,14 +1153,16 @@ def handle_transaction(user_id, user_text, state, user_states):
                         "menu": menu_full,
                         "ai_cat": single["category"],
                         "ai_sub": single["subcategory"],
+                        "canonical_art": canon_art,
                         "attempts": 1
                     }
                     send_vk_message(
                         user_id,
-                        f"🤖 Думаю, «{single['item']}» ({single['type']}) относится к:\n"
-                        f"📂 {single['category']} -> {single['subcategory']}\n"
-                        f"💰 {single['amount']:g} руб.\n\nВсё верно?",
-                        get_yes_no_keyboard(show_back=True)
+                        f"🤖 Думаю, «{orig_name}» относится к:\n"
+                        f"📂 {single['category']} -> {single['subcategory']} (статья: «{canon_art}»)\n"
+                        f"💰 {single['amount']:g} руб.\n\n"
+                        f"Привязать как синоним к «{canon_art}»?",
+                        get_yes_no_keyboard(show_back=True, show_promote_article=True)
                     )
                     return True
 
@@ -1108,7 +1174,7 @@ def handle_transaction(user_id, user_text, state, user_states):
                 }
                 send_vk_message(
                     user_id,
-                    f"🤔 Я пока не знаю статью «{single['item']}» ({single['type']}, {single['amount']:g} руб.).\n"
+                    f"🤔 Я пока не знаю статью «{orig_name}» ({single['type']}, {single['amount']:g} руб.).\n"
                     f"Подскажи в двух словах, к чему это относится (или назови категорию):",
                     get_cancel_keyboard(show_back=True)
                 )
