@@ -26,7 +26,6 @@ from db import (
 from db.transactions import (
     delete_unverified_by_text,
     skip_unverified_by_text,
-    get_canonical_article_for_sub,
     promote_synonym_to_article
 )
 
@@ -41,6 +40,40 @@ def _format_amt(amount):
         return f"{val:,.2f}".replace(",", " ")
     except Exception:
         return str(amount)
+
+def _validate_ai_category(menu_full, op_type, cat, sub):
+    """Строгая проверка: есть ли категория и подкатегория в структуре."""
+    type_menu = menu_full.get(op_type, {})
+    if cat not in type_menu:
+        matched_cat = next((c for c in type_menu if c.lower() == str(cat).lower().strip()), None)
+        if not matched_cat:
+            return None, None
+        cat = matched_cat
+
+    subs = type_menu[cat]
+    sub_list = list(subs.keys()) if isinstance(subs, dict) else subs
+    if sub not in sub_list:
+        matched_sub = next((s for s in sub_list if s.lower() == str(sub).lower().strip()), None)
+        if matched_sub:
+            return cat, matched_sub
+        default_sub = next((s for s in sub_list if "другое" in s.lower()), None)
+        if default_sub:
+            return cat, default_sub
+        return cat, (sub_list[0] if sub_list else "Разное")
+
+    return cat, sub
+
+def _find_matching_article(menu_full, op_type, cat, sub, word):
+    """Безопасный поиск статьи в подкатегории (без взятия случайной статьи)."""
+    clean_w = word.lower().strip()
+    sub_articles = menu_full.get(op_type, {}).get(cat, {}).get(sub, [])
+    if not sub_articles:
+        return word.capitalize()
+
+    for art in sub_articles:
+        if art.lower() == clean_w or (len(clean_w) >= 4 and clean_w in art.lower()):
+            return art
+    return word.capitalize()
 
 def _show_batch_items(user_id, batch, total_left, show_apply_all=False):
     """Выводит пронумерованный список пакета операций с кнопками управления."""
@@ -64,7 +97,6 @@ def _show_batch_items(user_id, batch, total_left, show_apply_all=False):
     send_vk_message(user_id, msg, get_queue_review_keyboard(len(batch), show_apply_all=show_apply_all, show_back=True))
 
 def _process_next_batch(user_id, user_states):
-    """Запускает следующий пакет, автоматически фильтруя уже выученные статьи."""
     if user_id not in user_states:
         return
 
@@ -99,16 +131,23 @@ def _process_next_batch(user_id, user_states):
     send_vk_message(user_id, f"🧠 Анализирую {len(batch)} операций...", get_cancel_keyboard(show_back=False))
     ai_results = categorize_batch_with_ai(batch, menu_str)
 
+    menu_full = get_full_menu(internal_uid)
+
     for item in batch:
-        cat, sub = "Разное", "Требует проверки"
+        raw_c, raw_s = "Разное", "Требует проверки"
         for res in ai_results:
             if res.get("original_item") == item["original_item"]:
-                cat = res.get("category", "Разное")
-                sub = res.get("subcategory", "Требует проверки")
+                raw_c = res.get("category", "Разное")
+                raw_s = res.get("subcategory", "Требует проверки")
                 break
-        item["category"] = cat
-        item["subcategory"] = sub
-        item["article"] = get_canonical_article_for_sub(internal_uid, item.get("type", "Расход"), cat, sub, item["original_item"])
+        
+        v_c, v_s = _validate_ai_category(menu_full, item.get("type", "Расход"), raw_c, raw_s)
+        final_c = v_c or "Разное"
+        final_s = v_s or "Требует проверки"
+
+        item["category"] = final_c
+        item["subcategory"] = final_s
+        item["article"] = _find_matching_article(menu_full, item.get("type", "Расход"), final_c, final_s, item["original_item"])
 
     state_data["current_batch"] = batch
     state_data["state"] = "queue_batch_review"
@@ -117,12 +156,8 @@ def _process_next_batch(user_id, user_states):
 def handle_queue_and_learning(user_id, user_text, user_text_lower, state, user_states, MAX_ATTEMPTS):
     internal_uid = get_or_create_user(user_id)
 
-    # =========================================================
     # 1. ЗАПУСК РАЗБОРА ОПЕРАЦИЙ
-    # =========================================================
-    triggers = [
-        "разобрать операции", "разобрать завалы", "разобрать", "завалы", "импорт статистики прошлого"
-    ]
+    triggers = ["разобрать операции", "разобрать завалы", "разобрать", "завалы", "импорт статистики прошлого"]
     if any(trigger in user_text_lower for trigger in triggers):
         send_vk_message(user_id, "⏳ Проверяю нераспознанные операции в базе...")
         unverified_raw = get_unverified_transactions(user_id)
@@ -161,9 +196,7 @@ def handle_queue_and_learning(user_id, user_text, user_text_lower, state, user_s
         _process_next_batch(user_id, user_states)
         return True
 
-    # =========================================================
-    # ОБРАБОТКА «НАЗАД» В ОЧЕРЕДИ
-    # =========================================================
+    # НАЗАД
     if "назад" in user_text_lower:
         if state in ["queue_batch_edit_hint", "queue_item_action_select", "queue_select_trash_numbers", "confirm_delete_all_batch_trash"]:
             user_states[user_id]["state"] = "queue_batch_review"
@@ -187,9 +220,7 @@ def handle_queue_and_learning(user_id, user_text, user_text_lower, state, user_s
             send_vk_message(user_id, msg, get_numbered_keyboard(len(cats), show_back=True))
             return True
 
-    # =========================================================
-    # 2. РЕВЬЮ ПАКЕТА ОПЕРАЦИЙ
-    # =========================================================
+    # РЕВЬЮ ПАКЕТА
     if state == "queue_batch_review":
         state_data = user_states[user_id]
         batch = state_data.get("current_batch", [])
@@ -200,7 +231,7 @@ def handle_queue_and_learning(user_id, user_text, user_text_lower, state, user_s
 
         save_triggers = ["сохранить пакет", "сохрани пакет", "сохранить", "готово", "сохрани"]
         if any(trig == user_text_lower or user_text_lower.startswith("сохранить") for trig in save_triggers):
-            send_vk_message(user_id, "⏳ Сохраняю и каскадно обновляю базу...", get_cancel_keyboard(show_back=False))
+            send_vk_message(user_id, "⏳ Сохраняю и обновляю базу...", get_cancel_keyboard(show_back=False))
             saved_count = 0
             for item in batch:
                 if item.get("subcategory") != "Требует проверки":
@@ -305,9 +336,7 @@ def handle_queue_and_learning(user_id, user_text, user_text_lower, state, user_s
                 send_vk_message(user_id, msg, get_queue_item_action_keyboard())
                 return True
 
-    # =========================================================
-    # 2.0 ПОДТВЕРЖДЕНИЕ УДАЛЕНИЯ ВСЕХ ОПЕРАЦИЙ ПАКЕТА В МУСОР
-    # =========================================================
+    # ПОДТВЕРЖДЕНИЕ УДАЛЕНИЯ ПАКЕТА
     if state == "confirm_delete_all_batch_trash":
         if any(w in user_text_lower for w in ["да", "верно", "ага", "yes", "+", "в мусор", "удалить"]):
             state_data = user_states[user_id]
@@ -325,9 +354,7 @@ def handle_queue_and_learning(user_id, user_text, user_text_lower, state, user_s
             _show_batch_items(user_id, user_states[user_id]["current_batch"], len(user_states[user_id]["queue"]), show_apply_all=False)
             return True
 
-    # =========================================================
-    # 2.0.1 ДЕЙСТВИЕ НАД КОНКРЕТНОЙ ПОЗИЦИЕЙ В ОЧЕРЕДИ
-    # =========================================================
+    # ДЕЙСТВИЕ НАД ПОЗИЦИЕЙ В ОЧЕРЕДИ
     if state == "queue_item_action_select":
         state_data = user_states[user_id]
         idx = state_data["edit_idx"]
@@ -363,9 +390,7 @@ def handle_queue_and_learning(user_id, user_text, user_text_lower, state, user_s
                 _show_batch_items(user_id, batch, len(state_data["queue"]), show_apply_all=False)
             return True
 
-    # =========================================================
-    # 2.0.2 ВЫБОР НОМЕРОВ МУСОРА ДЛЯ МАССОВОГО УДАЛЕНИЯ
-    # =========================================================
+    # ВВОД НОМЕРОВ МУСОРА
     if state == "queue_select_trash_numbers":
         state_data = user_states[user_id]
         batch = state_data["current_batch"]
@@ -390,9 +415,7 @@ def handle_queue_and_learning(user_id, user_text, user_text_lower, state, user_s
             _show_batch_items(user_id, batch, len(state_data["queue"]), show_apply_all=False)
         return True
 
-    # =========================================================
-    # 2.1 ВВОД ПОДСКАЗКИ ДЛЯ КОНКРЕТНОЙ ОПЕРАЦИИ
-    # =========================================================
+    # ВВОД ПОДСКАЗКИ В ПАКЕТЕ
     if state == "queue_batch_edit_hint":
         state_data = user_states[user_id]
         idx = state_data["edit_idx"]
@@ -402,20 +425,26 @@ def handle_queue_and_learning(user_id, user_text, user_text_lower, state, user_s
 
         menu_full = get_full_menu(internal_uid)
         found_cat, found_sub = _apply_category_to_item(internal_uid, sel_item, user_text, menu_full, state)
-        canon_art = get_canonical_article_for_sub(internal_uid, sel_item.get("type", "Расход"), found_cat, found_sub, sel_item["original_item"])
+        
+        # Строгая валидация
+        v_c, v_s = _validate_ai_category(menu_full, sel_item.get("type", "Расход"), found_cat, found_sub)
+        final_c = v_c or "Разное"
+        final_s = v_s or "Требует проверки"
+        canon_art = _find_matching_article(menu_full, sel_item.get("type", "Расход"), final_c, final_s, sel_item["original_item"])
+
+        sel_item["category"] = final_c
+        sel_item["subcategory"] = final_s
         sel_item["article"] = canon_art
 
-        state_data["last_category"] = found_cat
-        state_data["last_subcategory"] = found_sub
+        state_data["last_category"] = final_c
+        state_data["last_subcategory"] = final_s
         state_data["last_article"] = canon_art
         state_data["last_edit_idx"] = idx
         state_data["state"] = "queue_batch_review"
         _show_batch_items(user_id, batch, len(state_data["queue"]), show_apply_all=True)
         return True
 
-    # =========================================================
-    # 3. ОДИНОЧНОЕ ОБУЧЕНИЕ: ПОДТВЕРЖДЕНИЕ "ДА / НЕТ"
-    # =========================================================
+    # ОДИНОЧНОЕ ОБУЧЕНИЕ: ПОДТВЕРЖДЕНИЕ "ДА / НЕТ"
     if state == "confirm_category":
         payload = user_states[user_id]["payload"]
         cat = user_states[user_id]["ai_cat"]
@@ -424,9 +453,9 @@ def handle_queue_and_learning(user_id, user_text, user_text_lower, state, user_s
         amount = float(payload.get("amount", 0))
         op_type = payload.get("type", "Расход")
         comment = payload.get("comment", "")
-        canon_art = user_states[user_id].get("canonical_art") or get_canonical_article_for_sub(internal_uid, op_type, cat, sub, item_name)
+        canon_art = user_states[user_id].get("canonical_art") or item_name.capitalize()
 
-        # Выбор пользователя: Сделать отдельной статьёй!
+        # Сделать отдельной статьёй
         if any(t in user_text_lower for t in ["сделать отдельной статьей", "сделать отдельной статьёй", "отдельной статьей", "отдельная статья"]):
             send_vk_message(user_id, "⏳ Создаю новую статью и записываю операцию...")
             save_transaction(
@@ -453,7 +482,7 @@ def handle_queue_and_learning(user_id, user_text, user_text_lower, state, user_s
             return True
 
         if any(w in user_text_lower for w in ["да", "верно", "ага", "давай", "ок", "yes", "+"]):
-            send_vk_message(user_id, "⏳ Запоминаю как синоним и записываю в базу...")
+            send_vk_message(user_id, "⏳ Запоминаю и записываю в базу...")
             save_transaction(
                 user_id=internal_uid,
                 op_type=op_type,
@@ -465,7 +494,6 @@ def handle_queue_and_learning(user_id, user_text, user_text_lower, state, user_s
                 original_text=item_name,
                 status='verified'
             )
-            # Записываем именно как синоним к канонической статье!
             learn_user_word(
                 user_id=internal_uid,
                 op_type=op_type,
@@ -474,9 +502,10 @@ def handle_queue_and_learning(user_id, user_text, user_text_lower, state, user_s
                 article=canon_art,
                 synonym=item_name
             )
+            syn_msg = f"«{item_name}» привязано как синоним к статье «{canon_art}»" if canon_art.lower() != item_name.lower() else f"Статья: «{canon_art}»"
             send_vk_message(
                 user_id,
-                f"✅ Успешно записано!\n«{item_name}» привязано как синоним к статье «{canon_art}» ({cat} -> {sub}).",
+                f"✅ Успешно записано!\n📂 {cat} -> {sub}\n{syn_msg}",
                 get_main_keyboard(user_id)
             )
             del user_states[user_id]
@@ -500,9 +529,7 @@ def handle_queue_and_learning(user_id, user_text, user_text_lower, state, user_s
             send_vk_message(user_id, "Пожалуйста, ответьте «✅ Да», «❌ Нет» или нажмите «📄 Сделать отдельной статьёй».", get_yes_no_keyboard(show_back=True, show_promote_article=True))
             return True
 
-    # =========================================================
-    # 4. ОБРАБОТКА ПОДСКАЗКИ ОТ ПОЛЬЗОВАТЕЛЯ (ОДИНОЧНЫЙ РЕЖИМ)
-    # =========================================================
+    # 4. ПОДСКАЗКА ОТ ПОЛЬЗОВАТЕЛЯ
     if state == "provide_context":
         user_states[user_id]["attempts"] += 1
         payload = user_states[user_id]["payload"]
@@ -525,7 +552,7 @@ def handle_queue_and_learning(user_id, user_text, user_text_lower, state, user_s
                 payload["type"] = check_res["type"]
             send_vk_message(
                 user_id,
-                f"Ага! «{user_text}» — это знакомая статья «{check_res.get('article')}»:\n"
+                f"Ага! «{user_text}» — это статья «{check_res.get('article')}»:\n"
                 f"📂 {check_res.get('category')} -> {check_res.get('subcategory')}\n\n"
                 f"Привязать «{payload['item']}» как синоним?",
                 get_yes_no_keyboard(show_back=True, show_promote_article=True)
@@ -536,21 +563,26 @@ def handle_queue_and_learning(user_id, user_text, user_text_lower, state, user_s
         menu_full = get_full_menu(internal_uid)
         type_menu = menu_full.get(op_type, {})
         menu_str = f"[{op_type}]\n" + "\n".join([f"{c}: {', '.join(subs.keys() if isinstance(subs, dict) else subs)}" for c, subs in type_menu.items()])
-        ai_cat, ai_sub = categorize_with_ai(payload["item"], menu_str, context=user_text)
+        
+        raw_c, raw_s = categorize_with_ai(payload["item"], menu_str, context=user_text)
+        v_c, v_s = _validate_ai_category(menu_full, op_type, raw_c, raw_s)
 
-        valid_cat = ai_cat in type_menu and ai_sub in (type_menu[ai_cat].keys() if isinstance(type_menu[ai_cat], dict) else type_menu[ai_cat])
-        if valid_cat and ai_sub != "Требует проверки":
-            canon_art = get_canonical_article_for_sub(internal_uid, op_type, ai_cat, ai_sub, payload["item"])
+        if v_c and v_s and v_s != "Требует проверки":
+            canon_art = _find_matching_article(menu_full, op_type, v_c, v_s, payload["item"])
             user_states[user_id]["state"] = "confirm_category"
-            user_states[user_id]["ai_cat"] = ai_cat
-            user_states[user_id]["ai_sub"] = ai_sub
+            user_states[user_id]["ai_cat"] = v_c
+            user_states[user_id]["ai_sub"] = v_s
             user_states[user_id]["canonical_art"] = canon_art
+            
+            if canon_art.lower() != payload["item"].lower():
+                prompt_msg = f"Ага! «{payload['item']}» относится к:\n📂 {v_c} -> {v_s} (статья: «{canon_art}»)\n\nПривязать как синоним к «{canon_art}»?"
+            else:
+                prompt_msg = f"Ага! «{payload['item']}» относится к:\n📂 {v_c} -> {v_s}\n\nСоздать статью «{payload['item'].capitalize()}»?"
+
             send_vk_message(
                 user_id,
-                f"Ага! С учетом подсказки, «{payload['item']}» относится к:\n"
-                f"📂 {ai_cat} -> {ai_sub} (статья: «{canon_art}»)\n\n"
-                f"Привязать как синоним?",
-                get_yes_no_keyboard(show_back=True, show_promote_article=True)
+                prompt_msg,
+                get_yes_no_keyboard(show_back=True, show_promote_article=(canon_art.lower() != payload["item"].lower()))
             )
         else:
             if user_states[user_id]["attempts"] < MAX_ATTEMPTS:
@@ -565,9 +597,7 @@ def handle_queue_and_learning(user_id, user_text, user_text_lower, state, user_s
                 send_vk_message(user_id, "🤷‍♂️ Я сдаюсь. Давайте выберем вручную!\n\nЭто Расход или Доход?", type_keyboard(show_back=True))
         return True
 
-    # =========================================================
-    # 5. ИНТЕРАКТИВНЫЙ РУЧНОЙ ВЫБОР (ТИП -> КАТЕГОРИЯ -> ПОДКАТЕГОРИЯ)
-    # =========================================================
+    # 5. ИНТЕРАКТИВНЫЙ РУЧНОЙ ВЫБОР
     if state == "tx_manual_type":
         if "доход" in user_text_lower or "расход" in user_text_lower:
             op_type = "Доход" if "доход" in user_text_lower else "Расход"
@@ -625,7 +655,8 @@ def handle_queue_and_learning(user_id, user_text, user_text_lower, state, user_s
                 sel_cat = user_states[user_id]["sel_cat"]
 
                 send_vk_message(user_id, "⏳ Обучаюсь и записываю в базу...")
-                canon_art = get_canonical_article_for_sub(internal_uid, op_type, sel_cat, sel_sub, item_name)
+                menu_full = get_full_menu(internal_uid)
+                canon_art = _find_matching_article(menu_full, op_type, sel_cat, sel_sub, item_name)
 
                 save_transaction(
                     user_id=internal_uid,
@@ -646,9 +677,10 @@ def handle_queue_and_learning(user_id, user_text, user_text_lower, state, user_s
                     article=canon_art,
                     synonym=item_name
                 )
+                syn_msg = f"«{item_name}» запомнено как синоним к статье «{canon_art}»" if canon_art.lower() != item_name.lower() else f"Создана статья «{canon_art}»"
                 send_vk_message(
                     user_id,
-                    f"✅ Успешно! «{item_name}» запомнено как синоним к статье «{canon_art}» ({sel_cat} -> {sel_sub}).",
+                    f"✅ Успешно!\n📂 {sel_cat} -> {sel_sub}\n{syn_msg}",
                     get_main_keyboard(user_id)
                 )
                 del user_states[user_id]
