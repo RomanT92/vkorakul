@@ -125,30 +125,58 @@ def _show_multi_tx_items(user_id, items, show_apply_all=False):
     msg += "Если хотите изменить категорию статьи — отправьте её НОМЕР."
     send_vk_message(user_id, msg, get_multi_tx_review_keyboard(len(items), show_apply_all=show_apply_all, show_back=True))
 
+def _validate_ai_category_choice(menu_full, op_type, cat, sub):
+    """
+    СТРОГАЯ ПРОВЕРКА: Существуют ли категория и подкатегория в структуре пользователя?
+    Если ИИ выдумал категорию/подкатегорию — возвращает (None, None).
+    """
+    type_menu = menu_full.get(op_type, {})
+    if cat not in type_menu:
+        # Проверяем точное совпадение без учета регистра
+        matched_cat = next((c for c in type_menu if c.lower() == str(cat).lower().strip()), None)
+        if not matched_cat:
+            return None, None
+        cat = matched_cat
+
+    subs = type_menu[cat]
+    sub_list = list(subs.keys()) if isinstance(subs, dict) else subs
+    
+    if sub not in sub_list:
+        matched_sub = next((s for s in sub_list if s.lower() == str(sub).lower().strip()), None)
+        if matched_sub:
+            return cat, matched_sub
+        # Если категория существует, но подкатегорию ИИ выдумал — берем подкатегорию "Другое"
+        default_sub = next((s for s in sub_list if "другое" in s.lower()), None)
+        if default_sub:
+            return cat, default_sub
+        return cat, (sub_list[0] if sub_list else "Разное")
+
+    return cat, sub
+
 def _find_best_matching_article_in_sub(menu_full, op_type, cat, sub, user_word):
     """
-    Ищет в подкатегории статью, которая действительно похожа на слово пользователя.
-    НЕ БЕРЕТ СЛУЧАЙНУЮ СТАТЬЮ ЧЕРЕЗ LIMIT 1!
-    Если похожей статьи нет — возвращает само слово пользователя.
+    Ищет статью в подкатегории, которая ДЕЙСТВИТЕЛЬНО является родственником слова пользователя.
+    НИ В КОЕМ СЛУЧАЕ НЕ ПРИВЯЗЫВАЕТ ЧУЖИЕ СТАТЬИ («Торт», «Букеты» и т.п.)!
     """
     clean_w = user_word.lower().strip()
     sub_articles = menu_full.get(op_type, {}).get(cat, {}).get(sub, [])
     if not sub_articles:
         return user_word.capitalize()
 
-    # 1. Прямое или частичное совпадение
+    # 1. Точное или частичное смысловое вхождение
     for art in sub_articles:
-        if art.lower() == clean_w or clean_w in art.lower() or art.lower() in clean_w:
+        art_l = art.lower()
+        if art_l == clean_w or (len(clean_w) >= 4 and clean_w in art_l) or (len(art_l) >= 4 and art_l in clean_w):
             return art
 
-    # 2. Нечеткий поиск (difflib)
-    matches = difflib.get_close_matches(clean_w, [a.lower() for a in sub_articles], n=1, cutoff=0.6)
+    # 2. Нечеткий поиск (высокий порог сходства 0.72)
+    matches = difflib.get_close_matches(clean_w, [a.lower() for a in sub_articles], n=1, cutoff=0.72)
     if matches:
         for art in sub_articles:
             if art.lower() == matches[0]:
                 return art
 
-    # Если в подкатегории нет похожей статьи — слово пользователя становится новой статьей
+    # Если родственника нет — слово пользователя сохраняется как есть!
     return user_word.capitalize()
 
 def _save_items_batch(internal_uid, items):
@@ -223,10 +251,6 @@ def _match_category_tree(menu_full, op_type, text):
     return None, None
 
 def _try_fast_single_transaction_parse(user_text):
-    """
-    Детерминированный парсер: мгновенно и без вызова ИИ вырезает
-    чистое слово пользователя и сумму.
-    """
     text = user_text.strip()
     match_end = re.search(r'^(.*?)\s+(\d+(?:[.,]\d+)?)\s*(?:руб|р)?$', text, re.IGNORECASE)
     match_start = re.search(r'^(\d+(?:[.,]\d+)?)\s*(?:руб|р)?\s+(.*?)$', text, re.IGNORECASE)
@@ -489,7 +513,10 @@ def handle_transaction(user_id, user_text, state, user_states):
                 type_menu = menu_full.get(op_type, {})
                 menu_str = f"[{op_type}]\n" + "\n".join([f"{c}: {', '.join(subs.keys() if isinstance(subs, dict) else subs)}" for c, subs in type_menu.items()])
                 ai_cat, ai_sub = categorize_with_ai(original_article, menu_str, context=user_text)
-                target_cat, target_sub = ai_cat, ai_sub
+                
+                v_cat, v_sub = _validate_ai_category_choice(menu_full, op_type, ai_cat, ai_sub)
+                target_cat = v_cat or "Разное"
+                target_sub = v_sub or "Требует проверки"
                 target_art = _find_best_matching_article_in_sub(menu_full, op_type, target_cat, target_sub, original_article)
 
         ok = update_transaction_category(internal_uid, sel_op["id"], target_cat, target_sub, target_art)
@@ -690,7 +717,10 @@ def handle_transaction(user_id, user_text, state, user_states):
                 send_vk_message(user_id, "🧠 Подбираю категорию с помощью ИИ...", get_cancel_keyboard(show_back=True))
                 type_menu = menu_full.get(op_type, {})
                 menu_str = f"[{op_type}]\n" + "\n".join([f"{c}: {', '.join(subs.keys() if isinstance(subs, dict) else subs)}" for c, subs in type_menu.items()])
-                ai_cat, ai_sub = categorize_with_ai(sel_item.get("item"), menu_str, context=user_text)
+                raw_cat, raw_sub = categorize_with_ai(sel_item.get("item"), menu_str, context=user_text)
+                v_cat, v_sub = _validate_ai_category_choice(menu_full, op_type, raw_cat, raw_sub)
+                ai_cat = v_cat or "Разное"
+                ai_sub = v_sub or "Требует проверки"
                 ai_art = _find_best_matching_article_in_sub(menu_full, op_type, ai_cat, ai_sub, sel_item.get("item"))
 
         sel_item["category"] = ai_cat
@@ -706,7 +736,7 @@ def handle_transaction(user_id, user_text, state, user_states):
 
     # ====================================================================
     # ⚡ СВЕРХБЫСТРЫЙ ДЕТЕРМИНИРОВАННЫЙ ВВОД ОПЕРАЦИИ (FAST-PATH)
-    # «Шинправка 1000», «Шиномонтаж 2600»
+    # «Стикс 500», «Шинправка 1000», «Шиномонтаж 2600»
     # ====================================================================
     fast_parsed = _try_fast_single_transaction_parse(user_text)
     if fast_parsed:
@@ -718,7 +748,7 @@ def handle_transaction(user_id, user_text, state, user_states):
         f_amt = fast_parsed["amount"]
         f_op_type, _ = detect_operation_type(user_text, "Расход", f_item)
 
-        # Проверка в базе данных синонимов
+        # 1. Проверяем в личной и глобальной базе синонимов
         db_res = smart_search_item(internal_uid, f_item, op_type=f_op_type)
         if db_res.get("status") != "FOUND":
             db_res = smart_search_item(internal_uid, f_item, op_type=None)
@@ -750,44 +780,40 @@ def handle_transaction(user_id, user_text, state, user_states):
             )
             return True
         else:
-            # Слово новое, но сумма известна -> сразу направляем на классификацию с ТОЧНЫМ сохранением слова!
+            # Слово новое -> категоризируем строго по белому списку меню
             menu_full = get_full_menu(internal_uid)
             type_menu = menu_full.get(f_op_type, {})
             menu_str = f"[{f_op_type}]\n" + "\n".join([f"{c}: {', '.join(subs.keys() if isinstance(subs, dict) else subs)}" for c, subs in type_menu.items()])
             
-            ai_cat, ai_sub = categorize_with_ai(f_item, menu_str)
-            valid_cat = ai_cat in type_menu and ai_sub in (type_menu[ai_cat].keys() if isinstance(type_menu[ai_cat], dict) else type_menu[ai_cat])
+            raw_cat, raw_sub = categorize_with_ai(f_item, menu_str)
+            v_cat, v_sub = _validate_ai_category_choice(menu_full, f_op_type, raw_cat, raw_sub)
 
-            # Ищем, есть ли в выбранной подкатегории похожая статья
-            matched_art = _find_best_matching_article_in_sub(menu_full, f_op_type, ai_cat, ai_sub, f_item) if valid_cat else f_item.capitalize()
-
-            single_obj = {
-                "item": f_item,
-                "article": matched_art,
-                "amount": f_amt,
-                "type": f_op_type,
-                "category": ai_cat if valid_cat else "Разное",
-                "subcategory": ai_sub if valid_cat else "Требует проверки",
-                "comment": "",
-                "is_known": False
-            }
-
-            if valid_cat and ai_sub != "Требует проверки":
+            if v_cat and v_sub and v_sub != "Требует проверки":
+                matched_art = _find_best_matching_article_in_sub(menu_full, f_op_type, v_cat, v_sub, f_item)
+                single_obj = {
+                    "item": f_item,
+                    "article": matched_art,
+                    "amount": f_amt,
+                    "type": f_op_type,
+                    "category": v_cat,
+                    "subcategory": v_sub,
+                    "comment": "",
+                    "is_known": False
+                }
                 user_states[user_id] = {
                     "state": "confirm_category",
                     "payload": single_obj,
                     "menu": menu_full,
-                    "ai_cat": ai_cat,
-                    "ai_sub": ai_sub,
+                    "ai_cat": v_cat,
+                    "ai_sub": v_sub,
                     "canonical_art": matched_art,
                     "attempts": 1
                 }
                 
-                # Понятное объяснение пользователю
                 if matched_art.lower() != f_item.lower():
-                    confirm_text = f"🤖 Думаю, «{f_item}» относится к:\n📂 {ai_cat} -> {ai_sub} (статья: «{matched_art}»)\n💰 {f_amt:g} руб.\n\nПривязать как синоним к «{matched_art}»?"
+                    confirm_text = f"🤖 Думаю, «{f_item}» относится к:\n📂 {v_cat} -> {v_sub} (статья: «{matched_art}»)\n💰 {f_amt:g} руб.\n\nПривязать как синоним к «{matched_art}»?"
                 else:
-                    confirm_text = f"🤖 Думаю, «{f_item}» относится к:\n📂 {ai_cat} -> {ai_sub}\n💰 {f_amt:g} руб.\n\nСоздать статью «{f_item.capitalize()}»?"
+                    confirm_text = f"🤖 Думаю, «{f_item}» относится к:\n📂 {v_cat} -> {v_sub}\n💰 {f_amt:g} руб.\n\nСоздать статью «{f_item.capitalize()}»?"
 
                 send_vk_message(
                     user_id,
@@ -796,6 +822,16 @@ def handle_transaction(user_id, user_text, state, user_states):
                 )
                 return True
             else:
+                single_obj = {
+                    "item": f_item,
+                    "article": f_item.capitalize(),
+                    "amount": f_amt,
+                    "type": f_op_type,
+                    "category": "Разное",
+                    "subcategory": "Требует проверки",
+                    "comment": "",
+                    "is_known": False
+                }
                 user_states[user_id] = {
                     "state": "provide_context",
                     "payload": single_obj,
@@ -804,7 +840,7 @@ def handle_transaction(user_id, user_text, state, user_states):
                 }
                 send_vk_message(
                     user_id,
-                    f"🤔 Я пока не знаю «{f_item}» ({f_amt:g} руб.).\n"
+                    f"🤔 Я записал операцию на {f_amt:g} руб., но не знаю статью «{f_item}».\n"
                     f"Подскажи в двух словах, к чему это относится (или назови категорию):",
                     get_cancel_keyboard(show_back=True)
                 )
@@ -812,11 +848,9 @@ def handle_transaction(user_id, user_text, state, user_states):
 
     # ====================================================================
     # ПЕРЕХВАТ СЛОВА БЕЗ СУММЫ (Защита от ложного «Неверный ввод»)
-    # Например, пользователь написал просто «Шинправка» или «Бензин»
     # ====================================================================
     if state == "" and not re.search(r'\d+', user_text) and len(user_text.split()) <= 3:
         clean_name = user_text.strip().capitalize()
-        # Проверяем, может это известная статья?
         check_m = smart_search_item(internal_uid, user_text)
         cat_info = f" (📂 {check_m['category']} -> {check_m['subcategory']})" if check_m.get("status") == "FOUND" else ""
         
@@ -895,8 +929,10 @@ def handle_transaction(user_id, user_text, state, user_states):
                         else:
                             type_menu = menu_full.get(op_type, {})
                             menu_str = f"[{op_type}]\n" + "\n".join([f"{c}: {', '.join(subs.keys() if isinstance(subs, dict) else subs)}" for c, subs in type_menu.items()])
-                            ai_c, ai_s = categorize_with_ai(final_art, menu_str, context=cat_hint)
-                            final_cat, final_sub = ai_c, ai_s
+                            raw_c, raw_s = categorize_with_ai(final_art, menu_str, context=cat_hint)
+                            v_c, v_s = _validate_ai_category_choice(menu_full, op_type, raw_c, raw_s)
+                            final_cat = v_c or final_cat
+                            final_sub = v_s or final_sub
                             final_art = _find_best_matching_article_in_sub(menu_full, op_type, final_cat, final_sub, final_art)
 
                 old_amt_str = f"{tx_to_edit['amount']:g} руб."
@@ -1145,11 +1181,11 @@ def handle_transaction(user_id, user_text, state, user_states):
                     else:
                         type_menu = menu_full.get(op_type, {})
                         menu_str = f"[{op_type}]\n" + "\n".join([f"{c}: {', '.join(subs.keys() if isinstance(subs, dict) else subs)}" for c, subs in type_menu.items()])
-                        ai_cat, ai_sub = categorize_with_ai(current_item, menu_str)
+                        raw_c, raw_s = categorize_with_ai(current_item, menu_str)
+                        v_c, v_s = _validate_ai_category_choice(menu_full, op_type, raw_c, raw_s)
 
-                        valid_cat = ai_cat in type_menu and ai_sub in (type_menu[ai_cat].keys() if isinstance(type_menu[ai_cat], dict) else type_menu[ai_cat])
-                        if valid_cat and ai_sub != "Требует проверки":
-                            cat_res, sub_res = ai_cat, ai_sub
+                        if v_c and v_s and v_s != "Требует проверки":
+                            cat_res, sub_res = v_c, v_s
                             canonical_art = _find_best_matching_article_in_sub(menu_full, op_type, cat_res, sub_res, current_item)
                         else:
                             cat_res, sub_res = "Разное", "Требует проверки"
