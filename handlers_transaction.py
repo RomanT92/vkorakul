@@ -19,24 +19,16 @@ from db import (
     smart_search_item,
     save_transaction,
     learn_user_word,
-    get_full_menu,
-    db_rename_category,
-    db_rename_subcategory,
-    db_rename_article,
-    db_delete_entity,
-    db_move_entity,
-    get_last_transaction,
-    update_transaction_amount,
-    update_transaction_category
+    get_full_menu
 )
-from handlers_history import handle_history_and_edits, _show_history_screen
+from handlers_history import handle_history_and_edits
+from handlers_structure_nlp import handle_structure_nlp_action
 from handlers_tx_parser import (
     detect_operation_type,
     clean_fallback_item,
     _try_fast_single_transaction_parse,
     _validate_ai_category_choice,
-    _find_best_matching_article_in_sub,
-    _match_category_tree
+    _find_best_matching_article_in_sub
 )
 
 def _extract_json_data(text):
@@ -99,11 +91,11 @@ def handle_transaction(user_id, user_text, state, user_states):
     user_text_lower = user_text.lower().strip()
     internal_uid = get_or_create_user(user_id)
 
-    # 1. Сначала проверяем сценарии истории и правок
+    # 1. Просмотр/правка истории
     if handle_history_and_edits(user_id, internal_uid, user_text, user_text_lower, state, user_states):
         return True
 
-    # 2. Обработка кнопки Назад для массового ввода
+    # 2. Назад в массовом вводе
     if "назад" in user_text_lower:
         if state == "multi_tx_edit_hint":
             user_states[user_id]["state"] = "multi_tx_review"
@@ -114,7 +106,7 @@ def handle_transaction(user_id, user_text, state, user_states):
             send_vk_message(user_id, "Главное меню.", get_main_keyboard(user_id))
             return True
 
-    # 3. FAST-PATH: Детерминированная запись 'Шиномонтаж 2600' за 1 миллисекунду
+    # 3. FAST-PATH: Детерминированная запись "Кофе 250" за 1 мс
     fast_parsed = _try_fast_single_transaction_parse(user_text)
     if fast_parsed:
         if user_id in user_states:
@@ -168,15 +160,7 @@ def handle_transaction(user_id, user_text, state, user_states):
                 send_vk_message(user_id, f"🤔 Я записал операцию на {f_amt:g} руб., но не знаю статью «{f_item}».\nПодскажи в двух словах, к чему это относится:", get_cancel_keyboard(show_back=True))
             return True
 
-    # 4. Перехват слова без суммы (защита от «Неверный ввод»)
-    if state == "" and not re.search(r'\d+', user_text) and len(user_text.split()) <= 3:
-        clean_name = user_text.strip().capitalize()
-        check_m = smart_search_item(internal_uid, user_text)
-        cat_info = f" (📂 {check_m['category']} -> {check_m['subcategory']})" if check_m.get("status") == "FOUND" else ""
-        send_vk_message(user_id, f"💡 Вижу операцию «{clean_name}»{cat_info}.\nУкажите сумму (например: «{user_text} 500»):", get_cancel_keyboard(show_back=False))
-        return True
-
-    # 5. Массовый ввод: ревью списка
+    # 4. Ревью массового ввода
     if state == "multi_tx_review":
         state_data = user_states[user_id]
         items = state_data["items"]
@@ -198,13 +182,17 @@ def handle_transaction(user_id, user_text, state, user_states):
     if state != "":
         return False
 
-    # 6. Анализ сложного ввода через ИИ
+    # 5. Анализ ввода через ИИ
     reply_text = extract_transaction_with_ai(user_text)
     if not reply_text:
         return False
 
     parsed_data = _extract_json_data(reply_text)
     if parsed_data:
+        # ВОТ ЗДЕСЬ: перехватываем голосовое/текстовое управление структурой!
+        if handle_structure_nlp_action(user_id, internal_uid, parsed_data, user_states):
+            return True
+
         raw_ops = parsed_data.get("operations", [])
         if not raw_ops and "item" in parsed_data:
             raw_ops = [parsed_data]
