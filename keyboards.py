@@ -13,12 +13,13 @@ def get_main_keyboard(user_id=None, count=None):
         except Exception as e:
             print(f"Ошибка получения счетчика в клавиатуре: {e}")
             unreviewed_count = 0
-            
+
     keyboard = VkKeyboard(one_time=False)
     if unreviewed_count > 0:
         btn_text = f"📥 Разобрать операции ({unreviewed_count})"
     else:
         btn_text = "📥 Разобрать операции"
+
     keyboard.add_button(btn_text, color=VkKeyboardColor.SECONDARY)
     keyboard.add_line()
     keyboard.add_button('📊 Импорт статистики прошлого', color=VkKeyboardColor.PRIMARY)
@@ -82,11 +83,14 @@ def get_numbered_keyboard(count, show_back=True):
         keyboard.add_button('🚫 Отмена', color=VkKeyboardColor.NEGATIVE)
     return keyboard
 
-def get_yes_no_keyboard(show_back=True):
-    """Клавиатура подтверждения"""
+def get_yes_no_keyboard(show_back=True, show_promote_article=False):
+    """Клавиатура подтверждения с опцией 'Сделать отдельной статьёй'"""
     keyboard = VkKeyboard(one_time=False)
     keyboard.add_button('✅ Да', color=VkKeyboardColor.POSITIVE)
     keyboard.add_button('❌ Нет', color=VkKeyboardColor.NEGATIVE)
+    if show_promote_article:
+        keyboard.add_line()
+        keyboard.add_button('📄 Сделать отдельной статьёй', color=VkKeyboardColor.PRIMARY)
     keyboard.add_line()
     if show_back:
         keyboard.add_button('🔙 Назад', color=VkKeyboardColor.NEGATIVE)
@@ -141,7 +145,8 @@ def get_receipt_review_keyboard(count, show_back=True):
 
 def get_queue_review_keyboard(count, show_apply_all=False, show_back=True):
     """
-    Клавиатура очереди разбора с кнопками: Сохранить пакет, Удалить мусор, Всё в мусор.
+    Клавиатура очереди разбора с кнопками:
+    Сохранить пакет, Удалить мусор, Всё в мусор.
     """
     keyboard = VkKeyboard(one_time=False)
     limit = min(count, 36)
@@ -197,6 +202,8 @@ def get_tx_action_keyboard():
     keyboard = VkKeyboard(one_time=False)
     keyboard.add_button('✏️ Изменить сумму', color=VkKeyboardColor.PRIMARY)
     keyboard.add_button('📂 Изменить категорию', color=VkKeyboardColor.PRIMARY)
+    keyboard.add_line()
+    keyboard.add_button('📄 Сделать отдельной статьёй', color=VkKeyboardColor.SECONDARY)
     keyboard.add_line()
     keyboard.add_button('🗑 Удалить операцию', color=VkKeyboardColor.NEGATIVE)
     keyboard.add_line()
