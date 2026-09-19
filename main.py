@@ -1,4 +1,6 @@
 # -*- coding: utf-8 -*-
+import threading
+import time
 from db import (
     get_full_menu,
     get_or_create_user,
@@ -27,6 +29,33 @@ from vk_api.longpoll import VkEventType
 # ====================================================================
 user_states = {}
 MAX_ATTEMPTS = 3
+TEST_INTERVAL_HOURS = 4  # Интервал автотестов (раз в 4 часа)
+
+# ====================================================================
+# АВТОНОМНЫЙ СТОРОЖЕВОЙ ПОТОК (АВТОТЕСТ ПРИ СТАРТЕ И КАЖДЫЕ 4 ЧАСА)
+# ====================================================================
+def background_health_monitor():
+    """
+    Фоновый демон:
+    1. Запускает полный аудит 19 модулей СРАЗУ при старте бота.
+    2. Повторяет полный прогон каждые 4 часа в фоновом режиме.
+    """
+    time.sleep(3)  # Короткая пауза, чтобы LongPoll успел инициализироваться
+    while True:
+        try:
+            print(f"\n[АВТОТЕСТ] Запуск планового сквозного аудита 19 модулей...")
+            from test_runner import run_all_self_tests
+            passed, failed, errors = run_all_self_tests()
+            print(f"[АВТОТЕСТ] Завершен: {passed}/19 в строю, {failed} сбоев. Следующий запуск через {TEST_INTERVAL_HOURS} ч.\n")
+        except Exception as e:
+            print(f"[АВТОТЕСТ] Ошибка выполнения фонового теста: {e}")
+        
+        # Ожидание 4 часа (4 * 3600 сек)
+        time.sleep(TEST_INTERVAL_HOURS * 3600)
+
+# Запуск фонового демона
+monitor_thread = threading.Thread(target=background_health_monitor, daemon=True)
+monitor_thread.start()
 
 # ====================================================================
 # ГЛАВНЫЙ ЦИКЛ БОТА
@@ -198,7 +227,7 @@ for event in longpoll.listen():
         except Exception as e_voice_cmd:
             report_module_health(6, "Требует внимания", str(e_voice_cmd))
 
-        # Шаг 1: Базовые команды и навигация (Модули №17, 19)
+        # Шаг 1: Базовые команды, автотесты и навигация (Модули №17, 19)
         try:
             if handle_base_commands(user_id, user_text_lower, state, user_states):
                 report_module_health(19, "В строю")
