@@ -46,6 +46,26 @@ vk = vk_session.get_api()
 ai_client = OpenAI(api_key=AI_TUNNEL_KEY, base_url=AI_BASE_URL)
 
 # ====================================================================
+# АВТОМАТИЧЕСКАЯ ТЕЛЕМЕТРИЯ В ТАБЛИЦУ «КОНТРОЛЬ ФУНКЦИОНАЛА»
+# ====================================================================
+def report_module_health(module_num: int, status: str = "В строю", error_details: str = ""):
+    """
+    Отправляет статус модуля (№1-19) на лист 'Контроль функционала'.
+    status: 'В строю' или 'Требует внимания'.
+    """
+    payload = {
+        "action": "update_module_status",
+        "module_num": module_num,
+        "status": status,
+        "error": str(error_details)[:300] if error_details else ""
+    }
+    try:
+        return send_to_google_sheets(payload)
+    except Exception as e:
+        print(f"Ошибка отправки статуса модуля №{module_num}: {e}")
+        return {"status": "ERROR"}
+
+# ====================================================================
 # ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ДЛЯ РАБОТЫ С ФОТО
 # ====================================================================
 def get_image_base64_uri(image_url):
@@ -69,10 +89,6 @@ def get_image_base64_uri(image_url):
 # ФУНКЦИИ СВЯЗИ С ВК (С ЗАЩИТОЙ ОТ ЗАВИСАНИЯ И ДЛИННЫХ ТЕКСТОВ)
 # ====================================================================
 def send_vk_message(user_id, text, keyboard=None):
-    """
-    Отправляет сообщение пользователю ВКонтакте.
-    Защищает от лимита 4096 символов (разбивает сообщение на части) и корректно сериализует клавиатуру.
-    """
     try:
         max_len = 3800
         kb_val = None
@@ -111,7 +127,6 @@ def send_to_google_sheets(payload):
 # ФУНКЦИИ ОБРАБОТКИ ЧЕРЕЗ ИИ
 # ====================================================================
 def parse_voice_list_command_with_ai(user_text):
-    """Распознает голосовые/текстовые команды управления элементами списков."""
     try:
         response = ai_client.chat.completions.create(
             model="gpt-3.5-turbo",
@@ -133,7 +148,6 @@ def parse_voice_list_command_with_ai(user_text):
 parse_list_command_with_ai = parse_voice_list_command_with_ai
 
 def categorize_with_ai(item, menu_str, context=""):
-    """Просит ИИ подобрать категорию из меню с учетом контекста."""
     prompt = f"Операция: {item}\n"
     if context:
         prompt += f"Подсказка пользователя: {context}\n"
@@ -158,7 +172,6 @@ def categorize_with_ai(item, menu_str, context=""):
     return "UNKNOWN", "UNKNOWN"
 
 def extract_transaction_with_ai(user_text):
-    """Парсит финансовые операции, команды истории/удаления или общается."""
     try:
         response = ai_client.chat.completions.create(
             model="gpt-3.5-turbo",
@@ -176,7 +189,6 @@ def extract_transaction_with_ai(user_text):
 extract_operations_with_ai = extract_transaction_with_ai
 
 def transcribe_audio_with_ai(audio_url):
-    """Скачивает голосовое сообщение из ВК и переводит его в текст."""
     try:
         response = requests.get(audio_url, timeout=20)
         if response.status_code != 200:
@@ -199,7 +211,6 @@ def transcribe_audio_with_ai(audio_url):
         return None
 
 def extract_receipt_total_with_ai(image_url):
-    """Извлекает общий итог и магазин из чека (GPT-4o Vision)."""
     try:
         base64_uri = get_image_base64_uri(image_url)
         if not base64_uri:
@@ -224,10 +235,6 @@ def extract_receipt_total_with_ai(image_url):
         return None
 
 def extract_receipt_items_with_ai(image_url):
-    """
-    ЭТАП 1: Чистое чтение позиций чека (GPT-4o Vision) без нагрузки классификацией.
-    Извлекает список товаров с точными итоговыми суммами.
-    """
     try:
         base64_uri = get_image_base64_uri(image_url)
         if not base64_uri:
@@ -251,22 +258,46 @@ def extract_receipt_items_with_ai(image_url):
         print(f"Ошибка AI при чтении позиций чека: {e}")
         return None
 
-def extract_receipt_items_pipeline(image_url, menu_str=None):
-    """Фолбэк-функция для обратной совместимости."""
-    reply = extract_receipt_items_with_ai(image_url)
-    if not reply:
-        return []
-    match = re.search(r'\[.*\]', reply, re.DOTALL)
-    clean = match.group(0) if match else reply
+def normalize_receipt_items_with_ai(raw_items_list):
+    prompt = (
+        "Преврати сырые строки чеков СТРОГО в базовое существительное товара.\n"
+        "УДАЛИ ВСЕ БРЕНДЫ, ВКУСЫ, СОРТА И МАГАЗИНЫ!\n"
+        "Примеры:\n"
+        "- Пакет Лента -> Пакет\n"
+        "- Салфетки влажные Little -> Салфетки влажные\n"
+        "- Колбаса Останкино -> Колбаса\n"
+        "- Зубная щетка Colgate -> Зубная щетка\n"
+        "- Бекон Черкизово -> Бекон\n"
+        "- Яйцо куриное -> Яйца\n"
+        "- Напиток Святой источник -> Вода\n"
+        "- Шоколад Milka Oreo -> Шоколад\n"
+        "- Молоко Домик в деревне -> Молоко\n\n"
+        "Вот список для очистки:\n"
+    )
+    for it in raw_items_list:
+        prompt += f"- {it}\n"
+    
+    prompt += "\nВерни СТРОГО JSON-объект в формате: {\"Сырое название\": \"Очищенное существительное\"}"
+    
     try:
-        return json.loads(clean)
-    except Exception:
-        return []
+        response = ai_client.chat.completions.create(
+            model="gpt-3.5-turbo",
+            temperature=0.0,
+            messages=[
+                {"role": "system", "content": "Ты нормализатор товаров в базовые существительные. Отвечай только валидным JSON."},
+                {"role": "user", "content": prompt}
+            ]
+        )
+        text = response.choices[0].message.content.strip()
+        match = re.search(r'\{.*\}', text, re.DOTALL)
+        if match:
+            return json.loads(match.group(0))
+        return json.loads(text)
+    except Exception as e:
+        print(f"Ошибка нормализации брендов: {e}")
+        return {}
 
 def categorize_batch_with_ai(items_list, menu_str):
-    """
-    ЭТАП 2: Массовая быстрая категоризация списка товаров через меню.
-    """
     prompt = f"Меню:\n{menu_str}\n\nОперации:\n"
     for item in items_list:
         orig = item.get('original_item') or item.get('item', '')
