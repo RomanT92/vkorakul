@@ -46,12 +46,21 @@ vk = vk_session.get_api()
 ai_client = OpenAI(api_key=AI_TUNNEL_KEY, base_url=AI_BASE_URL)
 
 # ====================================================================
-# АВТОМАТИЧЕСКАЯ ТЕЛЕМЕТРИЯ В ТАБЛИЦУ «КОНТРОЛЬ ФУНКЦИОНАЛА»
+# АВТОМАТИЧЕСКАЯ ТЕЛЕМЕТРИЯ И WATCHDOG В ТАБЛИЦУ
 # ====================================================================
+def send_heartbeat():
+    """Отправляет ежеминутный сигнал активности в ячейку H3 листа 'Контроль функционала'."""
+    try:
+        response = requests.post(GOOGLE_SHEETS_URL, json={"action": "heartbeat"}, timeout=10)
+        return response.json()
+    except Exception as e:
+        print(f"[WATCHDOG] Ошибка отправки сигнала активности: {e}")
+        return {"status": "ERROR", "message": str(e)}
+
 def report_module_health(module_num: int, status: str = "В строю", error_details: str = ""):
     """
     Отправляет статус модуля (№1-19) на лист 'Контроль функционала'.
-    status: 'В строю' или 'Требует внимания'.
+    status: 'В строю', 'Требует внимания', 'Исправлено'.
     """
     payload = {
         "action": "update_module_status",
@@ -60,7 +69,8 @@ def report_module_health(module_num: int, status: str = "В строю", error_d
         "error": str(error_details)[:300] if error_details else ""
     }
     try:
-        return send_to_google_sheets(payload)
+        response = requests.post(GOOGLE_SHEETS_URL, json=payload, timeout=15)
+        return response.json()
     except Exception as e:
         print(f"Ошибка отправки статуса модуля №{module_num}: {e}")
         return {"status": "ERROR"}
