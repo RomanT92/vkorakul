@@ -19,6 +19,7 @@ from services import (
     parse_bank_file_with_ai,
     send_vk_message,
     transcribe_audio_with_ai,
+    send_heartbeat,
     report_module_health,
     vk,
 )
@@ -29,31 +30,48 @@ from vk_api.longpoll import VkEventType
 # ====================================================================
 user_states = {}
 MAX_ATTEMPTS = 3
-TEST_INTERVAL_HOURS = 4  # Интервал автотестов (раз в 4 часа)
+TEST_INTERVAL_HOURS = 4  # Интервал автотестов (каждые 4 часа)
 
 # ====================================================================
-# АВТОНОМНЫЙ СТОРОЖЕВОЙ ПОТОК (АВТОТЕСТ ПРИ СТАРТЕ И КАЖДЫЕ 4 ЧАСА)
+# АВТОНОМНЫЙ СТОРОЖЕВОЙ ПОТОК (HEARTBEAT И АВТОТЕСТЫ)
 # ====================================================================
 def background_health_monitor():
     """
-    Фоновый демон:
-    1. Запускает полный аудит 19 модулей СРАЗУ при старте бота.
-    2. Повторяет полный прогон каждые 4 часа в фоновом режиме.
+    Фоновый сторожевой демон:
+    1. Каждую минуту шлет пинг активности (Heartbeat) в ячейку H3.
+    2. При старте и каждые 4 часа запускает сквозной аудит всех 19 модулей.
     """
-    time.sleep(3)  # Короткая пауза, чтобы LongPoll успел инициализироваться
+    time.sleep(2)
+    # Первый пинг связи сразу при запуске бота
+    send_heartbeat()
+
+    # Стартовый аудит всех 19 модулей
+    try:
+        from test_runner import run_all_self_tests
+        print("\n[АВТОТЕСТ] Стартовый прогон всех 19 модулей системы...")
+        run_all_self_tests()
+    except Exception as e:
+        print(f"[АВТОТЕСТ] Ошибка при стартовом аудите: {e}")
+
+    last_full_audit = time.time()
+    
     while True:
         try:
-            print(f"\n[АВТОТЕСТ] Запуск планового сквозного аудита 19 модулей...")
-            from test_runner import run_all_self_tests
-            passed, failed, errors = run_all_self_tests()
-            print(f"[АВТОТЕСТ] Завершен: {passed}/19 в строю, {failed} сбоев. Следующий запуск через {TEST_INTERVAL_HOURS} ч.\n")
-        except Exception as e:
-            print(f"[АВТОТЕСТ] Ошибка выполнения фонового теста: {e}")
-        
-        # Ожидание 4 часа (4 * 3600 сек)
-        time.sleep(TEST_INTERVAL_HOURS * 3600)
+            # 1. Ежеминутный сигнал жизнедеятельности в Google Таблицу
+            send_heartbeat()
 
-# Запуск фонового демона
+            # 2. Плановый аудит каждые 4 часа (14400 секунд)
+            if time.time() - last_full_audit >= (TEST_INTERVAL_HOURS * 3600):
+                print(f"\n[АВТОТЕСТ] Плановый запуск сквозного аудита (каждые {TEST_INTERVAL_HOURS} ч)...")
+                from test_runner import run_all_self_tests
+                run_all_self_tests()
+                last_full_audit = time.time()
+        except Exception as e:
+            print(f"[WATCHDOG] Ошибка в сторожевом потоке: {e}")
+
+        time.sleep(60)  # Спим ровно 1 минуту до следующего Heartbeat
+
+# Запуск сторожевого потока
 monitor_thread = threading.Thread(target=background_health_monitor, daemon=True)
 monitor_thread.start()
 
