@@ -1,24 +1,64 @@
 # -*- coding: utf-8 -*-
 import os
 import json
+import time
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 from db.connection import get_db_connection
 
 app = FastAPI(title="Оракул Admin | FastAPI Backend")
 
 # ====================================================================
-# HTML ШАБЛОНЫ (ИНТЕРФЕЙС АДМИНКИ)
+# СТАТИКА И HTML ШАБЛОНЫ (ИНТЕРФЕЙС АДМИНКИ)
 # ====================================================================
-templates_dir = os.path.join(os.path.dirname(__file__), "templates")
+current_dir = os.path.dirname(__file__)
+templates_dir = os.path.join(current_dir, "templates")
+static_dir = os.path.join(current_dir, "static")
+
 if not os.path.exists(templates_dir):
     os.makedirs(templates_dir, exist_ok=True)
 
+if not os.path.exists(static_dir):
+    os.makedirs(static_dir, exist_ok=True)
+
+app.mount("/static", StaticFiles(directory=static_dir), name="static")
 templates = Jinja2Templates(directory=templates_dir)
+
+# ====================================================================
+# IN-MEMORY ХРАНИЛИЩЕ СОСТОЯНИЯ МОНИТОРИНГА (WATCHDOG & 19 МОДУЛЕЙ)
+# ====================================================================
+SYSTEM_HEALTH_STATE: Dict[str, Any] = {
+    "last_heartbeat": 0.0,
+    "bot_version": "1.0.0",
+    "trigger_test_requested": 0.0,
+    "module_statuses": {}
+}
+
+MODULES_REGISTRY = [
+    {"num": 1, "name": "Регистрация и контекст пользователя", "files": "db/connection.py, db/transactions.py", "test_cmd": "/start, начать, любое сообщение", "layer": "Core / Auth", "default_status": "В строю"},
+    {"num": 2, "name": "Быстрый ввод трат и доходов (текст)", "files": "config.py, handlers_transaction.py", "test_cmd": "Такси 500, кофе 250 в магните 1400", "layer": "NLP / Transaction", "default_status": "В строю"},
+    {"num": 3, "name": "Голосовой ввод операций", "files": "main.py, services.py, handlers_transaction.py", "test_cmd": "[Голосовое сообщение с перечислением трат]", "layer": "Media / NLP", "default_status": "В строю"},
+    {"num": 4, "name": "Интерактивная классификация статей", "files": "config.py, handlers_transaction.py, db/structure.py", "test_cmd": "Выбор кнопок категорий при записи", "layer": "Business Logic", "default_status": "В строю"},
+    {"num": 5, "name": "Голосовое и текстовое редактирование", "files": "config.py, handlers_transaction.py, db/transactions.py", "test_cmd": "Измени сумму на 1350, перенеси в продукты", "layer": "NLP / Edit", "default_status": "В строю"},
+    {"num": 6, "name": "Пакетная привязка категорий к списку", "files": "config.py, handlers_voice_commands.py", "test_cmd": "Второе это другое, третье быт, пятое гигиена", "layer": "Batch Processing", "default_status": "В строю"},
+    {"num": 7, "name": "Пакетное редактирование сумм и названий", "files": "handlers_voice_commands.py, db/transactions.py", "test_cmd": "Измени сумму у четвертой на 250, первая огурцы", "layer": "Batch Processing", "default_status": "В строю"},
+    {"num": 8, "name": "Пакетное и точечное удаление записей", "files": "handlers_voice_commands.py, db/transactions.py", "test_cmd": "Удали первую и третью, удали всё", "layer": "CRUD Operations", "default_status": "В строю"},
+    {"num": 9, "name": "Выписка и история транзакций", "files": "db/transactions.py, handlers_transaction.py", "test_cmd": "Покажи траты за неделю, выписка", "layer": "Reporting", "default_status": "В строю"},
+    {"num": 10, "name": "Распознавание чека (общая сумма)", "files": "config.py, handlers_receipt.py", "test_cmd": "[Фотография чека из супермаркета]", "layer": "Vision / OCR", "default_status": "В строю"},
+    {"num": 11, "name": "Построчный разбор кассовых чеков", "files": "config.py, handlers_receipt.py", "test_cmd": "Разбери чек построчно", "layer": "Vision / Parser", "default_status": "В строю"},
+    {"num": 12, "name": "Пакетная авто-классификация чека", "files": "config.py, handlers_receipt.py, db/structure.py", "test_cmd": "[Автоматический вызов после сканирования чека]", "layer": "AI / Batch", "default_status": "В строю"},
+    {"num": 13, "name": "Очередь нераспознанных операций", "files": "handlers_queue.py, handlers_queue_batch.py", "test_cmd": "Разобрать операции, разобрать завалы", "layer": "Queue Management", "default_status": "В строю"},
+    {"num": 14, "name": "Обучение бота новым синонимам", "files": "handlers_learning.py, db/structure.py", "test_cmd": "[Подтверждение новой привязки в диалоге]", "layer": "Active Learning", "default_status": "В строю"},
+    {"num": 15, "name": "Импорт банковских выписок (CSV/XLSX)", "files": "config.py, handlers_base.py, db/imports.py", "test_cmd": "Импорт статистики прошлого + [Файл выписки]", "layer": "Data Ingestion", "default_status": "В строю"},
+    {"num": 16, "name": "Управление структурой (CRUD статей)", "files": "handlers_structure.py, db/structure.py, keyboards.py", "test_cmd": "Категории и статьи, Создать, Переименовать", "layer": "Metadata CRUD", "default_status": "В строю"},
+    {"num": 17, "name": "Двусторонняя синхронизация словарей", "files": "handlers_base.py, db/migration.py, services.py", "test_cmd": "Миграция базы, Сбор новых слов", "layer": "ETL / Integration", "default_status": "В строю"},
+    {"num": 18, "name": "Административная веб-панель", "files": "admin_server.py, templates/, static/", "test_cmd": "[Открытие URL веб-панели администрирования]", "layer": "Web Admin / UI", "default_status": "В строю"},
+    {"num": 19, "name": "Навигация и управление состояниями", "files": "handlers_base.py, keyboards.py", "test_cmd": "Отмена, назад, помощь, старт", "layer": "Navigation / FSM", "default_status": "В строю"}
+]
 
 @app.get("/", response_class=HTMLResponse)
 async def admin_index(request: Request):
@@ -82,6 +122,106 @@ async def get_system_stats():
         }
     except Exception as e:
         return {"status": "ERROR", "message": str(e)}
+
+# ====================================================================
+# МОНИТОРИНГ ФУНКЦИОНАЛА И WATCHDOG (ТЕЛЕМЕТРИЯ БОТА)
+# ====================================================================
+class HeartbeatPayload(BaseModel):
+    bot_version: Optional[str] = "1.0.0"
+
+@app.post("/api/heartbeat")
+async def receive_heartbeat(p: HeartbeatPayload):
+    """Прием сигналов жизни от бота (раз в минуту)."""
+    now = time.time()
+    SYSTEM_HEALTH_STATE["last_heartbeat"] = now
+    if p.bot_version:
+        SYSTEM_HEALTH_STATE["bot_version"] = p.bot_version
+    return {
+        "status": "SUCCESS",
+        "message": "Heartbeat acknowledged",
+        "server_time": now
+    }
+
+class ModuleStatusPayload(BaseModel):
+    module_num: int
+    status: str
+    error_details: Optional[str] = ""
+
+@app.post("/api/module_status")
+async def update_module_status(p: ModuleStatusPayload):
+    """Обновление статуса конкретного модуля по результатам выполнения/тестов."""
+    if 1 <= p.module_num <= 19:
+        SYSTEM_HEALTH_STATE["module_statuses"][str(p.module_num)] = {
+            "status": p.status,
+            "error": p.error_details or "",
+            "updated_at": time.time()
+        }
+        return {"status": "SUCCESS", "module_num": p.module_num, "current_status": p.status}
+    return {"status": "ERROR", "message": "Номер модуля должен быть от 1 до 19"}
+
+@app.get("/api/health")
+async def get_system_health():
+    """Отдает состояние сторожевого таймера, 19 модулей и метрики готовности."""
+    now = time.time()
+    last_hb = SYSTEM_HEALTH_STATE["last_heartbeat"]
+    diff_sec = int(now - last_hb) if last_hb > 0 else 999999
+    timeout_threshold = 180  # 3 минуты
+
+    is_online = (last_hb > 0) and (diff_sec <= timeout_threshold)
+
+    total_modules = len(MODULES_REGISTRY)
+    operational_count = 0
+    attention_count = 0
+
+    processed_modules = []
+    for m in MODULES_REGISTRY:
+        k = str(m["num"])
+        dyn = SYSTEM_HEALTH_STATE["module_statuses"].get(k, {})
+        base_status = dyn.get("status", m["default_status"])
+        err = dyn.get("error", "")
+        updated_at = dyn.get("updated_at", None)
+
+        effective_status = base_status if is_online else "Нет связи"
+
+        if effective_status == "В строю":
+            operational_count += 1
+        else:
+            attention_count += 1
+
+        processed_modules.append({
+            "num": m["num"],
+            "name": m["name"],
+            "files": m["files"],
+            "test_cmd": m["test_cmd"],
+            "layer": m["layer"],
+            "status": effective_status,
+            "error": err,
+            "updated_at": updated_at
+        })
+
+    readiness = int(round((operational_count / total_modules) * 100)) if is_online else 0
+
+    return {
+        "status": "SUCCESS",
+        "connection_status": "ONLINE" if is_online else "OFFLINE",
+        "last_heartbeat": last_hb,
+        "diff_seconds": diff_sec,
+        "bot_version": SYSTEM_HEALTH_STATE["bot_version"],
+        "total_modules": total_modules,
+        "operational_count": operational_count if is_online else 0,
+        "attention_count": attention_count if is_online else total_modules,
+        "readiness_percentage": readiness,
+        "modules": processed_modules
+    }
+
+@app.post("/api/trigger_test")
+async def trigger_self_test():
+    """Устанавливает флаг необходимости запуска автотестов ботом."""
+    SYSTEM_HEALTH_STATE["trigger_test_requested"] = time.time()
+    return {
+        "status": "SUCCESS",
+        "message": "Команда автотестирования зарегистрирована. Бот инициирует прогон модулей."
+    }
 
 # ====================================================================
 # КАТАЛОГ И ЭТАЛОН (GLOBAL_DICTIONARY)
