@@ -1,0 +1,923 @@
+<style>
+  .drag-over {
+    border: 2px dashed #6366f1 !important;
+    background-color: rgba(99, 102, 241, 0.1) !important;
+  }
+  .dragging {
+    opacity: 0.4;
+    transform: scale(0.98);
+  }
+</style>
+
+<script>
+  let currentMainTab = 'catalog';
+  let currentModerationMode = 'pending';
+  let selectedIndices = new Set();
+  let cachedData = [];
+
+  let globalCatalog = [];
+  let globalTreeData = {};
+  let activeModalPayload = {};
+  let draggedEntity = null;
+
+  let healthModulesData = [];
+  let healthPollingTimer = null;
+
+  window.onload = function() {
+    loadCatalog();
+    loadModerationData();
+    loadHealthData();
+
+    if (healthPollingTimer) clearInterval(healthPollingTimer);
+    healthPollingTimer = setInterval(function() {
+      loadHealthData(true);
+    }, 30000);
+  };
+
+  function setStatus(text) {
+    const el = document.getElementById('statusIndicator');
+    if (el) el.innerHTML = `<i class="fa-solid fa-circle text-indigo-400 text-[9px] mr-1.5 animate-pulse"></i> ${text}`;
+  }
+
+  // ==============================================================
+  // НАВИГАЦИЯ МЕЖДУ ГЛАВНЫМИ ВКЛАДКАМИ
+  // ==============================================================
+  function switchMainTab(tab) {
+    currentMainTab = tab;
+    document.getElementById('catalogTab').classList.toggle('hidden', tab !== 'catalog');
+    document.getElementById('moderationTab').classList.toggle('hidden', tab !== 'moderation');
+    document.getElementById('healthTab').classList.toggle('hidden', tab !== 'health');
+    document.getElementById('navigationTab').classList.toggle('hidden', tab !== 'navigation');
+
+    document.getElementById('mainTabCatalogBtn').className = tab === 'catalog'
+      ? "py-3 text-sm font-semibold border-b-2 border-indigo-500 text-indigo-400 flex items-center space-x-2 whitespace-nowrap"
+      : "py-3 text-sm font-semibold border-b-2 border-transparent text-slate-400 hover:text-slate-200 flex items-center space-x-2 whitespace-nowrap";
+
+    document.getElementById('mainTabModBtn').className = tab === 'moderation'
+      ? "py-3 text-sm font-semibold border-b-2 border-indigo-500 text-indigo-400 flex items-center space-x-2 whitespace-nowrap"
+      : "py-3 text-sm font-semibold border-b-2 border-transparent text-slate-400 hover:text-slate-200 flex items-center space-x-2 whitespace-nowrap";
+
+    document.getElementById('mainTabHealthBtn').className = tab === 'health'
+      ? "py-3 text-sm font-semibold border-b-2 border-indigo-500 text-indigo-400 flex items-center space-x-2 whitespace-nowrap"
+      : "py-3 text-sm font-semibold border-b-2 border-transparent text-slate-400 hover:text-slate-200 flex items-center space-x-2 whitespace-nowrap";
+
+    document.getElementById('mainTabNavBtn').className = tab === 'navigation'
+      ? "py-3 text-sm font-semibold border-b-2 border-indigo-500 text-indigo-400 flex items-center space-x-2 whitespace-nowrap"
+      : "py-3 text-sm font-semibold border-b-2 border-transparent text-slate-400 hover:text-slate-200 flex items-center space-x-2 whitespace-nowrap";
+
+    if (tab === 'health') {
+      loadHealthData();
+    }
+  }
+
+  // ==============================================================
+  // МОНИТОРИНГ ФУНКЦИОНАЛА И WATCHDOG
+  // ==============================================================
+  async function loadHealthData(isSilent = false) {
+    if (!isSilent) setStatus('Опрос телеметрии...');
+    try {
+      const res = await fetch('/api/health');
+      const data = await res.json();
+      if (data.status === 'SUCCESS') {
+        healthModulesData = data.modules || [];
+
+        const topBadge = document.getElementById('topConnectionBadge');
+        if (topBadge) {
+          if (data.connection_status === 'ONLINE') {
+            topBadge.className = "text-xs px-3 py-1 rounded-full border bg-emerald-500/10 border-emerald-500/30 text-emerald-400";
+            topBadge.innerHTML = `<i class="fa-solid fa-circle text-emerald-400 text-[9px] mr-1.5 animate-pulse"></i> В СЕТИ (${data.diff_seconds}с назад)`;
+          } else {
+            topBadge.className = "text-xs px-3 py-1 rounded-full border bg-rose-500/10 border-rose-500/30 text-rose-400";
+            topBadge.innerHTML = `<i class="fa-solid fa-circle text-rose-500 text-[9px] mr-1.5"></i> ОБРЫВ СВЯЗИ`;
+          }
+        }
+
+        const connEl = document.getElementById('healthConnectionStatus');
+        const pingEl = document.getElementById('healthLastPing');
+        const pulseIcon = document.getElementById('healthPulseIcon');
+
+        if (connEl && pingEl) {
+          if (data.connection_status === 'ONLINE') {
+            connEl.innerText = "В СЕТИ";
+            connEl.className = "text-xl font-bold text-emerald-400";
+            pingEl.innerText = `Пинг: ${data.diff_seconds} сек. назад (v${data.bot_version})`;
+            pulseIcon.className = "w-2.5 h-2.5 rounded-full bg-emerald-400 animate-ping";
+          } else {
+            connEl.innerText = "ОБРЫВ СВЯЗИ";
+            connEl.className = "text-xl font-bold text-rose-400";
+            pingEl.innerText = data.last_heartbeat === 0 ? "Сигналов не поступало" : `Молчит > ${Math.floor(data.diff_seconds / 60)} мин.`;
+            pulseIcon.className = "w-2.5 h-2.5 rounded-full bg-rose-500";
+          }
+        }
+
+        document.getElementById('healthTotalMods').innerText = data.total_modules;
+        document.getElementById('healthOperational').innerText = data.operational_count;
+        document.getElementById('healthAttention').innerText = data.attention_count;
+        document.getElementById('healthPercentage').innerText = data.readiness_percentage + '%';
+        document.getElementById('healthProgressBar').style.width = data.readiness_percentage + '%';
+
+        applyHealthFilters();
+        if (!isSilent) setStatus('Готово');
+      } else {
+        if (!isSilent) setStatus('Сбой связи');
+      }
+    } catch (err) {
+      if (!isSilent) setStatus('Сбой связи');
+    }
+  }
+
+  function applyHealthFilters() {
+    const q = (document.getElementById('healthSearchInput') ? document.getElementById('healthSearchInput').value : '').toLowerCase().trim();
+    const statusFilter = document.getElementById('healthStatusFilter') ? document.getElementById('healthStatusFilter').value : 'ALL';
+
+    const filtered = healthModulesData.filter(m => {
+
+      const matchQ = !q || m.name.toLowerCase().includes(q) || m.files.toLowerCase().includes(q) || m.test_cmd.toLowerCase().includes(q);
+      const matchStatus = statusFilter === 'ALL' || m.status === statusFilter;
+      return matchQ && matchStatus;
+    });
+
+    renderHealthTable(filtered);
+  }
+
+  function renderHealthTable(modules) {
+    const tbody = document.getElementById('healthTableBody');
+    if (!tbody) return;
+    tbody.innerHTML = '';
+
+    if (modules.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="7" class="px-4 py-8 text-center text-slate-500">Модули не найдены</td></tr>';
+      return;
+    }
+
+    modules.forEach(m => {
+      const tr = document.createElement('tr');
+      tr.className = "hover:bg-slate-750 transition";
+
+      let badgeClass = "bg-slate-700 text-slate-300 border-slate-600";
+      if (m.status === 'В строю') badgeClass = "bg-emerald-500/20 text-emerald-400 border-emerald-500/30";
+      else if (m.status === 'Нет связи') badgeClass = "bg-rose-500/20 text-rose-400 border-rose-500/30";
+      else if (m.status === 'Ошибка') badgeClass = "bg-amber-500/20 text-amber-400 border-amber-500/30";
+
+      const hasError = m.error && m.error.trim().length > 0;
+
+      tr.innerHTML = `
+        <td class="px-4 py-3 text-center font-bold text-slate-400">${m.num}</td>
+        <td class="px-4 py-3 font-semibold text-white">${m.name}</td>
+        <td class="px-4 py-3 font-mono text-xs text-indigo-300">${m.files}</td>
+        <td class="px-4 py-3 text-xs text-slate-300 font-mono bg-slate-900/40 p-1.5 rounded">${m.test_cmd}</td>
+        <td class="px-4 py-3 text-xs text-slate-400"><span class="px-2 py-0.5 rounded bg-slate-800 border border-slate-700">${m.layer}</span></td>
+        <td class="px-4 py-3 text-center">
+          <span class="px-2.5 py-1 text-xs font-semibold rounded-full border ${badgeClass}">
+            ${m.status}
+          </span>
+        </td>
+        <td class="px-4 py-3 text-right">
+          ${hasError ? `
+            <button onclick="showHealthError(${m.num})" class="px-2 py-1 bg-rose-600/20 hover:bg-rose-600/40 text-rose-300 border border-rose-500/30 rounded text-xs">
+              <i class="fa-solid fa-bug mr-1"></i> Ошибка
+            </button>
+          ` : `
+            <span class="text-xs text-slate-600">—</span>
+          `}
+        </td>
+      `;
+      tbody.appendChild(tr);
+    });
+  }
+
+  function showHealthError(moduleNum) {
+    const mod = healthModulesData.find(x => x.num === moduleNum);
+    if (!mod) return;
+    document.getElementById('modalHealthTitle').innerText = `Сбой модуля №${mod.num}: ${mod.name}`;
+    document.getElementById('modalHealthFiles').innerText = mod.files;
+    document.getElementById('modalHealthDetails').innerText = mod.error || "Детали ошибки не зафиксированы.";
+    document.getElementById('modalHealthError').classList.remove('hidden');
+  }
+
+  async function triggerSelfTestBtn() {
+    if (!confirm('Запустить полный комплекс автоматического тестирования 19 модулей?')) return;
+    setStatus('Отправка команды тестов...');
+    try {
+      const res = await fetch('/api/trigger_test', { method: 'POST' });
+      const data = await res.json();
+      alert(data.message || 'Команда отправлена');
+      setStatus('Готово');
+    } catch (err) {
+      alert('Ошибка отправки: ' + err.toString());
+      setStatus('Сбой');
+    }
+  }
+
+  // ==============================================================
+  // ЭТАЛОН И ДЕРЕВО КАТАЛОГА
+  // ==============================================================
+  async function loadCatalog() {
+    setStatus('Загрузка эталона...');
+    try {
+      const res = await fetch('/api/catalog');
+      const data = await res.json();
+      if (data.status === 'SUCCESS') {
+        globalCatalog = data.items || [];
+        globalTreeData = data.tree || {};
+
+        loadSystemStats();
+        populateCatalogCatSelect();
+        applyCatalogFilters();
+        setStatus('Готово');
+      } else {
+        alert('Ошибка: ' + data.message);
+        setStatus('Сбой');
+      }
+    } catch (err) {
+      setStatus('Сбой сети');
+    }
+  }
+
+  async function loadSystemStats() {
+    try {
+      const res = await fetch('/api/stats');
+      const data = await res.json();
+      if (data.status === 'SUCCESS') {
+        document.getElementById('statCats').innerText = data.stats.categories;
+        document.getElementById('statSubs').innerText = data.stats.subcategories;
+        document.getElementById('statArts').innerText = data.stats.articles;
+        document.getElementById('statSyns').innerText = data.stats.synonyms;
+      }
+    } catch (e) {}
+  }
+
+  function populateCatalogCatSelect() {
+    const sel = document.getElementById('catalogFilterCat');
+    if (!sel) return;
+    const cats = Array.from(new Set(globalCatalog.map(x => x.category))).sort();
+    sel.innerHTML = '<option value="ALL">Все категории</option>';
+    cats.forEach(c => {
+      const opt = document.createElement('option');
+      opt.value = c;
+      opt.innerText = c;
+      sel.appendChild(opt);
+    });
+  }
+
+  function setCatalogView(mode) {
+    const isTree = mode === 'tree';
+    document.getElementById('catalogTreeContainer').classList.toggle('hidden', !isTree);
+    document.getElementById('catalogTableContainer').classList.toggle('hidden', isTree);
+
+    document.getElementById('btnViewTree').className = isTree
+      ? "px-3 py-1.5 text-xs font-semibold rounded-md bg-indigo-600 text-white shadow-sm transition"
+      : "px-3 py-1.5 text-xs font-semibold rounded-md text-slate-400 hover:text-white transition";
+
+    document.getElementById('btnViewTable').className = !isTree
+      ? "px-3 py-1.5 text-xs font-semibold rounded-md bg-indigo-600 text-white shadow-sm transition"
+      : "px-3 py-1.5 text-xs font-semibold rounded-md text-slate-400 hover:text-white transition";
+  }
+
+  function applyCatalogFilters() {
+    const q = document.getElementById('catalogSearch').value.toLowerCase().trim();
+    const typeFilter = document.getElementById('catalogFilterType').value;
+    const catFilter = document.getElementById('catalogFilterCat').value;
+
+    const filtered = globalCatalog.filter(item => {
+      const matchesQ = !q || item.article.toLowerCase().includes(q) || item.category.toLowerCase().includes(q) || item.subcategory.toLowerCase().includes(q) || item.synonyms.toLowerCase().includes(q);
+      const matchesType = typeFilter === "ALL" || item.type === typeFilter;
+      const matchesCat = catFilter === "ALL" || item.category === catFilter;
+      return matchesQ && matchesType && matchesCat;
+    });
+
+    renderCatalogTable(filtered);
+    renderCatalogTree(filtered);
+  }
+
+  function renderCatalogTable(rows) {
+    const tbody = document.getElementById('catalogTableBody');
+    if (!tbody) return;
+    tbody.innerHTML = '';
+
+    if (rows.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="6" class="px-4 py-8 text-center text-slate-500">Ничего не найдено</td></tr>';
+      return;
+    }
+
+    rows.forEach(item => {
+      const tr = document.createElement('tr');
+      tr.className = "hover:bg-slate-750 transition";
+      const badge = item.type === "Доход"
+        ? `<span class="bg-emerald-500/20 text-emerald-400 px-2 py-0.5 rounded text-xs border border-emerald-500/30">Доход</span>`
+        : `<span class="bg-slate-700 text-slate-300 px-2 py-0.5 rounded text-xs border border-slate-600">Расход</span>`;
+
+      tr.innerHTML = `
+        <td class="px-4 py-2.5">${badge}</td>
+        <td class="px-4 py-2.5 font-medium text-white">${item.category}</td>
+        <td class="px-4 py-2.5 text-slate-400">${item.subcategory}</td>
+        <td class="px-4 py-2.5 text-indigo-300 font-medium">${item.article}</td>
+        <td class="px-4 py-2.5 text-slate-400 text-xs truncate max-w-xs" title="${item.synonyms || ''}">${item.synonyms || '—'}</td>
+        <td class="px-4 py-2.5 text-right space-x-1 whitespace-nowrap">
+          <button onclick="promptRename('article', '${item.type}', '${item.category}', '${item.subcategory}', '${item.article}')" class="p-1.5 text-slate-400 hover:text-indigo-400 rounded" title="Переименовать"><i class="fa-solid fa-pen text-xs"></i></button>
+          <button onclick="promptMove('article', '${item.type}', '${item.category}', '${item.subcategory}', '${item.article}')" class="p-1.5 text-slate-400 hover:text-indigo-400 rounded" title="Перенести"><i class="fa-solid fa-arrows-up-down-left-right text-xs"></i></button>
+          <button onclick="promptDelete('article', '${item.type}', '${item.category}', '${item.subcategory}', '${item.article}')" class="p-1.5 text-slate-400 hover:text-rose-400 rounded" title="Удалить"><i class="fa-solid fa-trash text-xs"></i></button>
+        </td>
+      `;
+      tbody.appendChild(tr);
+    });
+  }
+
+  function renderCatalogTree(filteredItems = null) {
+    const container = document.getElementById('catalogTreeContainer');
+    if (!container) return;
+    container.innerHTML = '';
+
+    let treeToRender = globalTreeData;
+    if (filteredItems) {
+      treeToRender = { "Расход": {}, "Доход": {} };
+      filteredItems.forEach(item => {
+        if (!treeToRender[item.type]) treeToRender[item.type] = {};
+        if (!treeToRender[item.type][item.category]) treeToRender[item.type][item.category] = {};
+        if (!treeToRender[item.type][item.category][item.subcategory]) treeToRender[item.type][item.category][item.subcategory] = [];
+        treeToRender[item.type][item.category][item.subcategory].push({
+          article: item.article,
+          synonyms: item.synonyms ? item.synonyms.split(',') : []
+        });
+      });
+    }
+
+    for (const opType of ['Расход', 'Доход']) {
+      const catObj = treeToRender[opType] || {};
+      const catKeys = Object.keys(catObj).sort();
+      if (catKeys.length === 0 && filteredItems) continue;
+
+      const typeCard = document.createElement('div');
+      typeCard.className = "bg-slate-800 rounded-xl border border-slate-700 shadow-sm p-5 space-y-4";
+      typeCard.innerHTML = `
+        <div class="flex items-center justify-between border-b border-slate-700 pb-3">
+          <h3 class="text-base font-bold text-white flex items-center gap-2">
+            <span class="${opType === 'Доход' ? 'text-emerald-400' : 'text-slate-400'}">●</span>
+            ${opType} (${catKeys.length} категорий)
+          </h3>
+          <button onclick="openCreateModal('category', '${opType}')" class="text-xs bg-slate-700 hover:bg-slate-600 text-slate-200 px-2.5 py-1.5 rounded-lg font-semibold flex items-center gap-1.5">
+            <i class="fa-solid fa-plus"></i> Категория
+          </button>
+        </div>
+        <div class="space-y-4" id="treeContent${opType}"></div>
+      `;
+      container.appendChild(typeCard);
+
+      const typeBody = typeCard.querySelector(`#treeContent${opType}`);
+
+      catKeys.forEach(catName => {
+        const subsObj = catObj[catName];
+        const subKeys = Object.keys(subsObj).sort();
+
+        const catBlock = document.createElement('div');
+        catBlock.className = "border border-slate-700/80 rounded-xl bg-slate-850/70 p-4 space-y-3 transition";
+
+        catBlock.ondragover = (e) => onDragOverContainer(e, catBlock);
+        catBlock.ondragleave = () => onDragLeaveContainer(catBlock);
+        catBlock.ondrop = (e) => onDropOnCategory(e, opType, catName, catBlock);
+
+        catBlock.innerHTML = `
+          <div class="flex items-center justify-between">
+            <div class="flex items-center gap-2 cursor-pointer select-none" onclick="toggleSection(this)">
+              <i class="fa-solid fa-chevron-down text-slate-400 text-xs transition-transform transform"></i>
+              <span class="text-indigo-400 font-mono text-sm">📁</span>
+              <span class="font-bold text-white text-sm">${catName}</span>
+              <span class="text-xs text-slate-400 font-normal">(${subKeys.length} подкат.)</span>
+            </div>
+            <div class="flex items-center gap-1">
+              <button onclick="openCreateModal('subcategory', '${opType}', '${catName}')" class="px-2 py-1 text-slate-400 hover:text-indigo-300 text-xs" title="Добавить подкатегорию"><i class="fa-solid fa-plus mr-0.5"></i>Подкатегория</button>
+              <button onclick="promptRename('category', '${opType}', '${catName}', '', '${catName}')" class="p-1.5 text-slate-400 hover:text-indigo-300 rounded text-xs" title="Переименовать категорию"><i class="fa-solid fa-pen"></i></button>
+              <button onclick="promptDelete('category', '${opType}', '${catName}')" class="p-1.5 text-slate-400 hover:text-rose-400 rounded text-xs" title="Удалить категорию"><i class="fa-solid fa-trash"></i></button>
+            </div>
+          </div>
+          <div class="pl-4 border-l-2 border-slate-700/80 space-y-3 subcategories-list"></div>
+        `;
+        typeBody.appendChild(catBlock);
+
+        const subList = catBlock.querySelector('.subcategories-list');
+
+        subKeys.forEach(subName => {
+          const arts = subsObj[subName];
+
+          const subCard = document.createElement('div');
+          subCard.className = "bg-slate-800 p-3 rounded-lg border border-slate-700 shadow-xs space-y-2.5 transition";
+          subCard.draggable = true;
+          subCard.ondragstart = (e) => onDragStartSubcategory(e, opType, catName, subName, subCard);
+          subCard.ondragend = () => onDragEnd(subCard);
+          subCard.ondragover = (e) => onDragOverContainer(e, subCard);
+          subCard.ondragleave = () => onDragLeaveContainer(subCard);
+          subCard.ondrop = (e) => onDropArticleOnSubcategory(e, opType, catName, subName, subCard);
+
+          subCard.innerHTML = `
+            <div class="flex items-center justify-between">
+              <div class="flex items-center gap-1.5 cursor-grab">
+                <i class="fa-solid fa-grip-vertical text-slate-500 text-xs mr-1"></i>
+                <span class="font-semibold text-xs text-slate-200">📂 ${subName}</span>
+                <span class="text-[11px] text-slate-400">(${arts.length} ст.)</span>
+              </div>
+              <div class="flex items-center gap-1">
+                <button onclick="openCreateModal('article', '${opType}', '${catName}', '${subName}')" class="text-[11px] text-indigo-400 hover:underline mr-1 font-medium">+ Статья</button>
+                <button onclick="promptRename('subcategory', '${opType}', '${catName}', '${subName}', '${subName}')" class="p-1 text-slate-400 hover:text-indigo-300 rounded text-xs" title="Переименовать"><i class="fa-solid fa-pen"></i></button>
+                <button onclick="promptMove('subcategory', '${opType}', '${catName}', '${subName}')" class="p-1 text-slate-400 hover:text-indigo-300 rounded text-xs" title="Перенести в другую категорию"><i class="fa-solid fa-arrows-up-down-left-right"></i></button>
+                <button onclick="promptDelete('subcategory', '${opType}', '${catName}', '${subName}')" class="p-1 text-slate-400 hover:text-rose-400 rounded text-xs" title="Удалить подкатегорию"><i class="fa-solid fa-trash"></i></button>
+              </div>
+            </div>
+            <div class="flex flex-wrap gap-1.5 pt-1">
+              ${arts.map(a => `
+                <div draggable="true"
+                     ondragstart="onDragStartArticle(event, '${opType}', '${catName}', '${subName}', '${a.article}', this)"
+                     ondragend="onDragEnd(this)"
+                     class="group/art inline-flex items-center gap-1.5 bg-slate-900/80 hover:bg-indigo-950/60 border border-slate-700 hover:border-indigo-500/50 px-2.5 py-1 rounded-md text-xs font-medium text-slate-200 cursor-grab transition">
+                  <i class="fa-solid fa-grip-lines-vertical text-slate-600 text-[10px]"></i>
+                  <span>${a.article}</span>
+                  <button onclick="promptRename('article', '${opType}', '${catName}', '${subName}', '${a.article}')" class="text-slate-500 hover:text-indigo-300 ml-1 opacity-0 group-hover/art:opacity-100 transition"><i class="fa-solid fa-pen text-[10px]"></i></button>
+                  <button onclick="promptDelete('article', '${opType}', '${catName}', '${subName}', '${a.article}')" class="text-slate-500 hover:text-rose-400 opacity-0 group-hover/art:opacity-100 transition"><i class="fa-solid fa-xmark text-[10px]"></i></button>
+                </div>
+              `).join('')}
+            </div>
+          `;
+          subList.appendChild(subCard);
+        });
+      });
+    }
+  }
+
+  function toggleSection(headerElem) {
+    const catBlock = headerElem.closest('.border');
+    const subList = catBlock.querySelector('.subcategories-list');
+    const icon = headerElem.querySelector('.fa-chevron-down');
+    if (!subList) return;
+    const isHidden = subList.classList.toggle('hidden');
+    if (icon) {
+      icon.style.transform = isHidden ? 'rotate(-90deg)' : 'rotate(0deg)';
+    }
+  }
+
+  // ==============================================================
+  // DRAG AND DROP
+  // ==============================================================
+  function onDragStartArticle(e, type, category, subcategory, article, elem) {
+    draggedEntity = { level: 'article', type, category, subcategory, article };
+    elem.classList.add('dragging');
+    e.stopPropagation();
+  }
+
+  function onDragStartSubcategory(e, type, category, subcategory, elem) {
+    draggedEntity = { level: 'subcategory', type, category, subcategory };
+    elem.classList.add('dragging');
+    e.stopPropagation();
+  }
+
+  function onDragEnd(elem) {
+    if (elem) elem.classList.remove('dragging');
+  }
+
+  function onDragOverContainer(e, elem) {
+    e.preventDefault();
+    e.stopPropagation();
+    elem.classList.add('drag-over');
+  }
+
+  function onDragLeaveContainer(elem) {
+    elem.classList.remove('drag-over');
+  }
+
+  async function onDropArticleOnSubcategory(e, toType, toCat, toSub, elem) {
+    e.preventDefault();
+    e.stopPropagation();
+    elem.classList.remove('drag-over');
+
+    if (!draggedEntity || draggedEntity.level !== 'article') return;
+    if (draggedEntity.category === toCat && draggedEntity.subcategory === toSub) return;
+
+    const payload = {
+      level: 'article',
+      type: draggedEntity.type,
+      fromCategory: draggedEntity.category,
+      fromSubcategory: draggedEntity.subcategory,
+      article: draggedEntity.article,
+      toCategory: toCat,
+      toSubcategory: toSub
+    };
+
+    setStatus(`Перемещение «${draggedEntity.article}»...`);
+    try {
+      const res = await fetch('/api/catalog/move', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      const data = await res.json();
+      if (data.status === "SUCCESS") {
+        loadCatalog();
+      } else {
+        alert('Ошибка: ' + data.message);
+      }
+    } catch (err) {
+      alert('Ошибка сети: ' + err.toString());
+    }
+  }
+
+  async function onDropOnCategory(e, toType, toCat, elem) {
+    e.preventDefault();
+    e.stopPropagation();
+    elem.classList.remove('drag-over');
+
+    if (!draggedEntity || draggedEntity.level !== 'subcategory') return;
+    if (draggedEntity.category === toCat) return;
+
+    const payload = {
+      level: 'subcategory',
+      type: draggedEntity.type,
+      fromCategory: draggedEntity.category,
+      fromSubcategory: draggedEntity.subcategory,
+      toCategory: toCat
+    };
+
+    setStatus(`Перемещение «${draggedEntity.subcategory}»...`);
+    try {
+      const res = await fetch('/api/catalog/move', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      const data = await res.json();
+      if (data.status === "SUCCESS") {
+        loadCatalog();
+      } else {
+        alert('Ошибка: ' + data.message);
+      }
+    } catch (err) {
+      alert('Ошибка сети: ' + err.toString());
+    }
+  }
+
+  // ==============================================================
+  // ДЕЙСТВИЯ: СОЗДАНИЕ, ПЕРЕИМЕНОВАНИЕ, УДАЛЕНИЕ, ПЕРЕНОС
+  // ==============================================================
+  function openCreateModal(level = 'article', type = 'Расход', cat = '', sub = '') {
+    document.getElementById('createLevel').value = level;
+    document.getElementById('createType').value = type;
+    updateCreateModalFields();
+
+    if (cat) {
+      document.getElementById('createCatSelect').value = cat;
+      syncCreateSubcategorySelect();
+      if (sub) {
+        document.getElementById('createSubSelect').value = sub;
+      }
+    }
+    document.getElementById('modalCreate').classList.remove('hidden');
+  }
+
+  function updateCreateModalFields() {
+    const lvl = document.getElementById('createLevel').value;
+    syncCreateCategorySelect();
+
+    const catInput = document.getElementById('createCatInput');
+    const catSelectWrapper = document.getElementById('createCatSelectWrapper');
+    const subInput = document.getElementById('createSubInput');
+    const subSelectWrapper = document.getElementById('createSubSelectWrapper');
+    const artContainer = document.getElementById('createArtContainer');
+    const synsContainer = document.getElementById('createSynsContainer');
+
+    if (lvl === 'category') {
+      catInput.classList.remove('hidden');
+      catSelectWrapper.classList.add('hidden');
+      subInput.classList.remove('hidden');
+      subSelectWrapper.classList.add('hidden');
+      artContainer.classList.add('hidden');
+      synsContainer.classList.add('hidden');
+    } else if (lvl === 'subcategory') {
+      catInput.classList.add('hidden');
+      catSelectWrapper.classList.remove('hidden');
+      subInput.classList.remove('hidden');
+      subSelectWrapper.classList.add('hidden');
+      artContainer.classList.add('hidden');
+      synsContainer.classList.add('hidden');
+    } else {
+      catInput.classList.add('hidden');
+      catSelectWrapper.classList.remove('hidden');
+      subInput.classList.add('hidden');
+      subSelectWrapper.classList.remove('hidden');
+      artContainer.classList.remove('hidden');
+      synsContainer.classList.remove('hidden');
+    }
+  }
+
+  function syncCreateCategorySelect() {
+    const type = document.getElementById('createType').value;
+    const select = document.getElementById('createCatSelect');
+    select.innerHTML = '';
+    const cats = Object.keys(globalTreeData[type] || {}).sort();
+    cats.forEach(c => {
+      const opt = document.createElement('option');
+      opt.value = c;
+      opt.innerText = c;
+      select.appendChild(opt);
+    });
+    syncCreateSubcategorySelect();
+  }
+
+  function syncCreateSubcategorySelect() {
+    const type = document.getElementById('createType').value;
+    const cat = document.getElementById('createCatSelect').value;
+    const select = document.getElementById('createSubSelect');
+    select.innerHTML = '';
+    const subs = Object.keys((globalTreeData[type] || {})[cat] || {}).sort();
+    subs.forEach(s => {
+      const opt = document.createElement('option');
+      opt.value = s;
+      opt.innerText = s;
+      select.appendChild(opt);
+    });
+  }
+
+  async function submitCreateEntity() {
+    const lvl = document.getElementById('createLevel').value;
+    const type = document.getElementById('createType').value;
+    const cat = lvl === 'category'
+      ? document.getElementById('createCatInput').value
+      : document.getElementById('createCatSelect').value;
+    const sub = (lvl === 'category' || lvl === 'subcategory')
+      ? document.getElementById('createSubInput').value
+      : document.getElementById('createSubSelect').value;
+    const art = document.getElementById('createArtInput').value;
+    const syns = document.getElementById('createSynsInput').value;
+
+    const payload = { level: lvl, type, category: cat, subcategory: sub, article: art, synonyms: syns };
+    setStatus('Создание...');
+    try {
+      const res = await fetch('/api/catalog/create', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      const data = await res.json();
+      if (data.status === "SUCCESS") {
+        closeModal('modalCreate');
+        loadCatalog();
+      } else {
+        alert('Ошибка: ' + data.message);
+      }
+    } catch (err) {
+      alert('Ошибка сети: ' + err.toString());
+    }
+  }
+
+  function promptRename(level, type, category, subcategory, oldName) {
+    activeModalPayload = { level, type, category, subcategory, oldName };
+    document.getElementById('modalRenameTitle').innerText = `Переименовать ${level === 'category' ? 'категорию' : level === 'subcategory' ? 'подкатегорию' : 'статью'}`;
+    document.getElementById('modalRenameInput').value = oldName;
+    document.getElementById('modalRename').classList.remove('hidden');
+  }
+
+  async function submitRenameEntity() {
+    const newName = document.getElementById('modalRenameInput').value.trim();
+    if (!newName) return;
+    activeModalPayload.newName = newName;
+
+    setStatus('Сохранение...');
+    try {
+      const res = await fetch('/api/catalog/rename', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(activeModalPayload)
+      });
+      const data = await res.json();
+      if (data.status === "SUCCESS") {
+        closeModal('modalRename');
+        loadCatalog();
+      } else {
+        alert('Ошибка: ' + data.message);
+      }
+    } catch (err) {
+      alert('Ошибка сети: ' + err.toString());
+    }
+  }
+
+  async function promptDelete(level, type, category, subcategory = '', article = '') {
+    const title = level === 'category' ? `КАТЕГОРИЮ «${category}» со всеми статьями`
+      : level === 'subcategory' ? `ПОДКАТЕГОРИЮ «${subcategory}» со всеми статьями`
+      : `СТАТЬЮ «${article}»`;
+
+    if (!confirm(`Вы уверены, что хотите удалить ${title}?`)) return;
+
+    const payload = { level, type, category, subcategory, article };
+    setStatus('Удаление...');
+    try {
+      const res = await fetch('/api/catalog/delete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      const data = await res.json();
+      if (data.status === "SUCCESS") {
+        loadCatalog();
+      } else {
+        alert('Ошибка: ' + data.message);
+      }
+    } catch (err) {
+      alert('Ошибка сети: ' + err.toString());
+    }
+  }
+
+  function promptMove(level, type, category, subcategory, article = '') {
+    activeModalPayload = { level, type, fromCategory: category, fromSubcategory: subcategory, article };
+    document.getElementById('modalMoveTitle').innerText = `Переместить ${level === 'subcategory' ? 'подкатегорию ' + subcategory : 'статью ' + article}`;
+
+    const catSelect = document.getElementById('modalMoveCatSelect');
+    catSelect.innerHTML = '';
+    const cats = Object.keys(globalTreeData[type] || {}).sort();
+    cats.forEach(c => {
+      const opt = document.createElement('option');
+      opt.value = c;
+      opt.innerText = c;
+      catSelect.appendChild(opt);
+    });
+
+    if (level === 'subcategory') {
+      document.getElementById('modalMoveSubWrapper').classList.add('hidden');
+    } else {
+      document.getElementById('modalMoveSubWrapper').classList.remove('hidden');
+      syncMoveSubcategorySelect();
+    }
+    document.getElementById('modalMove').classList.remove('hidden');
+  }
+
+  function syncMoveSubcategorySelect() {
+    const type = activeModalPayload.type;
+    const cat = document.getElementById('modalMoveCatSelect').value;
+    const subSelect = document.getElementById('modalMoveSubSelect');
+    subSelect.innerHTML = '';
+    const subs = Object.keys((globalTreeData[type] || {})[cat] || {}).sort();
+    subs.forEach(s => {
+      const opt = document.createElement('option');
+      opt.value = s;
+      opt.innerText = s;
+      subSelect.appendChild(opt);
+    });
+  }
+
+  async function submitMoveEntity() {
+    activeModalPayload.toCategory = document.getElementById('modalMoveCatSelect').value;
+    if (activeModalPayload.level === 'article') {
+      activeModalPayload.toSubcategory = document.getElementById('modalMoveSubSelect').value;
+    }
+
+    setStatus('Перемещение...');
+    try {
+      const res = await fetch('/api/catalog/move', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(activeModalPayload)
+      });
+      const data = await res.json();
+      if (data.status === "SUCCESS") {
+        closeModal('modalMove');
+        loadCatalog();
+      } else {
+        alert('Ошибка: ' + data.message);
+      }
+    } catch (err) {
+      alert('Ошибка сети: ' + err.toString());
+    }
+  }
+
+  function closeModal(id) {
+    document.getElementById(id).classList.add('hidden');
+  }
+
+  // ==============================================================
+  // МОДЕРАЦИЯ СЛОВ И КОРЗИНА
+  // ==============================================================
+  function switchModerationTab(mode) {
+    currentModerationMode = mode;
+    selectedIndices.clear();
+
+    document.getElementById('subTabPendingBtn').className = mode === 'pending'
+      ? "px-4 py-2 text-sm font-semibold rounded-lg bg-indigo-600 text-white shadow"
+      : "px-4 py-2 text-sm font-semibold rounded-lg bg-slate-800 text-slate-400 hover:text-white";
+
+    document.getElementById('subTabTrashBtn').className = mode === 'trash'
+      ? "px-4 py-2 text-sm font-semibold rounded-lg bg-rose-700 text-white shadow"
+      : "px-4 py-2 text-sm font-semibold rounded-lg bg-slate-800 text-slate-400 hover:text-white";
+
+    document.getElementById('pendingActionButtons').classList.toggle('hidden', mode !== 'pending');
+    document.getElementById('trashActionButtons').classList.toggle('hidden', mode !== 'trash');
+
+    loadModerationData();
+  }
+
+  async function loadModerationData() {
+    setStatus('Загрузка списка...');
+    selectedIndices.clear();
+    const endpoint = currentModerationMode === 'pending' ? '/api/words/pending' : '/api/words/trash';
+
+    try {
+      const res = await fetch(endpoint);
+      const data = await res.json();
+      if (data.status === 'SUCCESS') {
+        cachedData = data.rows || [];
+        if (currentModerationMode === 'pending') {
+          document.getElementById('userWordsBadge').innerText = cachedData.length;
+        } else {
+          document.getElementById('trashWordsBadge').innerText = cachedData.length;
+        }
+
+        let html = '';
+        cachedData.forEach(row => {
+          html += `<tr class="hover:bg-slate-750">
+            <td class="px-4 py-2.5 text-center">
+              <input type="checkbox" onchange="toggleRowSelection(${row.id}, this.checked)" class="rounded bg-slate-700 border-slate-600 text-indigo-500">
+            </td>
+            <td class="px-4 py-2.5"><span class="px-2 py-0.5 text-xs rounded ${row.type === 'Доход' ? 'bg-emerald-500/20 text-emerald-400' : 'bg-rose-500/20 text-rose-400'}">${row.type}</span></td>
+            <td class="px-4 py-2.5 text-slate-300">${row.category || '—'}</td>
+            <td class="px-4 py-2.5 text-slate-400">${row.subcategory || '—'}</td>
+            <td class="px-4 py-2.5 text-white font-medium">${row.article}</td>
+            <td class="px-4 py-2.5 text-indigo-300 font-mono text-xs">${row.synonym}</td>
+          </tr>`;
+        });
+        document.getElementById('moderationTableBody').innerHTML = html || '<tr><td colspan="6" class="text-center py-6 text-slate-500">Записей нет</td></tr>';
+        setStatus('Готово');
+      }
+    } catch (err) {
+      setStatus('Сбой сети');
+    }
+  }
+
+  function toggleRowSelection(id, checked) {
+    if (checked) selectedIndices.add(id);
+    else selectedIndices.delete(id);
+  }
+
+  function toggleSelectAll(checked) {
+    selectedIndices.clear();
+    const checkboxes = document.querySelectorAll('#moderationTableBody input[type="checkbox"]');
+    checkboxes.forEach((cb, i) => {
+      cb.checked = checked;
+      if (checked && cachedData[i]) selectedIndices.add(cachedData[i].id);
+    });
+  }
+
+  async function deleteSelectedWords() {
+    if (selectedIndices.size === 0) return alert('Выберите хотя бы одну запись');
+    setStatus('Перемещение в корзину...');
+    try {
+      const res = await fetch('/api/words/trash', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ids: Array.from(selectedIndices) })
+      });
+      const data = await res.json();
+      if (data.status === "SUCCESS") {
+        loadModerationData();
+      } else {
+        alert('Ошибка: ' + data.message);
+      }
+    } catch (err) {
+      alert('Ошибка сети: ' + err.toString());
+    }
+  }
+
+  async function restoreSelectedWords() {
+    if (selectedIndices.size === 0) return alert('Выберите хотя бы одну запись');
+    setStatus('Восстановление...');
+    try {
+      const res = await fetch('/api/words/restore', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ids: Array.from(selectedIndices) })
+      });
+      const data = await res.json();
+      if (data.status === "SUCCESS") {
+        loadModerationData();
+      } else {
+        alert('Ошибка: ' + data.message);
+      }
+    } catch (err) {
+      alert('Ошибка сети: ' + err.toString());
+    }
+  }
+
+  async function approveSelectedWords() {
+    if (selectedIndices.size === 0) return alert('Выберите хотя бы одну запись');
+    setStatus('Одобрение...');
+    try {
+      const res = await fetch('/api/words/approve', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ids: Array.from(selectedIndices) })
+      });
+      const data = await res.json();
+      if (data.status === "SUCCESS") {
+        loadModerationData();
+        loadCatalog();
+      } else {
+        alert('Ошибка: ' + data.message);
+      }
+    } catch (err) {
+      alert('Ошибка сети: ' + err.toString());
+    }
+  }
+</script>
