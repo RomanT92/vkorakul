@@ -1,3 +1,9 @@
 vk_api
 openai
 requests
+pandas
+openpyxl
+psycopg2-binary
+fastapi
+uvicorn
+jinja2
