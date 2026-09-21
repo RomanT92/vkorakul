@@ -1,0 +1,192 @@
+<div class="space-y-6">
+
+  <!-- ВЕРХНИЕ КАРТОЧКИ СТАТИСТИКИ КАТАЛОГА -->
+  <div class="grid grid-cols-2 sm:grid-cols-4 gap-4">
+    <div class="bg-slate-800 p-4 rounded-xl border border-slate-700 shadow-sm">
+      <p class="text-xs text-slate-400 font-semibold uppercase">Категории</p>
+      <h3 id="statCats" class="text-2xl font-bold text-white mt-1">0</h3>
+      <p class="text-[11px] text-slate-500 mt-1">Верхний уровень</p>
+    </div>
+    <div class="bg-slate-800 p-4 rounded-xl border border-slate-700 shadow-sm">
+      <p class="text-xs text-slate-400 font-semibold uppercase">Подкатегории</p>
+      <h3 id="statSubs" class="text-2xl font-bold text-white mt-1">0</h3>
+      <p class="text-[11px] text-slate-500 mt-1">Группы статей</p>
+    </div>
+    <div class="bg-slate-800 p-4 rounded-xl border border-slate-700 shadow-sm">
+      <p class="text-xs text-slate-400 font-semibold uppercase">Статьи расходов/доходов</p>
+      <h3 id="statArts" class="text-2xl font-bold text-indigo-400 mt-1">0</h3>
+      <p class="text-[11px] text-slate-500 mt-1">Целевые сущности</p>
+    </div>
+    <div class="bg-slate-800 p-4 rounded-xl border border-slate-700 shadow-sm">
+      <p class="text-xs text-slate-400 font-semibold uppercase">Синонимы в базе</p>
+      <h3 id="statSyns" class="text-2xl font-bold text-emerald-400 mt-1">0</h3>
+      <p class="text-[11px] text-slate-500 mt-1">Словарь сопоставления</p>
+    </div>
+  </div>
+
+  <!-- ПАНЕЛЬ ФИЛЬТРАЦИИ И ДЕЙСТВИЙ -->
+  <div class="bg-slate-800 p-4 rounded-xl border border-slate-700 shadow-sm flex flex-wrap items-center justify-between gap-4">
+    <div class="flex flex-wrap items-center gap-3 flex-1 min-w-[300px]">
+      <div class="relative flex-1 min-w-[200px]">
+        <i class="fa-solid fa-magnifying-glass absolute left-3 top-3 text-slate-400 text-sm"></i>
+        <input type="text" id="catalogSearch" oninput="applyCatalogFilters()" placeholder="Поиск по категории, статье или синониму..." class="w-full pl-9 pr-3 py-2 text-sm rounded-lg bg-slate-900 border border-slate-700 text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500">
+      </div>
+      <select id="catalogFilterType" onchange="applyCatalogFilters()" class="text-sm px-3 py-2 rounded-lg bg-slate-900 border border-slate-700 text-slate-200">
+        <option value="ALL">Все типы</option>
+        <option value="Расход">Расход</option>
+        <option value="Доход">Доход</option>
+      </select>
+      <select id="catalogFilterCat" onchange="applyCatalogFilters()" class="text-sm px-3 py-2 rounded-lg bg-slate-900 border border-slate-700 text-slate-200 max-w-[200px]">
+        <option value="ALL">Все категории</option>
+      </select>
+    </div>
+
+    <div class="flex items-center gap-2">
+      <div class="bg-slate-900 p-1 rounded-lg border border-slate-700 flex items-center">
+        <button id="btnViewTree" onclick="setCatalogView('tree')" class="px-3 py-1.5 text-xs font-semibold rounded-md bg-indigo-600 text-white shadow-sm transition">
+          <i class="fa-solid fa-folder-tree mr-1"></i> Дерево
+        </button>
+        <button id="btnViewTable" onclick="setCatalogView('table')" class="px-3 py-1.5 text-xs font-semibold rounded-md text-slate-400 hover:text-white transition">
+          <i class="fa-solid fa-table-list mr-1"></i> Таблица
+        </button>
+      </div>
+      <button onclick="openCreateModal('category')" class="bg-indigo-600 hover:bg-indigo-500 text-white px-3.5 py-2 rounded-lg text-xs font-semibold flex items-center shadow transition">
+        <i class="fa-solid fa-plus mr-1.5"></i> Добавить сущность
+      </button>
+      <button onclick="loadCatalog()" class="p-2 bg-slate-700 hover:bg-slate-600 text-slate-300 rounded-lg text-xs transition" title="Обновить">
+        <i class="fa-solid fa-arrows-rotate"></i>
+      </button>
+    </div>
+  </div>
+
+  <!-- ДЕРЕВО КАТАЛОГА (DRAG & DROP) -->
+  <div id="catalogTreeContainer" class="space-y-6">
+    <div class="p-8 text-center text-slate-500 bg-slate-800 rounded-xl border border-slate-700">Загрузка структуры эталона...</div>
+  </div>
+
+  <!-- ТАБЛИЧНОЕ ПРЕДСТАВЛЕНИЕ КАТАЛОГА -->
+  <div id="catalogTableContainer" class="hidden bg-slate-800 rounded-xl border border-slate-700 overflow-hidden shadow">
+    <div class="overflow-x-auto">
+      <table class="w-full text-left text-sm text-slate-300">
+        <thead class="bg-slate-900 text-slate-400 text-xs uppercase border-b border-slate-700">
+          <tr>
+            <th class="px-4 py-3 w-28">Тип</th>
+            <th class="px-4 py-3">Категория</th>
+            <th class="px-4 py-3">Подкатегория</th>
+            <th class="px-4 py-3">Статья</th>
+            <th class="px-4 py-3">Синонимы</th>
+            <th class="px-4 py-3 text-right w-36">Действия</th>
+          </tr>
+        </thead>
+        <tbody id="catalogTableBody" class="divide-y divide-slate-700">
+          <tr>
+            <td colspan="6" class="px-4 py-8 text-center text-slate-500">Загрузка данных...</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+</div>
+
+<!-- МОДАЛЬНОЕ ОКНО СОЗДАНИЯ СУЩНОСТИ -->
+<div id="modalCreate" class="fixed inset-0 bg-slate-950/70 backdrop-blur-xs z-50 hidden flex items-center justify-center p-4">
+  <div class="bg-slate-800 border border-slate-700 rounded-2xl max-w-md w-full p-6 shadow-2xl space-y-4 text-slate-200">
+    <div class="flex items-center justify-between border-b border-slate-700 pb-3">
+      <h3 class="font-bold text-white text-base">Добавить новую сущность</h3>
+      <button onclick="closeModal('modalCreate')" class="text-slate-400 hover:text-white"><i class="fa-solid fa-xmark text-lg"></i></button>
+    </div>
+
+    <div class="space-y-3 text-sm">
+      <div>
+        <label class="block text-xs text-slate-400 mb-1">Уровень создания:</label>
+        <select id="createLevel" onchange="updateCreateModalFields()" class="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-700 text-white">
+          <option value="category">Категория (верхний уровень)</option>
+          <option value="subcategory">Подкатегория</option>
+          <option value="article" selected>Статья (целевая позиция)</option>
+        </select>
+      </div>
+
+      <div>
+        <label class="block text-xs text-slate-400 mb-1">Тип операции:</label>
+        <select id="createType" onchange="syncCreateCategorySelect()" class="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-700 text-white">
+          <option value="Расход">Расход</option>
+          <option value="Доход">Доход</option>
+        </select>
+      </div>
+
+      <div id="createCatWrapper">
+        <label class="block text-xs text-slate-400 mb-1">Категория:</label>
+        <input type="text" id="createCatInput" placeholder="Название новой категории" class="hidden w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-700 text-white">
+        <div id="createCatSelectWrapper">
+          <select id="createCatSelect" onchange="syncCreateSubcategorySelect()" class="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-700 text-white"></select>
+        </div>
+      </div>
+
+      <div id="createSubWrapper">
+        <label class="block text-xs text-slate-400 mb-1">Подкатегория:</label>
+        <input type="text" id="createSubInput" placeholder="Название подкатегории" class="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-700 text-white">
+        <div id="createSubSelectWrapper" class="hidden">
+          <select id="createSubSelect" class="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-700 text-white"></select>
+        </div>
+      </div>
+
+      <div id="createArtContainer">
+        <label class="block text-xs text-slate-400 mb-1">Название статьи:</label>
+        <input type="text" id="createArtInput" placeholder="Например: Бензин АИ-95" class="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-700 text-white">
+      </div>
+
+      <div id="createSynsContainer">
+        <label class="block text-xs text-slate-400 mb-1">Синонимы (через запятую):</label>
+        <input type="text" id="createSynsInput" placeholder="заправка, лукойл, газпром" class="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-700 text-white">
+      </div>
+    </div>
+
+    <div class="flex items-center justify-end space-x-2 pt-3 border-t border-slate-700">
+      <button onclick="closeModal('modalCreate')" class="px-4 py-2 text-sm text-slate-400 hover:text-white">Отмена</button>
+      <button onclick="submitCreateEntity()" class="px-4 py-2 text-sm bg-indigo-600 hover:bg-indigo-500 text-white font-semibold rounded-lg shadow">Создать</button>
+    </div>
+  </div>
+</div>
+
+<!-- МОДАЛЬНОЕ ОКНО ПЕРЕИМЕНОВАНИЯ -->
+<div id="modalRename" class="fixed inset-0 bg-slate-950/70 backdrop-blur-xs z-50 hidden flex items-center justify-center p-4">
+  <div class="bg-slate-800 border border-slate-700 rounded-2xl max-w-md w-full p-6 shadow-2xl space-y-4 text-slate-200">
+    <div class="flex items-center justify-between border-b border-slate-700 pb-3">
+      <h3 id="modalRenameTitle" class="font-bold text-white text-base">Переименовать</h3>
+      <button onclick="closeModal('modalRename')" class="text-slate-400 hover:text-white"><i class="fa-solid fa-xmark text-lg"></i></button>
+    </div>
+    <div>
+      <label class="block text-xs text-slate-400 mb-1">Новое наименование:</label>
+      <input type="text" id="modalRenameInput" class="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-700 text-white focus:outline-none focus:border-indigo-500">
+    </div>
+    <div class="flex items-center justify-end space-x-2 pt-3 border-t border-slate-700">
+      <button onclick="closeModal('modalRename')" class="px-4 py-2 text-sm text-slate-400 hover:text-white">Отмена</button>
+      <button onclick="submitRenameEntity()" class="px-4 py-2 text-sm bg-indigo-600 hover:bg-indigo-500 text-white font-semibold rounded-lg shadow">Сохранить</button>
+    </div>
+  </div>
+</div>
+
+<!-- МОДАЛЬНОЕ ОКНО ПЕРЕМЕЩЕНИЯ (MOVE) -->
+<div id="modalMove" class="fixed inset-0 bg-slate-950/70 backdrop-blur-xs z-50 hidden flex items-center justify-center p-4">
+  <div class="bg-slate-800 border border-slate-700 rounded-2xl max-w-md w-full p-6 shadow-2xl space-y-4 text-slate-200">
+    <div class="flex items-center justify-between border-b border-slate-700 pb-3">
+      <h3 id="modalMoveTitle" class="font-bold text-white text-base">Переместить сущность</h3>
+      <button onclick="closeModal('modalMove')" class="text-slate-400 hover:text-white"><i class="fa-solid fa-xmark text-lg"></i></button>
+    </div>
+    <div class="space-y-3 text-sm">
+      <div>
+        <label class="block text-xs text-slate-400 mb-1">Целевая категория:</label>
+        <select id="modalMoveCatSelect" onchange="syncMoveSubcategorySelect()" class="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-700 text-white"></select>
+      </div>
+      <div id="modalMoveSubWrapper">
+        <label class="block text-xs text-slate-400 mb-1">Целевая подкатегория:</label>
+        <select id="modalMoveSubSelect" class="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-700 text-white"></select>
+      </div>
+    </div>
+    <div class="flex items-center justify-end space-x-2 pt-3 border-t border-slate-700">
+      <button onclick="closeModal('modalMove')" class="px-4 py-2 text-sm text-slate-400 hover:text-white">Отмена</button>
+      <button onclick="submitMoveEntity()" class="px-4 py-2 text-sm bg-indigo-600 hover:bg-indigo-500 text-white font-semibold rounded-lg shadow">Переместить</button>
+    </div>
+  </div>
+</div>
