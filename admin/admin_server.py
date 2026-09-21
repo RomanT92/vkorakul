@@ -13,20 +13,13 @@ from db.connection import get_db_connection
 app = FastAPI(title="Оракул Admin | FastAPI Backend")
 
 # ====================================================================
-# СТАТИКА И HTML ШАБЛОНЫ (ИНТЕРФЕЙС АДМИНКИ)
+# ЕДИНАЯ ПАПКА ADMIN ДЛЯ ШАБЛОНОВ И СТАТИКИ
 # ====================================================================
-current_dir = os.path.dirname(__file__)
-templates_dir = os.path.join(current_dir, "templates")
-static_dir = os.path.join(current_dir, "static")
+admin_dir = os.path.dirname(os.path.abspath(__file__))
 
-if not os.path.exists(templates_dir):
-    os.makedirs(templates_dir, exist_ok=True)
-
-if not os.path.exists(static_dir):
-    os.makedirs(static_dir, exist_ok=True)
-
-app.mount("/static", StaticFiles(directory=static_dir), name="static")
-templates = Jinja2Templates(directory=templates_dir)
+# Раздаем static прямо из папки admin (для app.js)
+app.mount("/static", StaticFiles(directory=admin_dir), name="static")
+templates = Jinja2Templates(directory=admin_dir)
 
 # ====================================================================
 # IN-MEMORY ХРАНИЛИЩЕ СОСТОЯНИЯ МОНИТОРИНГА (WATCHDOG & 19 МОДУЛЕЙ)
@@ -56,7 +49,7 @@ MODULES_REGISTRY = [
     {"num": 15, "name": "Импорт банковских выписок (CSV/XLSX)", "files": "config.py, handlers_base.py, db/imports.py", "test_cmd": "Импорт статистики прошлого + [Файл выписки]", "layer": "Data Ingestion", "default_status": "В строю"},
     {"num": 16, "name": "Управление структурой (CRUD статей)", "files": "handlers_structure.py, db/structure.py, keyboards.py", "test_cmd": "Категории и статьи, Создать, Переименовать", "layer": "Metadata CRUD", "default_status": "В строю"},
     {"num": 17, "name": "Двусторонняя синхронизация словарей", "files": "handlers_base.py, db/migration.py, services.py", "test_cmd": "Миграция базы, Сбор новых слов", "layer": "ETL / Integration", "default_status": "В строю"},
-    {"num": 18, "name": "Административная веб-панель", "files": "admin_server.py, templates/, static/", "test_cmd": "[Открытие URL веб-панели администрирования]", "layer": "Web Admin / UI", "default_status": "В строю"},
+    {"num": 18, "name": "Административная веб-панель", "files": "admin/admin_server.py, admin/", "test_cmd": "[Открытие URL веб-панели администрирования]", "layer": "Web Admin / UI", "default_status": "В строю"},
     {"num": 19, "name": "Навигация и управление состояниями", "files": "handlers_base.py, keyboards.py", "test_cmd": "Отмена, назад, помощь, старт", "layer": "Navigation / FSM", "default_status": "В строю"}
 ]
 
@@ -84,7 +77,6 @@ async def get_system_stats():
     try:
         with get_db_connection() as conn:
             with conn.cursor() as cur:
-                # 1. Метрики эталона
                 cur.execute("""
                     SELECT 
                         COUNT(DISTINCT category) as cats,
@@ -96,7 +88,6 @@ async def get_system_stats():
                 """)
                 g_row = cur.fetchone()
                 
-                # 2. Метрики модерации
                 cur.execute("""
                     SELECT 
                         COUNT(*) FILTER (WHERE is_deleted = FALSE) as pending,
