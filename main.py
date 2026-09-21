@@ -26,7 +26,7 @@ from services import (
     vk,
 )
 from vk_api.longpoll import VkEventType
-from admin_server import app as admin_app
+from admin.admin_server import app as admin_app
 
 # ====================================================================
 # ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ
@@ -41,7 +41,7 @@ TEST_INTERVAL_HOURS = 4  # Интервал автотестов (каждые 4
 def run_admin_server():
     """Фоновый запуск FastAPI веб-админки."""
     try:
-        port = int(os.environ.get("PORT", 8080))
+        port = int(os.environ.get("PORT", 3000))
         uvicorn.run(admin_app, host="0.0.0.0", port=port, log_level="warning")
     except Exception as e:
         print(f"Ошибка запуска веб-сервера админки: {e}")
