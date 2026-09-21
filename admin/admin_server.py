@@ -2,6 +2,7 @@
 import os
 import json
 import time
+from pathlib import Path
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -13,13 +14,13 @@ from db.connection import get_db_connection
 app = FastAPI(title="Оракул Admin | FastAPI Backend")
 
 # ====================================================================
-# ЕДИНАЯ ПАПКА ADMIN ДЛЯ ШАБЛОНОВ И СТАТИКИ
+# ЕДИНАЯ ПАПКА ADMIN ДЛЯ ШАБЛОНОВ И СТАТИКИ (АБСОЛЮТНЫЙ РЕЗОЛВ)
 # ====================================================================
-admin_dir = os.path.dirname(os.path.abspath(__file__))
+admin_dir = Path(__file__).resolve().parent
 
 # Раздаем static прямо из папки admin (для app.js)
-app.mount("/static", StaticFiles(directory=admin_dir), name="static")
-templates = Jinja2Templates(directory=admin_dir)
+app.mount("/static", StaticFiles(directory=str(admin_dir)), name="static")
+templates = Jinja2Templates(directory=str(admin_dir))
 
 # ====================================================================
 # IN-MEMORY ХРАНИЛИЩЕ СОСТОЯНИЯ МОНИТОРИНГА (WATCHDOG & 19 МОДУЛЕЙ)
