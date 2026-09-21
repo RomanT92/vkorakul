@@ -57,7 +57,7 @@ MODULES_REGISTRY = [
 @app.get("/", response_class=HTMLResponse)
 async def admin_index(request: Request):
     """Главная страница панели управления."""
-    return templates.TemplateResponse("index.html", {"request": request})
+    return templates.TemplateResponse(request=request, name="index.html")
 
 # ====================================================================
 # СЕРВИСНЫЕ И ДИАГНОСТИЧЕСКИЕ ЭНДПОИНТЫ
@@ -78,6 +78,7 @@ async def get_system_stats():
     try:
         with get_db_connection() as conn:
             with conn.cursor() as cur:
+                # 1. Метрики эталона
                 cur.execute("""
                     SELECT 
                         COUNT(DISTINCT category) as cats,
@@ -89,6 +90,7 @@ async def get_system_stats():
                 """)
                 g_row = cur.fetchone()
                 
+                # 2. Метрики модерации
                 cur.execute("""
                     SELECT 
                         COUNT(*) FILTER (WHERE is_deleted = FALSE) as pending,
