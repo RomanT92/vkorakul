@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
+import os
 import threading
 import time
+import uvicorn
 from db import (
     get_full_menu,
     get_or_create_user,
@@ -24,6 +26,7 @@ from services import (
     vk,
 )
 from vk_api.longpoll import VkEventType
+from admin_server import app as admin_app
 
 # ====================================================================
 # ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ
@@ -31,6 +34,20 @@ from vk_api.longpoll import VkEventType
 user_states = {}
 MAX_ATTEMPTS = 3
 TEST_INTERVAL_HOURS = 4  # Интервал автотестов (каждые 4 часа)
+
+# ====================================================================
+# ВЕБ-СЕРВЕР АДМИНКИ (FASTAPI НА BOTHOST)
+# ====================================================================
+def run_admin_server():
+    """Фоновый запуск FastAPI веб-админки."""
+    try:
+        port = int(os.environ.get("PORT", 8080))
+        uvicorn.run(admin_app, host="0.0.0.0", port=port, log_level="warning")
+    except Exception as e:
+        print(f"Ошибка запуска веб-сервера админки: {e}")
+
+admin_thread = threading.Thread(target=run_admin_server, daemon=True)
+admin_thread.start()
 
 # ====================================================================
 # АВТОНОМНЫЙ СТОРОЖЕВОЙ ПОТОК (HEARTBEAT И АВТОТЕСТЫ)
