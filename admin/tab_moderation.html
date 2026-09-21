@@ -1,0 +1,66 @@
+<div class="space-y-6">
+
+  <!-- ПЕРЕКЛЮЧАТЕЛЬ РЕЖИМОВ: ОЖИДАЮТ МОДЕРАЦИИ / КОРЗИНА -->
+  <div class="flex flex-wrap items-center justify-between gap-4 border-b border-slate-800 pb-4">
+    <div class="flex items-center space-x-3">
+      <button onclick="switchModerationTab('pending')" id="subTabPendingBtn" class="px-4 py-2 text-sm font-semibold rounded-lg bg-indigo-600 text-white shadow flex items-center space-x-2">
+        <i class="fa-solid fa-clock-rotate-left"></i>
+        <span>Новые на модерации</span>
+        <span id="userWordsBadge" class="bg-indigo-800 text-white text-xs px-2 py-0.5 rounded-full ml-1">0</span>
+      </button>
+      <button onclick="switchModerationTab('trash')" id="subTabTrashBtn" class="px-4 py-2 text-sm font-semibold rounded-lg bg-slate-800 text-slate-400 hover:text-white flex items-center space-x-2">
+        <i class="fa-solid fa-trash-can"></i>
+        <span>Корзина (Удаленные)</span>
+        <span id="trashWordsBadge" class="bg-slate-700 text-slate-300 text-xs px-2 py-0.5 rounded-full ml-1">0</span>
+      </button>
+    </div>
+
+    <!-- КНОПКИ ПАКЕТНЫХ ДЕЙСТВИЙ -->
+    <div class="flex items-center space-x-2">
+      <div id="pendingActionButtons" class="flex items-center space-x-2">
+        <button onclick="approveSelectedWords()" class="px-3 py-2 text-xs font-semibold rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white shadow flex items-center transition">
+          <i class="fa-solid fa-check-double mr-1.5"></i> Одобрить в эталон
+        </button>
+        <button onclick="deleteSelectedWords()" class="px-3 py-2 text-xs font-semibold rounded-lg bg-rose-700 hover:bg-rose-600 text-white shadow flex items-center transition">
+          <i class="fa-solid fa-trash mr-1.5"></i> В корзину
+        </button>
+      </div>
+
+      <div id="trashActionButtons" class="hidden flex items-center space-x-2">
+        <button onclick="restoreSelectedWords()" class="px-3 py-2 text-xs font-semibold rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white shadow flex items-center transition">
+          <i class="fa-solid fa-rotate-left mr-1.5"></i> Восстановить в список
+        </button>
+      </div>
+
+      <button onclick="loadModerationData()" class="p-2 bg-slate-700 hover:bg-slate-600 text-slate-300 rounded-lg text-xs transition" title="Обновить">
+        <i class="fa-solid fa-arrows-rotate"></i>
+      </button>
+    </div>
+  </div>
+
+  <!-- ТАБЛИЦА СЛОВ НА МОДЕРАЦИИ -->
+  <div class="bg-slate-800 rounded-xl border border-slate-700 overflow-hidden shadow">
+    <div class="overflow-x-auto">
+      <table class="w-full text-left text-sm text-slate-300">
+        <thead class="bg-slate-900 text-slate-400 text-xs uppercase border-b border-slate-700">
+          <tr>
+            <th class="px-4 py-3 w-12 text-center">
+              <input type="checkbox" onchange="toggleSelectAll(this.checked)" class="rounded bg-slate-700 border-slate-600 text-indigo-500 focus:ring-0">
+            </th>
+            <th class="px-4 py-3 w-28">Тип</th>
+            <th class="px-4 py-3">Категория</th>
+            <th class="px-4 py-3">Подкатегория</th>
+            <th class="px-4 py-3">Статья</th>
+            <th class="px-4 py-3 font-semibold text-indigo-300">Новый термин / Синоним</th>
+          </tr>
+        </thead>
+        <tbody id="moderationTableBody" class="divide-y divide-slate-700">
+          <tr>
+            <td colspan="6" class="px-4 py-8 text-center text-slate-500">Загрузка записей...</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+</div>
