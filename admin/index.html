@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <title>Оракул Admin | Центр управления</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+  <style>
+    .drag-over {
+      border: 2px dashed #6366f1 !important;
+      background-color: rgba(99, 102, 241, 0.1) !important;
+    }
+    .dragging {
+      opacity: 0.4;
+      transform: scale(0.98);
+    }
+  </style>
+</head>
+<body class="bg-slate-900 text-slate-100 min-h-screen flex flex-col font-sans">
+  
+  <header class="bg-slate-800 border-b border-slate-700 px-6 py-4 flex items-center justify-between shadow-md">
+    <div class="flex items-center space-x-3">
+      <span class="text-2xl">🔮</span>
+      <div>
+        <h1 class="text-lg font-bold text-white tracking-wide">Оракул Admin <span class="text-xs bg-indigo-500/20 text-indigo-400 px-2 py-0.5 rounded border border-indigo-500/30 ml-2">FastAPI Edition</span></h1>
+        <p class="text-xs text-slate-400">PostgreSQL (Supabase) + Bothost</p>
+      </div>
+    </div>
+    <div class="flex items-center space-x-4">
+      <span id="topConnectionBadge" class="text-xs px-3 py-1 rounded-full border bg-slate-800 border-slate-700 text-slate-400">
+        <i class="fa-solid fa-circle text-slate-500 text-[9px] mr-1.5"></i> Связь: Проверка...
+      </span>
+      <span id="statusIndicator" class="text-xs bg-slate-700 text-slate-300 px-3 py-1 rounded-full border border-slate-600">
+        <i class="fa-solid fa-circle text-emerald-400 text-[9px] mr-1.5 animate-pulse"></i> Готово
+      </span>
+    </div>
+  </header>
+
+  <nav class="bg-slate-850 px-6 border-b border-slate-700/80 flex space-x-6 overflow-x-auto">
+    <button onclick="switchMainTab('catalog')" id="mainTabCatalogBtn" class="py-3 text-sm font-semibold border-b-2 border-indigo-500 text-indigo-400 flex items-center space-x-2 whitespace-nowrap">
+      <i class="fa-solid fa-sitemap"></i>
+      <span>Глобальный эталон</span>
+    </button>
+    <button onclick="switchMainTab('moderation')" id="mainTabModBtn" class="py-3 text-sm font-semibold border-b-2 border-transparent text-slate-400 hover:text-slate-200 flex items-center space-x-2 whitespace-nowrap">
+      <i class="fa-solid fa-layer-group"></i>
+      <span>Модерация слов</span>
+    </button>
+    <button onclick="switchMainTab('health')" id="mainTabHealthBtn" class="py-3 text-sm font-semibold border-b-2 border-transparent text-slate-400 hover:text-slate-200 flex items-center space-x-2 whitespace-nowrap">
+      <i class="fa-solid fa-heart-pulse"></i>
+      <span>Контроль функционала (19)</span>
+    </button>
+    <button onclick="switchMainTab('navigation')" id="mainTabNavBtn" class="py-3 text-sm font-semibold border-b-2 border-transparent text-slate-400 hover:text-slate-200 flex items-center space-x-2 whitespace-nowrap">
+      <i class="fa-solid fa-compass"></i>
+      <span>Навигация и сервисы</span>
+    </button>
+  </nav>
+
+  <main class="flex-1 p-6 max-w-7xl w-full mx-auto">
+    <div id="catalogTab">
+      {% include 'tab_catalog.html' %}
+    </div>
+    <div id="moderationTab" class="hidden">
+      {% include 'tab_moderation.html' %}
+    </div>
+    <div id="healthTab" class="hidden">
+      {% include 'tab_health.html' %}
+    </div>
+    <div id="navigationTab" class="hidden">
+      {% include 'tab_navigation.html' %}
+    </div>
+  </main>
+
+  <!-- Подключение JS-клиента из папки admin -->
+  <script src="/static/app.js"></script>
+</body>
+</html>
