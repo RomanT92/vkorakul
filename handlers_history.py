@@ -46,6 +46,85 @@ def _show_history_screen(user_id, items, title_period, total_expense, total_inco
     msg += "\n👉 Чтобы изменить сумму, категорию или удалить операцию — нажмите НОМЕР операции или скажите (например: «Удали вторую и третью»):"
     send_vk_message(user_id, msg, get_numbered_keyboard(min(len(items), 15), show_back=True))
 
+def apply_edit_to_last_transaction(user_id, internal_uid, new_category_hint=None, new_amount=None, new_item_name=None, new_type=None):
+    """
+    Применяет изменения (категория, сумма, статья/название) к самой последней операции пользователя.
+    Используется как быстрыми командами, так и парсером ИИ (action: edit_tx).
+    """
+    last_op = get_last_transaction(internal_uid)
+    if not last_op:
+        send_vk_message(user_id, "📭 В журнале пока нет операций для редактирования.", get_main_keyboard(user_id))
+        return True
+
+    tx_id = last_op["id"]
+    current_art = last_op["article"]
+    current_type = new_type or last_op.get("type", "Расход")
+    current_amt = last_op["amount"]
+    changes_made = []
+
+    # 1. Изменение суммы
+    if new_amount is not None:
+        try:
+            amt_val = float(new_amount)
+            if amt_val > 0:
+                update_transaction_amount(internal_uid, tx_id, amt_val)
+                changes_made.append(f"💰 Сумма: {current_amt:g} руб. ➔ {amt_val:g} руб.")
+                current_amt = amt_val
+        except (ValueError, TypeError):
+            pass
+
+    # 2. Изменение категории / статьи
+    if new_category_hint:
+        hint_clean = new_category_hint.strip()
+        op_type, is_exp_inc = detect_operation_type(hint_clean, current_type)
+        menu_full = get_full_menu(internal_uid)
+        orig_art = new_item_name or current_art
+
+        db_match = smart_search_item(internal_uid, hint_clean, op_type=op_type)
+        if db_match.get("status") != "FOUND" and not is_exp_inc:
+            db_match = smart_search_item(internal_uid, hint_clean, op_type=None)
+
+        if db_match.get("status") == "FOUND":
+            target_cat = db_match["category"]
+            target_sub = db_match["subcategory"]
+            target_art = db_match.get("article", orig_art)
+            final_type = db_match.get("type", op_type)
+        else:
+            c_tree, s_tree = _match_category_tree(menu_full, op_type, hint_clean)
+            if c_tree and s_tree:
+                target_cat, target_sub = c_tree, s_tree
+                target_art = _find_best_matching_article_in_sub(menu_full, op_type, target_cat, target_sub, orig_art)
+                final_type = op_type
+            else:
+                type_menu = menu_full.get(op_type, {})
+                menu_str = f"[{op_type}]\n" + "\n".join([f"{c}: {', '.join(subs.keys() if isinstance(subs, dict) else subs)}" for c, subs in type_menu.items()])
+                ai_cat, ai_sub = categorize_with_ai(orig_art, menu_str, context=hint_clean)
+                v_cat, v_sub = _validate_ai_category_choice(menu_full, op_type, ai_cat, ai_sub)
+                target_cat = v_cat or "Разное"
+                target_sub = v_sub or "Требует проверки"
+                target_art = _find_best_matching_article_in_sub(menu_full, op_type, target_cat, target_sub, orig_art)
+                final_type = op_type
+
+        update_transaction_category(internal_uid, tx_id, target_cat, target_sub, target_art)
+        if target_cat != "Разное" and target_sub != "Требует проверки":
+            learn_user_word(internal_uid, final_type, target_cat, target_sub, target_art, orig_art)
+            learn_user_word(internal_uid, final_type, target_cat, target_sub, target_art, hint_clean)
+
+        changes_made.append(f"📂 Категория: {target_cat} -> {target_sub} (статья: «{target_art}»)")
+
+    elif new_item_name:
+        # Переименование статьи без смены категории
+        clean_name = new_item_name.strip().capitalize()
+        update_transaction_category(internal_uid, tx_id, last_op["category"], last_op["subcategory"], clean_name)
+        changes_made.append(f"✏️ Статья: «{clean_name}»")
+
+    if changes_made:
+        res_text = f"✅ Последняя операция («{current_art}») успешно обновлена!\n\n" + "\n".join(changes_made)
+        send_vk_message(user_id, res_text, get_main_keyboard(user_id))
+        return True
+
+    return False
+
 def handle_history_and_edits(user_id, internal_uid, user_text, user_text_lower, state, user_states):
     """Быстрые команды просмотра, удаления и правки истории транзакций."""
 
@@ -64,7 +143,33 @@ def handle_history_and_edits(user_id, internal_uid, user_text, user_text_lower, 
                 del user_states[user_id]
             return True
 
-    # 2. ПРОСМОТР ПОСЛЕДНЕЙ ОПЕРАЦИИ ИЛИ ИСТОРИИ
+    # 2. БЫСТРОЕ РЕДАКТИРОВАНИЕ ПОСЛЕДНЕЙ ОПЕРАЦИИ (ГОЛОС/ТЕКСТ)
+    # Пример: "Измени категорию у последней операции на самозанятость"
+    cat_edit_match = re.search(
+
+        r'^(?:измени|поменяй|поставь|смени|исправь)\s+(?:категорию|подкатегорию|статью)?\s*(?:у\s+)?(?:последней|прошлой)\s+(?:операции|траты|записи)?\s*на\s+(.+)$',
+        user_text_lower
+    )
+    if not cat_edit_match:
+        cat_edit_match = re.search(
+            r'^(?:у\s+)?(?:последней|прошлой)\s+(?:операции|траты|записи)\s+(?:категория|подкатегория|статья)?\s*это\s+(.+)$',
+            user_text_lower
+        )
+    if cat_edit_match:
+        target_hint = cat_edit_match.group(1).strip().strip('«»"\'.,')
+        if target_hint:
+            return apply_edit_to_last_transaction(user_id, internal_uid, new_category_hint=target_hint)
+
+    # Пример: "Измени сумму у последней операции на 450"
+    amt_edit_match = re.search(
+        r'^(?:измени|поменяй|поставь|смени|исправь)\s+сумму\s+(?:у\s+)?(?:последней|прошлой)\s+(?:операции|траты|записи)?\s*на\s+(\d+(?:[.,]\d+)?)$',
+        user_text_lower
+    )
+    if amt_edit_match:
+        raw_amt = amt_edit_match.group(1).replace(',', '.')
+        return apply_edit_to_last_transaction(user_id, internal_uid, new_amount=raw_amt)
+
+    # 3. ПРОСМОТР ПОСЛЕДНЕЙ ОПЕРАЦИИ ИЛИ ИСТОРИИ
     history_fast_triggers = [
         "покажи последнюю операцию", "покажи последнюю", "последняя операция",
         "покажи последние операции", "покажи историю", "история операций",
@@ -84,7 +189,7 @@ def handle_history_and_edits(user_id, internal_uid, user_text, user_text_lower, 
         _show_history_screen(user_id, items, title, history_data["total_expense"], history_data["total_income"], total_count=history_data.get("count"))
         return True
 
-    # 3. УДАЛИТЬ ВСЕ ОПЕРАЦИИ
+    # 4. УДАЛИТЬ ВСЕ ОПЕРАЦИИ
     delete_all_fast_triggers = [
         "удали все операции", "удалить все операции", "очисти историю", "очистить историю",
         "удали все траты", "удалить все траты", "очисти журнал", "стереть все операции"
@@ -99,7 +204,7 @@ def handle_history_and_edits(user_id, internal_uid, user_text, user_text_lower, 
         send_vk_message(user_id, f"⚠️ Вы уверены, что хотите удалить ВСЕ операции за всё время?\n\n• Найдено операций: {total_ops} шт.\n• Данные будут удалены безвозвратно!", get_yes_no_keyboard(show_back=True))
         return True
 
-    # 4. УДАЛИТЬ ПОСЛЕДНЮЮ ОПЕРАЦИЮ
+    # 5. УДАЛИТЬ ПОСЛЕДНЮЮ ОПЕРАЦИЮ
     delete_last_fast_triggers = [
         "удали последнюю операцию", "удалить последнюю операцию", "отмени последнюю запись",
         "удали последнюю трату", "удалить последнюю", "удали последнюю"
@@ -117,7 +222,7 @@ def handle_history_and_edits(user_id, internal_uid, user_text, user_text_lower, 
         send_vk_message(user_id, f"⚠️ Вы уверены, что хотите удалить последнюю операцию?\n\n• {last_op['article']} — {last_op['amount']:g} руб. ({last_op['type']})\n• Категория: {last_op['category']} -> {last_op['subcategory']}", get_yes_no_keyboard(show_back=True))
         return True
 
-    # 5. ИНТЕРАКТИВНОЕ МЕНЮ ИСТОРИИ
+    # 6. ИНТЕРАКТИВНОЕ МЕНЮ ИСТОРИИ
     if state == "history_view":
         if user_text.isdigit():
             idx = int(user_text) - 1
