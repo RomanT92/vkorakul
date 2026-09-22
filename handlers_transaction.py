@@ -277,4 +277,11 @@ def handle_transaction(user_id, user_text, state, user_states):
             _show_multi_tx_items(user_id, processed_items, show_apply_all=False)
             return True
 
+    # 6. НАДРЕЖИМ «ПОБОЛТАТЬ» / ДИАЛОГОВЫЙ ОТВЕТ ИИ (Режим 6 системного промпта)
+    # Если ИИ вернул не JSON, а живой диалоговый ответ (приветствие, финансовый совет, ответ на вопрос)
+    clean_reply = reply_text.strip()
+    if clean_reply and not clean_reply.startswith("{") and not clean_reply.startswith("["):
+        send_vk_message(user_id, clean_reply, get_main_keyboard(user_id))
+        return True
+
     return False
