@@ -3,13 +3,18 @@ import re
 import difflib
 
 INCOME_KEYWORDS = [
-    "доход", "приход", "поступление", "поступило", "пополнил", "пополнение",
+    "доход", "приход", "поступление", "поступило", "поступили", "пополнил", "пополнение",
     "зарплата", "зп", "аванс", "премия", "подарили", "подарок мне",
     "вернули долг", "отдали долг", "кэшбэк", "проценты", "дивиденды",
-    "выручка", "оплата от клиента", "зачисление"
+    "выручка", "оплата от клиента", "оплата от заказчика", "зачисление",
+    "самозанятость", "самозанятый", "гонорар", "подработка", "клиент",
+    "перевели", "перевод мне"
 ]
 
 def detect_operation_type(user_text="", raw_type="Расход", item_name="", comment=""):
+    """
+    Определяет тип операции (Расход или Доход) по контексту текста, ключевым словам или явному типу.
+    """
     check_str = f"{user_text} {raw_type} {item_name} {comment}".lower()
     for kw in INCOME_KEYWORDS:
         if re.search(r'\b' + re.escape(kw) + r'\b', check_str) or kw in check_str:
@@ -19,6 +24,9 @@ def detect_operation_type(user_text="", raw_type="Расход", item_name="", c
     return "Расход", False
 
 def clean_fallback_item(user_text):
+    """
+    Очищает текст от сумм и общих стоп-слов для формирования резервного названия операции.
+    """
     text = re.sub(r'\d+([.,]\d+)?', '', user_text).strip()
     stop_words = [
         "руб", "рублей", "р", "к", "k", "приход", "доход", "расход", "трата",
@@ -30,7 +38,9 @@ def clean_fallback_item(user_text):
     return clean if clean else "Операция"
 
 def _try_fast_single_transaction_parse(user_text):
-    """Детерминированный разбор фраз 'Шиномонтаж 2600', 'такси 450' без вызова ИИ."""
+    """
+    Детерминированный разбор простых фраз типа 'Шиномонтаж 2600', 'такси 450' без вызова ИИ.
+    """
     text = user_text.strip()
     match_end = re.search(r'^(.*?)\s+(\d+(?:[.,]\d+)?)\s*(?:руб|р)?$', text, re.IGNORECASE)
     match_start = re.search(r'^(\d+(?:[.,]\d+)?)\s*(?:руб|р)?\s+(.*?)$', text, re.IGNORECASE)
@@ -55,7 +65,9 @@ def _try_fast_single_transaction_parse(user_text):
     return None
 
 def _validate_ai_category_choice(menu_full, op_type, cat, sub):
-    """Строгая проверка: существует ли категория и подкатегория в меню пользователя."""
+    """
+    Строгая валидация: существует ли предложенная категория и подкатегория в структуре пользователя.
+    """
     type_menu = menu_full.get(op_type, {})
     if cat not in type_menu:
         matched_cat = next((c for c in type_menu if c.lower() == str(cat).lower().strip()), None)
@@ -78,7 +90,9 @@ def _validate_ai_category_choice(menu_full, op_type, cat, sub):
     return cat, sub
 
 def _find_best_matching_article_in_sub(menu_full, op_type, cat, sub, user_word):
-    """Безопасный поиск статьи без привязки случайных чужих слов."""
+    """
+    Безопасный поиск статьи в подкатегории без привязки случайных чужих слов.
+    """
     clean_w = user_word.lower().strip()
     sub_articles = menu_full.get(op_type, {}).get(cat, {}).get(sub, [])
     if not sub_articles:
@@ -98,6 +112,9 @@ def _find_best_matching_article_in_sub(menu_full, op_type, cat, sub, user_word):
     return user_word.capitalize()
 
 def _match_category_tree(menu_full, op_type, text):
+    """
+    Прямой поиск совпадения строки с названием категории или подкатегории в меню.
+    """
     clean = text.lower().strip()
     type_menu = menu_full.get(op_type, {})
     for cat, subs in type_menu.items():
