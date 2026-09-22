@@ -100,7 +100,6 @@ def test_mod_02():
 
 # 3. Голосовой ввод операций (Whisper & AI Tunnel Client)
 def test_mod_03():
-    # Проверка доступности API OpenAI через AI Tunnel
     res = ai_client.models.list()
     if res and hasattr(res, "data"):
         return True, ""
@@ -162,9 +161,16 @@ def test_mod_09():
         return True, ""
     return False, f"get_user_history вернул неверную структуру: {hist}"
 
-# 10. Распознавание чека (общая сумма)
+# 10. Распознавание чека (общая сумма) — ПРЯМАЯ ПРОВЕРКА handlers_receipt.py
 def test_mod_10():
-    # Проверка доступности GPT-4o в AI Tunnel
+    try:
+        import handlers_receipt
+        if not hasattr(handlers_receipt, "handle_receipt"):
+            return False, "В handlers_receipt.py отсутствует функция handle_receipt"
+    except Exception as e:
+        return False, f"Сбой импорта/синтаксиса handlers_receipt.py: {e}"
+
+    # Проверка вызова GPT-4o Vision API
     resp = ai_client.chat.completions.create(
         model="gpt-4o",
         messages=[{"role": "user", "content": "PING. Ответь строго словом PONG"}],
@@ -175,9 +181,17 @@ def test_mod_10():
         return True, ""
     return False, f"GPT-4o вернул неожиданный ответ: {txt}"
 
-# 11. Построчный разбор кассовых чеков
+# 11. Построчный разбор кассовых чеков — ПРЯМАЯ ПРОВЕРКА handlers_receipt.py
 def test_mod_11():
-    # Проверка функции очистки названий чеков от брендов
+    try:
+        import handlers_receipt
+        # Проверяем наличие ключевых функций разбора чека в файле
+        funcs = [f for f in ["handle_receipt", "_handle_receipt_scan", "_save_receipt_items"] if hasattr(handlers_receipt, f)]
+        if not funcs:
+            return False, "В handlers_receipt.py удалены ключевые функции обработки чеков"
+    except Exception as e:
+        return False, f"Ошибка в модуле handlers_receipt.py: {e}"
+
     clean_map = normalize_receipt_items_with_ai(["Колбаса Останкино", "Молоко Домик в деревне"])
     if clean_map and isinstance(clean_map, dict):
         return True, ""
@@ -185,6 +199,13 @@ def test_mod_11():
 
 # 12. Пакетная авто-классификация чека
 def test_mod_12():
+    try:
+        import handlers_receipt
+        if not hasattr(handlers_receipt, "handle_receipt"):
+            return False, "handlers_receipt.py поврежден"
+    except Exception as e:
+        return False, f"Ошибка handlers_receipt: {e}"
+
     menu_str = "[Расход]\nПродукты: Еда, Напитки"
     ai_cat, ai_sub = categorize_with_ai("Хлеб", menu_str)
     if ai_cat and ai_sub and ai_cat != "UNKNOWN":
@@ -202,13 +223,9 @@ def test_mod_13():
 # 14. Обучение бота новым синонимам
 def test_mod_14():
     uid = get_or_create_user(TEST_VK_ID)
-    # 1. Запоминаем синоним
     ok_learn = learn_user_word(uid, "Расход", "Транспорт", "Автомобиль", "Шиномонтаж", "тест_шинка")
-    # 2. Проверяем умный поиск
     found = smart_search_item(uid, "тест_шинка", op_type="Расход")
-    # 3. Тест превращения в статью
     ok_prom = promote_synonym_to_article(uid, "Расход", "Транспорт", "Автомобиль", "тест_шинка")
-    # Очистка
     db_delete_entity(uid, "article", "Расход", "Транспорт", "Автомобиль", "Тест_шинка")
     if ok_learn and found["status"] == "FOUND" and ok_prom:
         return True, ""
@@ -222,7 +239,6 @@ def test_mod_15():
         ["02.01.2025", "Доход", 1000.0, "Аванс тест"]
     ]
     stats = import_parsed_operations(uid, fake_ops)
-    # Очистка
     delete_all_user_transactions(uid, period="all")
     if stats.get("total", 0) >= 2:
         return True, ""
@@ -249,7 +265,6 @@ def test_mod_17():
 # 18. Административная веб-панель (Webhook Google Таблиц)
 def test_mod_18():
     res = send_to_google_sheets({"action": "ping"})
-    # Если вернулся JSON с любым статусом (даже UNKNOWN_ACTION) — вебхук живой и принимает POST
     if isinstance(res, dict) and "status" in res:
         return True, ""
     return False, f"Google Apps Script вебхук недоступен: {res}"
@@ -258,7 +273,6 @@ def test_mod_18():
 def test_mod_19():
     from handlers_base import handle_base_commands
     user_states = {TEST_VK_ID: {"state": "wait_import_file"}}
-    # Проверяем, сбрасывает ли команда "отмена" состояние пользователя
     handled = handle_base_commands(TEST_VK_ID, "отмена", "wait_import_file", user_states)
     if handled and TEST_VK_ID not in user_states:
         return True, ""
@@ -295,7 +309,7 @@ def run_all_self_tests():
     print("🚀 СТАРТ СКВОЗНОГО АУДИТА СИСТЕМЫ «ОРАКУЛ» (19 МОДУЛЕЙ)")
     print(f"⏰ Время запуска: {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}")
     print("=" * 65)
-    
+
     passed = 0
     failed = 0
     errors = []
@@ -307,7 +321,7 @@ def run_all_self_tests():
         else:
             failed += 1
             errors.append(f"• Модуль {mod_num} ({name}): {err}")
-        time.sleep(0.15) # Микропауза для стабильности вебхука Таблицы
+        time.sleep(0.15)
 
     print("=" * 65)
     pct = round((passed / len(TESTS_REGISTRY)) * 100, 1)
