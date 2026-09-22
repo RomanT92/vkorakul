@@ -11,7 +11,17 @@ from db import (
 )
 from handlers_base import handle_base_commands
 from handlers_queue import _process_next_batch, handle_queue_and_learning
-from handlers_receipt import handle_receipt
+
+# БЕЗОПАСНЫЙ ИМПОРТ ОБРАБОТЧИКА ЧЕКОВ (ЗАЩИТА ОТ КРАША ВСЕГО БОТА)
+try:
+    from handlers_receipt import handle_receipt
+    RECEIPT_AVAILABLE = True
+except Exception as e_rcpt_import:
+    RECEIPT_AVAILABLE = False
+    print(f"⚠️ [IMPORT ERROR] Не удалось загрузить handlers_receipt: {e_rcpt_import}")
+    def handle_receipt(*args, **kwargs):
+        return False
+
 from handlers_structure import handle_structure
 from handlers_transaction import handle_transaction
 from handlers_voice_commands import handle_list_voice_commands
@@ -55,10 +65,18 @@ admin_thread.start()
 def background_health_monitor():
     """
     Фоновый сторожевой демон:
-    1. Каждую минуту шлет пинг активности (Heartbeat) в ячейку H3.
-    2. При старте и каждые 4 часа запускает сквозной аудит всех 19 модулей.
+    1. Каждые 30 секунд шлет пинг активности (Heartbeat) в админку.
+    2. Если оператор в админке нажал «Запустить автотест» — немедленно инициирует аудит.
+    3. При старте и каждые 4 часа запускает плановый сквозной аудит.
     """
     time.sleep(2)
+    
+    # Если при старте модуль чеков сломан — сразу фиксируем ошибку в админке
+    if not RECEIPT_AVAILABLE:
+        report_module_health(10, "Ошибка", "Синтаксическая ошибка или сбой импорта в handlers_receipt.py")
+        report_module_health(11, "Ошибка", "handlers_receipt.py не загружен")
+        report_module_health(12, "Ошибка", "handlers_receipt.py не загружен")
+
     # Первый пинг связи сразу при запуске бота
     send_heartbeat()
 
@@ -74,19 +92,27 @@ def background_health_monitor():
     
     while True:
         try:
-            # 1. Ежеминутный сигнал жизнедеятельности в Google Таблицу
-            send_heartbeat()
+            # 1. Сигнал жизнедеятельности в админку
+            hb_res = send_heartbeat()
 
-            # 2. Плановый аудит каждые 4 часа (14400 секунд)
-            if time.time() - last_full_audit >= (TEST_INTERVAL_HOURS * 3600):
+            # 2. Проверка: запросил ли оператор автотест через веб-интерфейс
+            if isinstance(hb_res, dict) and hb_res.get("run_tests") is True:
+                print("\n[АВТОТЕСТ] Получен ручной триггер тестирования из веб-админки! Запуск...")
+                from test_runner import run_all_self_tests
+                run_all_self_tests()
+                last_full_audit = time.time()
+
+            # 3. Плановый аудит каждые 4 часа
+            elif time.time() - last_full_audit >= (TEST_INTERVAL_HOURS * 3600):
                 print(f"\n[АВТОТЕСТ] Плановый запуск сквозного аудита (каждые {TEST_INTERVAL_HOURS} ч)...")
                 from test_runner import run_all_self_tests
                 run_all_self_tests()
                 last_full_audit = time.time()
+
         except Exception as e:
             print(f"[WATCHDOG] Ошибка в сторожевом потоке: {e}")
 
-        time.sleep(60)  # Спим ровно 1 минуту до следующего Heartbeat
+        time.sleep(30)  # Пинг каждые 30 секунд для сверхбыстрого контроля связи
 
 # Запуск сторожевого потока
 monitor_thread = threading.Thread(target=background_health_monitor, daemon=True)
