@@ -22,35 +22,53 @@ app.mount("/static", StaticFiles(directory=str(admin_dir)), name="static")
 templates = Jinja2Templates(directory=str(admin_dir))
 
 # ====================================================================
-# IN-MEMORY ХРАНИЛИЩЕ СОСТОЯНИЯ МОНИТОРИНГА (WATCHDOG & 19 МОДУЛЕЙ)
+# IN-MEMORY ХРАНИЛИЩЕ СОСТОЯНИЯ МОНИТОРИНГА (WATCHDOG & 26 МОДУЛЕЙ)
 # ====================================================================
 SYSTEM_HEALTH_STATE: Dict[str, Any] = {
     "last_heartbeat": 0.0,
-    "bot_version": "1.0.0",
+    "bot_version": "6.5.0",
     "trigger_test_requested": False,
     "module_statuses": {}
 }
 
 MODULES_REGISTRY = [
-    {"num": 1, "name": "Регистрация и контекст пользователя", "files": "db/connection.py, db/transactions.py", "test_cmd": "/start, начать, любое сообщение", "layer": "Core / Auth", "default_status": "Не проверялся"},
-    {"num": 2, "name": "Быстрый ввод трат и доходов (текст)", "files": "config.py, handlers_transaction.py", "test_cmd": "Такси 500, кофе 250 в магните 1400", "layer": "NLP / Transaction", "default_status": "Не проверялся"},
-    {"num": 3, "name": "Голосовой ввод операций", "files": "main.py, services.py, handlers_transaction.py", "test_cmd": "[Голосовое сообщение с перечислением трат]", "layer": "Media / NLP", "default_status": "Не проверялся"},
-    {"num": 4, "name": "Интерактивная классификация статей", "files": "config.py, handlers_transaction.py, db/structure.py", "test_cmd": "Выбор кнописок категорий при записи", "layer": "Business Logic", "default_status": "Не проверялся"},
-    {"num": 5, "name": "Голосовое и текстовое редактирование", "files": "config.py, handlers_transaction.py, db/transactions.py", "test_cmd": "Измени сумму на 1350, перенеси в продукты", "layer": "NLP / Edit", "default_status": "Не проверялся"},
-    {"num": 6, "name": "Пакетная привязка категорий к списку", "files": "config.py, handlers_voice_commands.py", "test_cmd": "Второе это другое, третье быт, пятое гигиена", "layer": "Batch Processing", "default_status": "Не проверялся"},
-    {"num": 7, "name": "Пакетное редактирование сумм и названий", "files": "handlers_voice_commands.py, db/transactions.py", "test_cmd": "Измени сумму у четвертой на 250, первая огурцы", "layer": "Batch Processing", "default_status": "Не проверялся"},
-    {"num": 8, "name": "Пакетное и точечное удаление записей", "files": "handlers_voice_commands.py, db/transactions.py", "test_cmd": "Удали первую и третью, удали всё", "layer": "CRUD Operations", "default_status": "Не проверялся"},
-    {"num": 9, "name": "Выписка и история транзакций", "files": "db/transactions.py, handlers_transaction.py", "test_cmd": "Покажи траты за неделю, выписка", "layer": "Reporting", "default_status": "Не проверялся"},
-    {"num": 10, "name": "Распознавание чека (общая сумма)", "files": "config.py, handlers_receipt.py", "test_cmd": "[Фотография чека из супермаркета]", "layer": "Vision / OCR", "default_status": "Не проверялся"},
-    {"num": 11, "name": "Построчный разбор кассовых чеков", "files": "config.py, handlers_receipt.py", "test_cmd": "Разбери чек построчно", "layer": "Vision / Parser", "default_status": "Не проверялся"},
-    {"num": 12, "name": "Пакетная авто-классификация чека", "files": "config.py, handlers_receipt.py, db/structure.py", "test_cmd": "[Автоматический вызов после сканирования чека]", "layer": "AI / Batch", "default_status": "Не проверялся"},
-    {"num": 13, "name": "Очередь нераспознанных операций", "files": "handlers_queue.py, handlers_queue_batch.py", "test_cmd": "Разобрать операции, разобрать завалы", "layer": "Queue Management", "default_status": "Не проверялся"},
-    {"num": 14, "name": "Обучение бота новым синонимам", "files": "handlers_learning.py, db/structure.py", "test_cmd": "[Подтверждение новой привязки в диалоге]", "layer": "Active Learning", "default_status": "Не проверялся"},
-    {"num": 15, "name": "Импорт банковских выписок (CSV/XLSX)", "files": "config.py, handlers_base.py, db/imports.py", "test_cmd": "Импорт статистики прошлого + [Файл выписки]", "layer": "Data Ingestion", "default_status": "Не проверялся"},
-    {"num": 16, "name": "Управление структурой (CRUD статей)", "files": "handlers_structure.py, db/structure.py, keyboards.py", "test_cmd": "Категории и статьи, Создать, Переименовать", "layer": "Metadata CRUD", "default_status": "Не проверялся"},
-    {"num": 17, "name": "Двусторонняя синхронизация словарей", "files": "handlers_base.py, db/migration.py, services.py", "test_cmd": "Миграция базы, Сбор новых слов", "layer": "ETL / Integration", "default_status": "Не проверялся"},
-    {"num": 18, "name": "Административная веб-панель", "files": "admin/admin_server.py, admin/", "test_cmd": "[Открытие URL веб-панели администрирования]", "layer": "Web Admin / UI", "default_status": "В строю"},
-    {"num": 19, "name": "Навигация и управление состояниями", "files": "handlers_base.py, keyboards.py", "test_cmd": "Отмена, назад, помощь, старт", "layer": "Navigation / FSM", "default_status": "Не проверялся"}
+    # СЛОЙ 1: Диспетчеризация, Авторизация и FSM
+    {"num": 1, "name": "Авторизация и профиль пользователя", "files": "db/connection.py, db/transactions.py", "test_cmd": "/start, начать, любое сообщение", "layer": "Core / Auth", "default_status": "Не проверялся"},
+    {"num": 2, "name": "Диспетчер намерений (Надрежим)", "files": "config.py, handlers_transaction.py", "test_cmd": "Привет, Что умеешь?, помощь", "layer": "NLP / Router", "default_status": "Не проверялся"},
+    {"num": 3, "name": "Свободный диалог («Поболтать»)", "files": "services.py, handlers_transaction.py", "test_cmd": "Как копить деньги?, Расскажи о бюджете", "layer": "AI / Chat", "default_status": "Не проверялся"},
+    {"num": 4, "name": "Управление состояниями (FSM)", "files": "handlers_base.py, keyboards.py", "test_cmd": "отмена, назад, стоп", "layer": "Navigation / FSM", "default_status": "Не проверялся"},
+
+    # СЛОЙ 2: Ввод и распознавание операций
+    {"num": 5, "name": "Определение типа (Доход / Расход)", "files": "handlers_tx_parser.py, config.py", "test_cmd": "Зарплата 80000, Премия 15000, Кэшбэк 400", "layer": "NLP / Type", "default_status": "Не проверялся"},
+    {"num": 6, "name": "Быстрый ввод траты (Fast-Path)", "files": "handlers_tx_parser.py", "test_cmd": "Такси 500, кофе 250, 300 бензин", "layer": "Parser / Fast-Path", "default_status": "Не проверялся"},
+    {"num": 7, "name": "Сложный NLP-ввод с описанием", "files": "handlers_transaction.py, services.py", "test_cmd": "Купил в магните продукты на 1450 рублей", "layer": "NLP / Transaction", "default_status": "Не проверялся"},
+    {"num": 8, "name": "Множественный ввод операций", "files": "handlers_transaction.py, handlers_tx_parser.py", "test_cmd": "Такси 300, обед 450, аптека 1200", "layer": "Batch / Parser", "default_status": "Не проверялся"},
+    {"num": 9, "name": "Голосовой ввод операций (Whisper)", "files": "main.py, services.py", "test_cmd": "[Голосовое сообщение с перечислением трат]", "layer": "Media / NLP", "default_status": "Не проверялся"},
+
+    # СЛОЙ 3: Интеллектуальный поиск и категоризация
+    {"num": 10, "name": "Точный и триграммный поиск синонимов", "files": "db/structure.py, db/transactions.py", "test_cmd": "шиномонтажка, пятерочка, макдак", "layer": "Search / Trigram", "default_status": "Не проверялся"},
+    {"num": 11, "name": "LLM-классификатор по меню", "files": "config.py, services.py, db/structure.py", "test_cmd": "Болгарка 4500, Стеклоочиститель 350", "layer": "Business Logic", "default_status": "Не проверялся"},
+    {"num": 12, "name": "Валидатор категорий (Anti-Hallucination)", "files": "handlers_tx_parser.py", "test_cmd": "[Проверка недопустимости несуществующих категорий]", "layer": "Validation / Logic", "default_status": "Не проверялся"},
+    {"num": 13, "name": "Интерактивное дообучение синонимам", "files": "handlers_learning.py, db/structure.py", "test_cmd": "[Подтверждение новой привязки в диалоге]", "layer": "Active Learning", "default_status": "Не проверялся"},
+
+    # СЛОЙ 4: Редактирование и работа с операциями
+    {"num": 14, "name": "Правка суммы последней операции", "files": "handlers_voice_commands.py, db/transactions.py", "test_cmd": "Не 500, а 650; Измени сумму на 1200", "layer": "CRUD / Edit", "default_status": "Не проверялся"},
+    {"num": 15, "name": "Правка категории последней операции", "files": "handlers_voice_commands.py, db/transactions.py", "test_cmd": "Перенеси в кафе; Это продукты", "layer": "CRUD / Edit", "default_status": "Не проверялся"},
+    {"num": 16, "name": "Отмена / удаление последней операции", "files": "handlers_voice_commands.py, db/transactions.py", "test_cmd": "Отмени последнюю; Удали последнюю трату", "layer": "CRUD / Delete", "default_status": "Не проверялся"},
+    {"num": 17, "name": "Пакетная привязка категорий к списку", "files": "handlers_voice_commands.py", "test_cmd": "Второе это другое, третье быт, пятое гигиена", "layer": "Batch Processing", "default_status": "Не проверялся"},
+    {"num": 18, "name": "Пакетное редактирование сумм и названий", "files": "handlers_voice_commands.py, db/transactions.py", "test_cmd": "Измени сумму у четвертой на 250, первая огурцы", "layer": "Batch Processing", "default_status": "Не проверялся"},
+    {"num": 19, "name": "Пакетное удаление по номерам", "files": "handlers_voice_commands.py, db/transactions.py", "test_cmd": "Удали первую и третью, удали всё", "layer": "Batch / Delete", "default_status": "Не проверялся"},
+
+    # СЛОЙ 5: Чеки, Выписки и Отчёты
+    {"num": 20, "name": "Распознавание чека (общая сумма)", "files": "config.py, handlers_receipt.py", "test_cmd": "[Фотография чека из супермаркета]", "layer": "Vision / OCR", "default_status": "Не проверялся"},
+    {"num": 21, "name": "Построчный разбор кассовых чеков", "files": "config.py, handlers_receipt.py", "test_cmd": "Разбери чек построчно", "layer": "Vision / Parser", "default_status": "Не проверялся"},
+    {"num": 22, "name": "Очередь нераспознанных операций", "files": "handlers_queue.py, handlers_queue_batch.py", "test_cmd": "Разобрать операции, разобрать завалы", "layer": "Queue Management", "default_status": "Не проверялся"},
+    {"num": 23, "name": "Импорт банковских выписок (CSV/XLSX)", "files": "config.py, handlers_base.py, db/imports.py", "test_cmd": "Импорт статистики прошлого + [Файл выписки]", "layer": "Data Ingestion", "default_status": "Не проверялся"},
+    {"num": 24, "name": "Выписка и история транзакций", "files": "db/transactions.py, handlers_history.py", "test_cmd": "Покажи траты за неделю, выписка", "layer": "Reporting", "default_status": "Не проверялся"},
+
+    # СЛОЙ 6: Управление структурой и Системный контроль
+    {"num": 25, "name": "Управление структурой (CRUD статей)", "files": "handlers_structure.py, db/structure.py, keyboards.py", "test_cmd": "Категории и статьи, Создать, Переименовать", "layer": "Metadata CRUD", "default_status": "Не проверялся"},
+    {"num": 26, "name": "Сторожевой таймер и панель контроля (Watchdog)", "files": "admin/admin_server.py, test_runner.py", "test_cmd": "Пинг бота каждые 30с, кнопка [Запустить автотест]", "layer": "Watchdog / Health", "default_status": "В строю"}
 ]
 
 @app.get("/", response_class=HTMLResponse)
@@ -77,7 +95,6 @@ async def get_system_stats():
     try:
         with get_db_connection() as conn:
             with conn.cursor() as cur:
-                # 1. Метрики эталона
                 cur.execute("""
                     SELECT 
                         COUNT(DISTINCT category) as cats,
@@ -89,7 +106,6 @@ async def get_system_stats():
                 """)
                 g_row = cur.fetchone()
                 
-                # 2. Метрики модерации
                 cur.execute("""
                     SELECT 
                         COUNT(*) FILTER (WHERE is_deleted = FALSE) as pending,
@@ -120,17 +136,16 @@ async def get_system_stats():
 # МОНИТОРИНГ ФУНКЦИОНАЛА И WATCHDOG (ТЕЛЕМЕТРИЯ БОТА)
 # ====================================================================
 class HeartbeatPayload(BaseModel):
-    bot_version: Optional[str] = "1.0.0"
+    bot_version: Optional[str] = "6.5.0"
 
 @app.post("/api/heartbeat")
 async def receive_heartbeat(p: HeartbeatPayload):
-    """Прием сигналов жизни от бота (раз в минуту)."""
+    """Прием сигналов жизни от бота (раз в 30 секунд)."""
     now = time.time()
     SYSTEM_HEALTH_STATE["last_heartbeat"] = now
     if p.bot_version:
         SYSTEM_HEALTH_STATE["bot_version"] = p.bot_version
 
-    # Проверяем, запрашивал ли оператор запуск автотестов через админку
     should_run_tests = bool(SYSTEM_HEALTH_STATE.get("trigger_test_requested", False))
     if should_run_tests:
         SYSTEM_HEALTH_STATE["trigger_test_requested"] = False
@@ -149,24 +164,23 @@ class ModuleStatusPayload(BaseModel):
 
 @app.post("/api/module_status")
 async def update_module_status(p: ModuleStatusPayload):
-    """Обновление статуса конкретного модуля по результатам выполнения/тестов."""
-    if 1 <= p.module_num <= 19:
+    """Обновление статуса конкретного модуля (1..26)."""
+    if 1 <= p.module_num <= len(MODULES_REGISTRY):
         SYSTEM_HEALTH_STATE["module_statuses"][str(p.module_num)] = {
             "status": p.status,
             "error": p.error_details or "",
             "updated_at": time.time()
         }
         return JSONResponse(content={"status": "SUCCESS", "module_num": p.module_num, "current_status": p.status})
-    return JSONResponse(content={"status": "ERROR", "message": "Номер модуля должен быть от 1 до 19"})
+    return JSONResponse(content={"status": "ERROR", "message": f"Номер модуля должен быть от 1 до {len(MODULES_REGISTRY)}"})
 
 @app.get("/api/health")
 async def get_system_health():
-    """Отдает состояние сторожевого таймера, 19 модулей и метрики готовности."""
+    """Отдает состояние сторожевого таймера, 26 модулей и процент боеготовности."""
     now = time.time()
     last_hb = SYSTEM_HEALTH_STATE["last_heartbeat"]
     diff_sec = int(now - last_hb) if last_hb > 0 else 999999
     
-    # Реактивный порог: если бот молчит более 75 секунд — объявляется обрыв связи
     timeout_threshold = 75
 
     is_online = (last_hb > 0) and (diff_sec <= timeout_threshold)
@@ -283,7 +297,7 @@ async def get_catalog():
         return JSONResponse(content={"status": "ERROR", "message": str(e)})
 
 class MovePayload(BaseModel):
-    level: str # 'subcategory' или 'article'
+    level: str
     type: str
     fromCategory: str
     fromSubcategory: str
@@ -315,7 +329,7 @@ async def move_catalog_entity(p: MovePayload):
         return JSONResponse(content={"status": "ERROR", "message": str(e)})
 
 class EntityPayload(BaseModel):
-    level: str # 'category', 'subcategory', 'article'
+    level: str
     type: str
     category: str
     subcategory: Optional[str] = ""
