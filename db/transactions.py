@@ -660,23 +660,26 @@ def update_transaction_amount(user_id, tx_id, new_amount):
         cur.close()
         conn.close()
 
-def update_transaction_category(user_id, tx_id, category, subcategory, article=None):
+def update_transaction_category(user_id, tx_id, category, subcategory, article=None, op_type=None):
+    """
+    Обновляет категорию, подкатегорию, статью и опционально тип транзакции (Расход/Доход).
+    """
     conn = get_db_connection()
     cur = conn.cursor()
     try:
         uid = _resolve_internal_user_id(cur, user_id)
+        set_parts = ["category = %s", "subcategory = %s", "status = 'verified'"]
+        params = [category, subcategory]
         if article:
-            cur.execute("""
-                UPDATE transactions
-                SET category = %s, subcategory = %s, article = %s, status = 'verified'
-                WHERE id = %s AND user_id = %s RETURNING id;
-            """, (category, subcategory, article, tx_id, uid))
-        else:
-            cur.execute("""
-                UPDATE transactions
-                SET category = %s, subcategory = %s, status = 'verified'
-                WHERE id = %s AND user_id = %s RETURNING id;
-            """, (category, subcategory, tx_id, uid))
+            set_parts.append("article = %s")
+            params.append(article)
+        if op_type:
+            set_parts.append("type = %s")
+            params.append(op_type)
+        params.extend([tx_id, uid])
+
+        query = f"UPDATE transactions SET {', '.join(set_parts)} WHERE id = %s AND user_id = %s RETURNING id;"
+        cur.execute(query, tuple(params))
         ok = cur.fetchone() is not None
         conn.commit()
         return ok
