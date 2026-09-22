@@ -23,6 +23,7 @@ except ImportError:
 import vk_api
 from vk_api.longpoll import VkLongPoll
 from openai import OpenAI
+
 from config import (
     VK_TOKEN,
     AI_TUNNEL_KEY,
@@ -46,34 +47,75 @@ vk = vk_session.get_api()
 ai_client = OpenAI(api_key=AI_TUNNEL_KEY, base_url=AI_BASE_URL)
 
 # ====================================================================
-# АВТОМАТИЧЕСКАЯ ТЕЛЕМЕТРИЯ И WATCHDOG В ТАБЛИЦУ
+# АВТОМАТИЧЕСКАЯ ТЕЛЕМЕТРИЯ И WATCHDOG (АДМИНКА + ТАБЛИЦА)
 # ====================================================================
 def send_heartbeat():
-    """Отправляет ежеминутный сигнал активности в ячейку H3 листа 'Контроль функционала'."""
+    """
+    Отправляет ежеминутный сигнал активности:
+    1. В локальную FastAPI веб-админку на порт 3000 (/api/heartbeat).
+    2. В Google Таблицу (если указан GOOGLE_SHEETS_URL).
+    """
+    local_port = int(os.environ.get("PORT", 3000))
+    local_url = f"http://127.0.0.1:{local_port}/api/heartbeat"
+    
+    # 1. Отправка в локальную админку
     try:
-        response = requests.post(GOOGLE_SHEETS_URL, json={"action": "heartbeat"}, timeout=10)
-        return response.json()
-    except Exception as e:
-        print(f"[WATCHDOG] Ошибка отправки сигнала активности: {e}")
-        return {"status": "ERROR", "message": str(e)}
+        requests.post(local_url, json={"bot_version": "6.5.0"}, timeout=3)
+    except Exception:
+        pass
+
+    # 2. Дублирование в Google Таблицу
+    if GOOGLE_SHEETS_URL:
+        try:
+            response = requests.post(GOOGLE_SHEETS_URL, json={"action": "heartbeat"}, timeout=10)
+            return response.json()
+        except Exception as e:
+            print(f"[WATCHDOG] Ошибка отправки сигнала активности в таблицу: {e}")
+            return {"status": "ERROR", "message": str(e)}
+
+    return {"status": "SUCCESS"}
 
 def report_module_health(module_num: int, status: str = "В строю", error_details: str = ""):
     """
-    Отправляет статус модуля (№1-19) на лист 'Контроль функционала'.
-    status: 'В строю', 'Требует внимания', 'Исправлено'.
+    Отправляет статус модуля (№1-19):
+    1. В локальную FastAPI веб-админку (/api/module_status).
+    2. В Google Таблицу (если указан GOOGLE_SHEETS_URL).
+    status: 'В строю', 'Требует внимания', 'Ошибка'.
     """
-    payload = {
-        "action": "update_module_status",
-        "module_num": module_num,
-        "status": status,
-        "error": str(error_details)[:300] if error_details else ""
-    }
+    local_port = int(os.environ.get("PORT", 3000))
+    local_url = f"http://127.0.0.1:{local_port}/api/module_status"
+    err_str = str(error_details)[:300] if error_details else ""
+
+    # 1. Отправка в локальную админку
     try:
-        response = requests.post(GOOGLE_SHEETS_URL, json=payload, timeout=15)
-        return response.json()
-    except Exception as e:
-        print(f"Ошибка отправки статуса модуля №{module_num}: {e}")
-        return {"status": "ERROR"}
+        requests.post(
+            local_url,
+            json={
+                "module_num": module_num,
+                "status": status,
+                "error_details": err_str
+            },
+            timeout=3
+        )
+    except Exception:
+        pass
+
+    # 2. Дублирование в Google Таблицу
+    if GOOGLE_SHEETS_URL:
+        payload = {
+            "action": "update_module_status",
+            "module_num": module_num,
+            "status": status,
+            "error": err_str
+        }
+        try:
+            response = requests.post(GOOGLE_SHEETS_URL, json=payload, timeout=10)
+            return response.json()
+        except Exception as e:
+            print(f"Ошибка отправки статуса модуля №{module_num} в таблицу: {e}")
+            return {"status": "ERROR"}
+
+    return {"status": "SUCCESS"}
 
 # ====================================================================
 # ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ДЛЯ РАБОТЫ С ФОТО
@@ -104,7 +146,7 @@ def send_vk_message(user_id, text, keyboard=None):
         kb_val = None
         if keyboard is not None:
             kb_val = keyboard.get_keyboard() if hasattr(keyboard, 'get_keyboard') else keyboard
-
+        
         if len(text) > max_len:
             parts = [text[i:i+max_len] for i in range(0, len(text), max_len)]
             for idx, part in enumerate(parts):
@@ -203,7 +245,6 @@ def transcribe_audio_with_ai(audio_url):
         response = requests.get(audio_url, timeout=20)
         if response.status_code != 200:
             return None
-
         with tempfile.NamedTemporaryFile(delete=False, suffix=".ogg") as temp_audio:
             temp_audio.write(response.content)
             temp_audio_path = temp_audio.name
@@ -213,7 +254,6 @@ def transcribe_audio_with_ai(audio_url):
                 model="whisper-1",
                 file=audio_file
             )
-
         os.remove(temp_audio_path)
         return transcript.text.strip()
     except Exception as e:
@@ -286,9 +326,8 @@ def normalize_receipt_items_with_ai(raw_items_list):
     )
     for it in raw_items_list:
         prompt += f"- {it}\n"
-    
     prompt += "\nВерни СТРОГО JSON-объект в формате: {\"Сырое название\": \"Очищенное существительное\"}"
-    
+
     try:
         response = ai_client.chat.completions.create(
             model="gpt-3.5-turbo",
@@ -538,8 +577,8 @@ def parse_bank_file_with_ai(file_url, file_ext):
                     cat_col = int(mapping.get("category_col_idx") or 0)
                     start_col = int(mapping.get("date_start_col_idx") or 1)
                     days_row = df.iloc[h_idx].values
-                    stop_words = ["план", "факт", "баланс", "итого", "максимум", "минимум", "средне", "осталось", "резерв", "долг"]
 
+                    stop_words = ["план", "факт", "баланс", "итого", "максимум", "минимум", "средне", "осталось", "резерв", "долг"]
                     for i in range(h_idx + 1, len(df)):
                         row = df.iloc[i].values
                         if cat_col >= len(row):
@@ -549,19 +588,21 @@ def parse_bank_file_with_ai(file_url, file_ext):
                             continue
                         if any(w in cat_name.lower() for w in stop_words):
                             continue
+
                         for col_idx in range(start_col, len(row)):
                             day_val = str(days_row[col_idx]).strip() if col_idx < len(days_row) else ""
                             amt = abs(_clean_amount(row[col_idx]))
                             if amt > 0 and day_val and day_val.lower() not in ["nan", "none"]:
                                 parsed_operations.append([f"{day_val} число ({sheet_name})", "Расход", amt, cat_name])
+
             except Exception as e_sheet:
                 print(f"Ошибка ИИ-маппинга листа {sheet_name}: {e_sheet}")
                 continue
 
         if not parsed_operations:
             return {"status": "ERROR", "message": "Не удалось найти финансовые операции в файле."}
-
         return {"status": "SUCCESS", "operations": parsed_operations}
+
     except Exception as e:
         print(f"Критическая ошибка парсинга: {e}")
         return {"status": "ERROR", "message": str(e)}
