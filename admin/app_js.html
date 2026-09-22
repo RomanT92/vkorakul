@@ -1,4 +1,5 @@
 <style>
+  /* Стили визуального перетаскивания Drag & Drop */
   .drag-over {
     border: 2px dashed #6366f1 !important;
     background-color: rgba(99, 102, 241, 0.1) !important;
@@ -10,77 +11,141 @@
 </style>
 
 <script>
+  // ====================================================================
+  // ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ СОСТОЯНИЯ ВЕБ-АДМИНКИ «ОРАКУЛ»
+  // ====================================================================
   let currentMainTab = 'catalog';
   let currentModerationMode = 'pending';
   let selectedIndices = new Set();
   let cachedData = [];
 
+  // Данные глобального каталога и дерева категорий
   let globalCatalog = [];
   let globalTreeData = {};
   let activeModalPayload = {};
   let draggedEntity = null;
 
+  // Данные телеметрии и мониторинга 19 модулей бота
   let healthModulesData = [];
   let healthPollingTimer = null;
 
+  /**
+   * Инициализация при полной загрузке DOM-дерева в браузере.
+   */
   window.onload = function() {
+    console.log('🔮 [Оракул Admin] Запуск клиентской логики и опрос сервисов...');
+    
+    // Первичная параллельная загрузка всех рабочих областей
     loadCatalog();
     loadModerationData();
     loadHealthData();
 
-    if (healthPollingTimer) clearInterval(healthPollingTimer);
+    // Запуск фонового сторожевого опроса телеметрии каждые 30 секунд
+    if (healthPollingTimer) {
+      clearInterval(healthPollingTimer);
+    }
+    
     healthPollingTimer = setInterval(function() {
       loadHealthData(true);
     }, 30000);
   };
 
+  /**
+   * Обновление верхнего индикатора статуса в шапке панели.
+   * @param {string} text - Текст текущего статуса.
+   */
   function setStatus(text) {
     const el = document.getElementById('statusIndicator');
-    if (el) el.innerHTML = `<i class="fa-solid fa-circle text-indigo-400 text-[9px] mr-1.5 animate-pulse"></i> ${text}`;
+    if (el) {
+      el.innerHTML = `<i class="fa-solid fa-circle text-indigo-400 text-[9px] mr-1.5 animate-pulse"></i> ${text}`;
+    }
   }
 
-  // ==============================================================
-  // НАВИГАЦИЯ МЕЖДУ ГЛАВНЫМИ ВКЛАДКАМИ
-  // ==============================================================
+  // ====================================================================
+  // 1. НАВИГАЦИЯ МЕЖДУ ГЛАВНЫМИ ВКЛАДКАМИ АДМИНКИ
+  // ====================================================================
+
+  /**
+   * Переключение между 4 базовыми экранами системы.
+   * @param {string} tab - 'catalog' | 'moderation' | 'health' | 'navigation'
+   */
   function switchMainTab(tab) {
     currentMainTab = tab;
-    document.getElementById('catalogTab').classList.toggle('hidden', tab !== 'catalog');
-    document.getElementById('moderationTab').classList.toggle('hidden', tab !== 'moderation');
-    document.getElementById('healthTab').classList.toggle('hidden', tab !== 'health');
-    document.getElementById('navigationTab').classList.toggle('hidden', tab !== 'navigation');
 
-    document.getElementById('mainTabCatalogBtn').className = tab === 'catalog'
-      ? "py-3 text-sm font-semibold border-b-2 border-indigo-500 text-indigo-400 flex items-center space-x-2 whitespace-nowrap"
-      : "py-3 text-sm font-semibold border-b-2 border-transparent text-slate-400 hover:text-slate-200 flex items-center space-x-2 whitespace-nowrap";
+    // Переключение видимости основных секций
+    const catalogEl = document.getElementById('catalogTab');
+    const moderationEl = document.getElementById('moderationTab');
+    const healthEl = document.getElementById('healthTab');
+    const navEl = document.getElementById('navigationTab');
 
-    document.getElementById('mainTabModBtn').className = tab === 'moderation'
-      ? "py-3 text-sm font-semibold border-b-2 border-indigo-500 text-indigo-400 flex items-center space-x-2 whitespace-nowrap"
-      : "py-3 text-sm font-semibold border-b-2 border-transparent text-slate-400 hover:text-slate-200 flex items-center space-x-2 whitespace-nowrap";
+    if (catalogEl) catalogEl.classList.toggle('hidden', tab !== 'catalog');
+    if (moderationEl) moderationEl.classList.toggle('hidden', tab !== 'moderation');
+    if (healthEl) healthEl.classList.toggle('hidden', tab !== 'health');
+    if (navEl) navEl.classList.toggle('hidden', tab !== 'navigation');
 
-    document.getElementById('mainTabHealthBtn').className = tab === 'health'
-      ? "py-3 text-sm font-semibold border-b-2 border-indigo-500 text-indigo-400 flex items-center space-x-2 whitespace-nowrap"
-      : "py-3 text-sm font-semibold border-b-2 border-transparent text-slate-400 hover:text-slate-200 flex items-center space-x-2 whitespace-nowrap";
+    // Стилизация активной кнопки вкладки «Глобальный эталон»
+    const btnCatalog = document.getElementById('mainTabCatalogBtn');
+    if (btnCatalog) {
+      btnCatalog.className = tab === 'catalog'
+        ? "py-3 text-sm font-semibold border-b-2 border-indigo-500 text-indigo-400 flex items-center space-x-2 whitespace-nowrap"
+        : "py-3 text-sm font-semibold border-b-2 border-transparent text-slate-400 hover:text-slate-200 flex items-center space-x-2 whitespace-nowrap";
+    }
 
-    document.getElementById('mainTabNavBtn').className = tab === 'navigation'
-      ? "py-3 text-sm font-semibold border-b-2 border-indigo-500 text-indigo-400 flex items-center space-x-2 whitespace-nowrap"
-      : "py-3 text-sm font-semibold border-b-2 border-transparent text-slate-400 hover:text-slate-200 flex items-center space-x-2 whitespace-nowrap";
+    // Стилизация активной кнопки вкладки «Модерация слов»
+    const btnMod = document.getElementById('mainTabModBtn');
+    if (btnMod) {
+      btnMod.className = tab === 'moderation'
+        ? "py-3 text-sm font-semibold border-b-2 border-indigo-500 text-indigo-400 flex items-center space-x-2 whitespace-nowrap"
+        : "py-3 text-sm font-semibold border-b-2 border-transparent text-slate-400 hover:text-slate-200 flex items-center space-x-2 whitespace-nowrap";
+    }
 
+    // Стилизация активной кнопки вкладки «Контроль функционала (19)»
+    const btnHealth = document.getElementById('mainTabHealthBtn');
+    if (btnHealth) {
+      btnHealth.className = tab === 'health'
+        ? "py-3 text-sm font-semibold border-b-2 border-indigo-500 text-indigo-400 flex items-center space-x-2 whitespace-nowrap"
+        : "py-3 text-sm font-semibold border-b-2 border-transparent text-slate-400 hover:text-slate-200 flex items-center space-x-2 whitespace-nowrap";
+    }
+
+    // Стилизация активной кнопки вкладки «Навигация и сервисы»
+    const btnNav = document.getElementById('mainTabNavBtn');
+    if (btnNav) {
+      btnNav.className = tab === 'navigation'
+        ? "py-3 text-sm font-semibold border-b-2 border-indigo-500 text-indigo-400 flex items-center space-x-2 whitespace-nowrap"
+        : "py-3 text-sm font-semibold border-b-2 border-transparent text-slate-400 hover:text-slate-200 flex items-center space-x-2 whitespace-nowrap";
+    }
+
+    // При входе на вкладку мониторинга — внеочередной опрос телеметрии
     if (tab === 'health') {
       loadHealthData();
     }
   }
 
-  // ==============================================================
-  // МОНИТОРИНГ ФУНКЦИОНАЛА И WATCHDOG
-  // ==============================================================
+  // ====================================================================
+  // 2. МОНИТОРИНГ ФУНКЦИОНАЛА И СТОРОЖЕВОЙ ТАЙМЕР (WATCHDOG)
+  // ====================================================================
+
+  /**
+   * Загрузка данных жизнедеятельности 19 модулей и статуса Heartbeat.
+   * @param {boolean} isSilent - Тихий режим без мерцания индикатора готовности.
+   */
   async function loadHealthData(isSilent = false) {
-    if (!isSilent) setStatus('Опрос телеметрии...');
+    if (!isSilent) {
+      setStatus('Опрос телеметрии...');
+    }
+
     try {
-      const res = await fetch('/api/health');
-      const data = await res.json();
+      const response = await fetch('/api/health');
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+
+      const data = await response.json();
+
       if (data.status === 'SUCCESS') {
         healthModulesData = data.modules || [];
 
+        // 1. Обновление верхнего общего индикатора связи
         const topBadge = document.getElementById('topConnectionBadge');
         if (topBadge) {
           if (data.connection_status === 'ONLINE') {
@@ -92,6 +157,7 @@
           }
         }
 
+        // 2. Обновление плашки связи на самой вкладке мониторинга
         const connEl = document.getElementById('healthConnectionStatus');
         const pingEl = document.getElementById('healthLastPing');
         const pulseIcon = document.getElementById('healthPulseIcon');
@@ -101,52 +167,86 @@
             connEl.innerText = "В СЕТИ";
             connEl.className = "text-xl font-bold text-emerald-400";
             pingEl.innerText = `Пинг: ${data.diff_seconds} сек. назад (v${data.bot_version})`;
-            pulseIcon.className = "w-2.5 h-2.5 rounded-full bg-emerald-400 animate-ping";
+            if (pulseIcon) {
+              pulseIcon.className = "w-2.5 h-2.5 rounded-full bg-emerald-400 animate-ping";
+            }
           } else {
             connEl.innerText = "ОБРЫВ СВЯЗИ";
             connEl.className = "text-xl font-bold text-rose-400";
             pingEl.innerText = data.last_heartbeat === 0 ? "Сигналов не поступало" : `Молчит > ${Math.floor(data.diff_seconds / 60)} мин.`;
-            pulseIcon.className = "w-2.5 h-2.5 rounded-full bg-rose-500";
+            if (pulseIcon) {
+              pulseIcon.className = "w-2.5 h-2.5 rounded-full bg-rose-500";
+            }
           }
         }
 
-        document.getElementById('healthTotalMods').innerText = data.total_modules;
-        document.getElementById('healthOperational').innerText = data.operational_count;
-        document.getElementById('healthAttention').innerText = data.attention_count;
-        document.getElementById('healthPercentage').innerText = data.readiness_percentage + '%';
-        document.getElementById('healthProgressBar').style.width = data.readiness_percentage + '%';
+        // 3. Обновление числовых карточек KPI
+        const totalModsEl = document.getElementById('healthTotalMods');
+        if (totalModsEl) totalModsEl.innerText = data.total_modules;
 
+        const opCountEl = document.getElementById('healthOperational');
+        if (opCountEl) opCountEl.innerText = data.operational_count;
+
+        const attCountEl = document.getElementById('healthAttention');
+        if (attCountEl) attCountEl.innerText = data.attention_count;
+
+        const pctEl = document.getElementById('healthPercentage');
+        if (pctEl) pctEl.innerText = data.readiness_percentage + '%';
+
+        const barEl = document.getElementById('healthProgressBar');
+        if (barEl) barEl.style.width = data.readiness_percentage + '%';
+
+        // 4. Отрисовка строк таблицы с учетом текущих фильтров
         applyHealthFilters();
-        if (!isSilent) setStatus('Готово');
+
+        if (!isSilent) {
+          setStatus('Готово');
+        }
       } else {
         if (!isSilent) setStatus('Сбой связи');
       }
     } catch (err) {
-      if (!isSilent) setStatus('Сбой связи');
+      console.error('Ошибка получения телеметрии:', err);
+      if (!isSilent) {
+        setStatus('Сбой сети');
+      }
     }
   }
 
+  /**
+   * Применение поискового запроса и фильтра по статусу к таблице модулей.
+   */
   function applyHealthFilters() {
-    const q = (document.getElementById('healthSearchInput') ? document.getElementById('healthSearchInput').value : '').toLowerCase().trim();
-    const statusFilter = document.getElementById('healthStatusFilter') ? document.getElementById('healthStatusFilter').value : 'ALL';
+    const searchInput = document.getElementById('healthSearchInput');
+    const filterSelect = document.getElementById('healthStatusFilter');
+
+    const q = searchInput ? searchInput.value.toLowerCase().trim() : '';
+    const statusFilter = filterSelect ? filterSelect.value : 'ALL';
 
     const filtered = healthModulesData.filter(m => {
+      const matchQ = !q || 
+        m.name.toLowerCase().includes(q) || 
+        m.files.toLowerCase().includes(q) || 
+        m.test_cmd.toLowerCase().includes(q);
 
-      const matchQ = !q || m.name.toLowerCase().includes(q) || m.files.toLowerCase().includes(q) || m.test_cmd.toLowerCase().includes(q);
-      const matchStatus = statusFilter === 'ALL' || m.status === statusFilter;
+      const matchStatus = (statusFilter === 'ALL') || (m.status === statusFilter);
       return matchQ && matchStatus;
     });
 
     renderHealthTable(filtered);
   }
 
+  /**
+   * Построчный рендеринг таблицы 19 функциональных модулей.
+   * @param {Array} modules - Отфильтрованный список модулей.
+   */
   function renderHealthTable(modules) {
     const tbody = document.getElementById('healthTableBody');
     if (!tbody) return;
     tbody.innerHTML = '';
 
     if (modules.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="7" class="px-4 py-8 text-center text-slate-500">Модули не найдены</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="7" class="px-4 py-8 text-center text-slate-500">Модули не найдены по заданным критериям</td></tr>';
       return;
     }
 
@@ -155,9 +255,13 @@
       tr.className = "hover:bg-slate-750 transition";
 
       let badgeClass = "bg-slate-700 text-slate-300 border-slate-600";
-      if (m.status === 'В строю') badgeClass = "bg-emerald-500/20 text-emerald-400 border-emerald-500/30";
-      else if (m.status === 'Нет связи') badgeClass = "bg-rose-500/20 text-rose-400 border-rose-500/30";
-      else if (m.status === 'Ошибка') badgeClass = "bg-amber-500/20 text-amber-400 border-amber-500/30";
+      if (m.status === 'В строю') {
+        badgeClass = "bg-emerald-500/20 text-emerald-400 border-emerald-500/30";
+      } else if (m.status === 'Нет связи') {
+        badgeClass = "bg-rose-500/20 text-rose-400 border-rose-500/30";
+      } else if (m.status === 'Ошибка' || m.status === 'Требует внимания') {
+        badgeClass = "bg-amber-500/20 text-amber-400 border-amber-500/30";
+      }
 
       const hasError = m.error && m.error.trim().length > 0;
 
@@ -174,7 +278,7 @@
         </td>
         <td class="px-4 py-3 text-right">
           ${hasError ? `
-            <button onclick="showHealthError(${m.num})" class="px-2 py-1 bg-rose-600/20 hover:bg-rose-600/40 text-rose-300 border border-rose-500/30 rounded text-xs">
+            <button onclick="showHealthError(${m.num})" class="px-2 py-1 bg-rose-600/20 hover:bg-rose-600/40 text-rose-300 border border-rose-500/30 rounded text-xs transition">
               <i class="fa-solid fa-bug mr-1"></i> Ошибка
             </button>
           ` : `
@@ -186,37 +290,58 @@
     });
   }
 
+  /**
+   * Отображение модального окна с логом и деталями ошибки модуля.
+   * @param {number} moduleNum - Порядковый номер модуля (1..19).
+   */
   function showHealthError(moduleNum) {
     const mod = healthModulesData.find(x => x.num === moduleNum);
     if (!mod) return;
-    document.getElementById('modalHealthTitle').innerText = `Сбой модуля №${mod.num}: ${mod.name}`;
-    document.getElementById('modalHealthFiles').innerText = mod.files;
-    document.getElementById('modalHealthDetails').innerText = mod.error || "Детали ошибки не зафиксированы.";
-    document.getElementById('modalHealthError').classList.remove('hidden');
+
+    const titleEl = document.getElementById('modalHealthTitle');
+    const filesEl = document.getElementById('modalHealthFiles');
+    const detailsEl = document.getElementById('modalHealthDetails');
+    const modalEl = document.getElementById('modalHealthError');
+
+    if (titleEl) titleEl.innerText = `Сбой модуля №${mod.num}: ${mod.name}`;
+    if (filesEl) filesEl.innerText = mod.files;
+    if (detailsEl) detailsEl.innerText = mod.error || "Детали ошибки не зафиксированы.";
+    if (modalEl) modalEl.classList.remove('hidden');
   }
 
+  /**
+   * Отправка команды принудительного сквозного автотестирования всех 19 модулей.
+   */
   async function triggerSelfTestBtn() {
-    if (!confirm('Запустить полный комплекс автоматического тестирования 19 модулей?')) return;
+    if (!confirm('Запустить полный комплекс автоматического тестирования всех 19 модулей бота?')) {
+      return;
+    }
+
     setStatus('Отправка команды тестов...');
     try {
       const res = await fetch('/api/trigger_test', { method: 'POST' });
       const data = await res.json();
-      alert(data.message || 'Команда отправлена');
+      alert(data.message || 'Команда тестирования успешно зарегистрирована');
       setStatus('Готово');
     } catch (err) {
-      alert('Ошибка отправки: ' + err.toString());
+      alert('Ошибка отправки команды тестирования: ' + err.toString());
       setStatus('Сбой');
     }
   }
 
-  // ==============================================================
-  // ЭТАЛОН И ДЕРЕВО КАТАЛОГА
-  // ==============================================================
+  // ====================================================================
+  // 3. ЭТАЛОН И ДЕРЕВО КАТАЛОГА (GLOBAL_DICTIONARY)
+  // ====================================================================
+
+  /**
+   * Полная асинхронная загрузка каталога эталона из PostgreSQL.
+   */
   async function loadCatalog() {
     setStatus('Загрузка эталона...');
     try {
       const res = await fetch('/api/catalog');
       const data = await res.json();
+
       if (data.status === 'SUCCESS') {
         globalCatalog = data.items || [];
         globalTreeData = data.tree || {};
@@ -226,32 +351,49 @@
         applyCatalogFilters();
         setStatus('Готово');
       } else {
-        alert('Ошибка: ' + data.message);
+        alert('Ошибка загрузки каталога: ' + data.message);
         setStatus('Сбой');
       }
     } catch (err) {
+      console.error('Ошибка загрузки эталона:', err);
       setStatus('Сбой сети');
     }
   }
 
+  /**
+   * Подгрузка агрегированных метрик базы (категории, статьи, синонимы).
+   */
   async function loadSystemStats() {
     try {
       const res = await fetch('/api/stats');
       const data = await res.json();
       if (data.status === 'SUCCESS') {
-        document.getElementById('statCats').innerText = data.stats.categories;
-        document.getElementById('statSubs').innerText = data.stats.subcategories;
-        document.getElementById('statArts').innerText = data.stats.articles;
-        document.getElementById('statSyns').innerText = data.stats.synonyms;
+        const stats = data.stats;
+        const elCat = document.getElementById('statCats');
+        const elSub = document.getElementById('statSubs');
+        const elArt = document.getElementById('statArts');
+        const elSyn = document.getElementById('statSyns');
+
+        if (elCat) elCat.innerText = stats.categories;
+        if (elSub) elSub.innerText = stats.subcategories;
+        if (elArt) elArt.innerText = stats.articles;
+        if (elSyn) elSyn.innerText = stats.synonyms;
       }
-    } catch (e) {}
+    } catch (e) {
+      console.error('Ошибка получения сводных статистик:', e);
+    }
   }
 
+  /**
+   * Заполнение выпадающего списка категорий для фильтрации.
+   */
   function populateCatalogCatSelect() {
     const sel = document.getElementById('catalogFilterCat');
     if (!sel) return;
+
     const cats = Array.from(new Set(globalCatalog.map(x => x.category))).sort();
     sel.innerHTML = '<option value="ALL">Все категории</option>';
+
     cats.forEach(c => {
       const opt = document.createElement('option');
       opt.value = c;
@@ -260,29 +402,56 @@
     });
   }
 
+  /**
+   * Переключение режима отображения эталона: Дерево (Drag & Drop) / Таблица.
+   * @param {string} mode - 'tree' | 'table'
+   */
   function setCatalogView(mode) {
-    const isTree = mode === 'tree';
-    document.getElementById('catalogTreeContainer').classList.toggle('hidden', !isTree);
-    document.getElementById('catalogTableContainer').classList.toggle('hidden', isTree);
+    const isTree = (mode === 'tree');
+    const treeContainer = document.getElementById('catalogTreeContainer');
+    const tableContainer = document.getElementById('catalogTableContainer');
 
-    document.getElementById('btnViewTree').className = isTree
-      ? "px-3 py-1.5 text-xs font-semibold rounded-md bg-indigo-600 text-white shadow-sm transition"
-      : "px-3 py-1.5 text-xs font-semibold rounded-md text-slate-400 hover:text-white transition";
+    if (treeContainer) treeContainer.classList.toggle('hidden', !isTree);
+    if (tableContainer) tableContainer.classList.toggle('hidden', isTree);
 
-    document.getElementById('btnViewTable').className = !isTree
-      ? "px-3 py-1.5 text-xs font-semibold rounded-md bg-indigo-600 text-white shadow-sm transition"
-      : "px-3 py-1.5 text-xs font-semibold rounded-md text-slate-400 hover:text-white transition";
+    const btnTree = document.getElementById('btnViewTree');
+    const btnTable = document.getElementById('btnViewTable');
+
+    if (btnTree) {
+      btnTree.className = isTree
+        ? "px-3 py-1.5 text-xs font-semibold rounded-md bg-indigo-600 text-white shadow-sm transition"
+        : "px-3 py-1.5 text-xs font-semibold rounded-md text-slate-400 hover:text-white transition";
+    }
+
+    if (btnTable) {
+      btnTable.className = !isTree
+        ? "px-3 py-1.5 text-xs font-semibold rounded-md bg-indigo-600 text-white shadow-sm transition"
+        : "px-3 py-1.5 text-xs font-semibold rounded-md text-slate-400 hover:text-white transition";
+    }
   }
 
+  /**
+   * Фильтрация элементов каталога по тексту, типу (Расход/Доход) и категории.
+   */
   function applyCatalogFilters() {
-    const q = document.getElementById('catalogSearch').value.toLowerCase().trim();
-    const typeFilter = document.getElementById('catalogFilterType').value;
-    const catFilter = document.getElementById('catalogFilterCat').value;
+    const searchEl = document.getElementById('catalogSearch');
+    const typeEl = document.getElementById('catalogFilterType');
+    const catEl = document.getElementById('catalogFilterCat');
+
+    const q = searchEl ? searchEl.value.toLowerCase().trim() : '';
+    const typeFilter = typeEl ? typeEl.value : 'ALL';
+    const catFilter = catEl ? catEl.value : 'ALL';
 
     const filtered = globalCatalog.filter(item => {
-      const matchesQ = !q || item.article.toLowerCase().includes(q) || item.category.toLowerCase().includes(q) || item.subcategory.toLowerCase().includes(q) || item.synonyms.toLowerCase().includes(q);
-      const matchesType = typeFilter === "ALL" || item.type === typeFilter;
-      const matchesCat = catFilter === "ALL" || item.category === catFilter;
+      const matchesQ = !q || 
+        item.article.toLowerCase().includes(q) || 
+        item.category.toLowerCase().includes(q) || 
+        item.subcategory.toLowerCase().includes(q) || 
+        item.synonyms.toLowerCase().includes(q);
+
+      const matchesType = (typeFilter === "ALL") || (item.type === typeFilter);
+      const matchesCat = (catFilter === "ALL") || (item.category === catFilter);
+
       return matchesQ && matchesType && matchesCat;
     });
 
@@ -290,6 +459,10 @@
     renderCatalogTree(filtered);
   }
 
+  /**
+   * Отрисовка плоской таблицы каталога.
+   * @param {Array} rows - Строки каталога.
+   */
   function renderCatalogTable(rows) {
     const tbody = document.getElementById('catalogTableBody');
     if (!tbody) return;
@@ -303,6 +476,7 @@
     rows.forEach(item => {
       const tr = document.createElement('tr');
       tr.className = "hover:bg-slate-750 transition";
+
       const badge = item.type === "Доход"
         ? `<span class="bg-emerald-500/20 text-emerald-400 px-2 py-0.5 rounded text-xs border border-emerald-500/30">Доход</span>`
         : `<span class="bg-slate-700 text-slate-300 px-2 py-0.5 rounded text-xs border border-slate-600">Расход</span>`;
@@ -323,6 +497,11 @@
     });
   }
 
+  /**
+   * Интерактивное построение иерархического дерева Drag & Drop.
+   * ПО УМОЛЧАНИЮ ВСЕ КАТЕГОРИИ СВЁРНУТЫ (.hidden, rotate(-90deg)).
+   * @param {Array|null} filteredItems - Набор отфильтрованных элементов.
+   */
   function renderCatalogTree(filteredItems = null) {
     const container = document.getElementById('catalogTreeContainer');
     if (!container) return;
@@ -372,14 +551,18 @@
         const catBlock = document.createElement('div');
         catBlock.className = "border border-slate-700/80 rounded-xl bg-slate-850/70 p-4 space-y-3 transition";
 
+        // Drag & Drop события контейнера категории
         catBlock.ondragover = (e) => onDragOverContainer(e, catBlock);
         catBlock.ondragleave = () => onDragLeaveContainer(catBlock);
         catBlock.ondrop = (e) => onDropOnCategory(e, opType, catName, catBlock);
 
+        // КАТЕГОРИЯ ПО УМОЛЧАНИЮ СВЁРНУТА:
+        // Стрелка: style="transform: rotate(-90deg);"
+        // Список подкатегорий: класс "hidden"
         catBlock.innerHTML = `
           <div class="flex items-center justify-between">
             <div class="flex items-center gap-2 cursor-pointer select-none" onclick="toggleSection(this)">
-              <i class="fa-solid fa-chevron-down text-slate-400 text-xs transition-transform transform"></i>
+              <i class="fa-solid fa-chevron-down text-slate-400 text-xs transition-transform transform" style="transform: rotate(-90deg);"></i>
               <span class="text-indigo-400 font-mono text-sm">📁</span>
               <span class="font-bold text-white text-sm">${catName}</span>
               <span class="text-xs text-slate-400 font-normal">(${subKeys.length} подкат.)</span>
@@ -390,7 +573,7 @@
               <button onclick="promptDelete('category', '${opType}', '${catName}')" class="p-1.5 text-slate-400 hover:text-rose-400 rounded text-xs" title="Удалить категорию"><i class="fa-solid fa-trash"></i></button>
             </div>
           </div>
-          <div class="pl-4 border-l-2 border-slate-700/80 space-y-3 subcategories-list"></div>
+          <div class="pl-4 border-l-2 border-slate-700/80 space-y-3 subcategories-list hidden"></div>
         `;
         typeBody.appendChild(catBlock);
 
@@ -402,6 +585,8 @@
           const subCard = document.createElement('div');
           subCard.className = "bg-slate-800 p-3 rounded-lg border border-slate-700 shadow-xs space-y-2.5 transition";
           subCard.draggable = true;
+
+          // Drag & Drop события подкатегории
           subCard.ondragstart = (e) => onDragStartSubcategory(e, opType, catName, subName, subCard);
           subCard.ondragend = () => onDragEnd(subCard);
           subCard.ondragover = (e) => onDragOverContainer(e, subCard);
@@ -442,20 +627,28 @@
     }
   }
 
+  /**
+   * Сворачивание и разворачивание ветки категории при клике на заголовок.
+   * @param {HTMLElement} headerElem - Заголовочный элемент категории.
+   */
   function toggleSection(headerElem) {
     const catBlock = headerElem.closest('.border');
+    if (!catBlock) return;
+
     const subList = catBlock.querySelector('.subcategories-list');
     const icon = headerElem.querySelector('.fa-chevron-down');
     if (!subList) return;
+
     const isHidden = subList.classList.toggle('hidden');
     if (icon) {
       icon.style.transform = isHidden ? 'rotate(-90deg)' : 'rotate(0deg)';
     }
   }
 
-  // ==============================================================
-  // DRAG AND DROP
-  // ==============================================================
+  // ====================================================================
+  // 4. ОБРАБОТЧИКИ DRAG & DROP
+  // ====================================================================
+
   function onDragStartArticle(e, type, category, subcategory, article, elem) {
     draggedEntity = { level: 'article', type, category, subcategory, article };
     elem.classList.add('dragging');
@@ -511,7 +704,7 @@
       if (data.status === "SUCCESS") {
         loadCatalog();
       } else {
-        alert('Ошибка: ' + data.message);
+        alert('Ошибка перемещения: ' + data.message);
       }
     } catch (err) {
       alert('Ошибка сети: ' + err.toString());
@@ -545,33 +738,44 @@
       if (data.status === "SUCCESS") {
         loadCatalog();
       } else {
-        alert('Ошибка: ' + data.message);
+        alert('Ошибка перемещения: ' + data.message);
       }
     } catch (err) {
       alert('Ошибка сети: ' + err.toString());
     }
   }
 
-  // ==============================================================
-  // ДЕЙСТВИЯ: СОЗДАНИЕ, ПЕРЕИМЕНОВАНИЕ, УДАЛЕНИЕ, ПЕРЕНОС
-  // ==============================================================
+  // ====================================================================
+  // 5. ДЕЙСТВИЯ КАТАЛОГА: СОЗДАНИЕ, ПЕРЕИМЕНОВАНИЕ, УДАЛЕНИЕ, ПЕРЕНОС
+  // ====================================================================
+
   function openCreateModal(level = 'article', type = 'Расход', cat = '', sub = '') {
-    document.getElementById('createLevel').value = level;
-    document.getElementById('createType').value = type;
+    const levelEl = document.getElementById('createLevel');
+    const typeEl = document.getElementById('createType');
+
+    if (levelEl) levelEl.value = level;
+    if (typeEl) typeEl.value = type;
+
     updateCreateModalFields();
 
     if (cat) {
-      document.getElementById('createCatSelect').value = cat;
+      const catSelect = document.getElementById('createCatSelect');
+      if (catSelect) catSelect.value = cat;
       syncCreateSubcategorySelect();
       if (sub) {
-        document.getElementById('createSubSelect').value = sub;
+        const subSelect = document.getElementById('createSubSelect');
+        if (subSelect) subSelect.value = sub;
       }
     }
-    document.getElementById('modalCreate').classList.remove('hidden');
+
+    const modal = document.getElementById('modalCreate');
+    if (modal) modal.classList.remove('hidden');
   }
 
   function updateCreateModalFields() {
-    const lvl = document.getElementById('createLevel').value;
+    const levelEl = document.getElementById('createLevel');
+    const lvl = levelEl ? levelEl.value : 'article';
+
     syncCreateCategorySelect();
 
     const catInput = document.getElementById('createCatInput');
@@ -582,32 +786,35 @@
     const synsContainer = document.getElementById('createSynsContainer');
 
     if (lvl === 'category') {
-      catInput.classList.remove('hidden');
-      catSelectWrapper.classList.add('hidden');
-      subInput.classList.remove('hidden');
-      subSelectWrapper.classList.add('hidden');
-      artContainer.classList.add('hidden');
-      synsContainer.classList.add('hidden');
+      if (catInput) catInput.classList.remove('hidden');
+      if (catSelectWrapper) catSelectWrapper.classList.add('hidden');
+      if (subInput) subInput.classList.remove('hidden');
+      if (subSelectWrapper) subSelectWrapper.classList.add('hidden');
+      if (artContainer) artContainer.classList.add('hidden');
+      if (synsContainer) synsContainer.classList.add('hidden');
     } else if (lvl === 'subcategory') {
-      catInput.classList.add('hidden');
-      catSelectWrapper.classList.remove('hidden');
-      subInput.classList.remove('hidden');
-      subSelectWrapper.classList.add('hidden');
-      artContainer.classList.add('hidden');
-      synsContainer.classList.add('hidden');
+      if (catInput) catInput.classList.add('hidden');
+      if (catSelectWrapper) catSelectWrapper.classList.remove('hidden');
+      if (subInput) subInput.classList.remove('hidden');
+      if (subSelectWrapper) subSelectWrapper.classList.add('hidden');
+      if (artContainer) artContainer.classList.add('hidden');
+      if (synsContainer) synsContainer.classList.add('hidden');
     } else {
-      catInput.classList.add('hidden');
-      catSelectWrapper.classList.remove('hidden');
-      subInput.classList.add('hidden');
-      subSelectWrapper.classList.remove('hidden');
-      artContainer.classList.remove('hidden');
-      synsContainer.classList.remove('hidden');
+      if (catInput) catInput.classList.add('hidden');
+      if (catSelectWrapper) catSelectWrapper.classList.remove('hidden');
+      if (subInput) subInput.classList.add('hidden');
+      if (subSelectWrapper) subSelectWrapper.classList.remove('hidden');
+      if (artContainer) artContainer.classList.remove('hidden');
+      if (synsContainer) synsContainer.classList.remove('hidden');
     }
   }
 
   function syncCreateCategorySelect() {
-    const type = document.getElementById('createType').value;
+    const typeEl = document.getElementById('createType');
+    const type = typeEl ? typeEl.value : 'Расход';
     const select = document.getElementById('createCatSelect');
+    if (!select) return;
+
     select.innerHTML = '';
     const cats = Object.keys(globalTreeData[type] || {}).sort();
     cats.forEach(c => {
@@ -616,13 +823,18 @@
       opt.innerText = c;
       select.appendChild(opt);
     });
+
     syncCreateSubcategorySelect();
   }
 
   function syncCreateSubcategorySelect() {
-    const type = document.getElementById('createType').value;
-    const cat = document.getElementById('createCatSelect').value;
+    const typeEl = document.getElementById('createType');
+    const type = typeEl ? typeEl.value : 'Расход';
+    const catSelect = document.getElementById('createCatSelect');
+    const cat = catSelect ? catSelect.value : '';
     const select = document.getElementById('createSubSelect');
+    if (!select) return;
+
     select.innerHTML = '';
     const subs = Object.keys((globalTreeData[type] || {})[cat] || {}).sort();
     subs.forEach(s => {
@@ -636,16 +848,26 @@
   async function submitCreateEntity() {
     const lvl = document.getElementById('createLevel').value;
     const type = document.getElementById('createType').value;
-    const cat = lvl === 'category'
+    const cat = (lvl === 'category')
       ? document.getElementById('createCatInput').value
       : document.getElementById('createCatSelect').value;
+
     const sub = (lvl === 'category' || lvl === 'subcategory')
       ? document.getElementById('createSubInput').value
       : document.getElementById('createSubSelect').value;
+
     const art = document.getElementById('createArtInput').value;
     const syns = document.getElementById('createSynsInput').value;
 
-    const payload = { level: lvl, type, category: cat, subcategory: sub, article: art, synonyms: syns };
+    const payload = { 
+      level: lvl, 
+      type: type, 
+      category: cat, 
+      subcategory: sub, 
+      article: art, 
+      synonyms: syns 
+    };
+
     setStatus('Создание...');
     try {
       const res = await fetch('/api/catalog/create', {
@@ -658,7 +880,7 @@
         closeModal('modalCreate');
         loadCatalog();
       } else {
-        alert('Ошибка: ' + data.message);
+        alert('Ошибка создания: ' + data.message);
       }
     } catch (err) {
       alert('Ошибка сети: ' + err.toString());
@@ -667,14 +889,25 @@
 
   function promptRename(level, type, category, subcategory, oldName) {
     activeModalPayload = { level, type, category, subcategory, oldName };
-    document.getElementById('modalRenameTitle').innerText = `Переименовать ${level === 'category' ? 'категорию' : level === 'subcategory' ? 'подкатегорию' : 'статью'}`;
-    document.getElementById('modalRenameInput').value = oldName;
-    document.getElementById('modalRename').classList.remove('hidden');
+    const titleEl = document.getElementById('modalRenameTitle');
+    const inputEl = document.getElementById('modalRenameInput');
+
+    if (titleEl) {
+      titleEl.innerText = `Переименовать ${level === 'category' ? 'категорию' : level === 'subcategory' ? 'подкатегорию' : 'статью'}`;
+    }
+    if (inputEl) {
+      inputEl.value = oldName;
+    }
+
+    const modal = document.getElementById('modalRename');
+    if (modal) modal.classList.remove('hidden');
   }
 
   async function submitRenameEntity() {
-    const newName = document.getElementById('modalRenameInput').value.trim();
+    const inputEl = document.getElementById('modalRenameInput');
+    const newName = inputEl ? inputEl.value.trim() : '';
     if (!newName) return;
+
     activeModalPayload.newName = newName;
 
     setStatus('Сохранение...');
@@ -689,7 +922,7 @@
         closeModal('modalRename');
         loadCatalog();
       } else {
-        alert('Ошибка: ' + data.message);
+        alert('Ошибка переименования: ' + data.message);
       }
     } catch (err) {
       alert('Ошибка сети: ' + err.toString());
@@ -701,7 +934,9 @@
       : level === 'subcategory' ? `ПОДКАТЕГОРИЮ «${subcategory}» со всеми статьями`
       : `СТАТЬЮ «${article}»`;
 
-    if (!confirm(`Вы уверены, что хотите удалить ${title}?`)) return;
+    if (!confirm(`Вы уверены, что хотите удалить ${title}?`)) {
+      return;
+    }
 
     const payload = { level, type, category, subcategory, article };
     setStatus('Удаление...');
@@ -715,7 +950,7 @@
       if (data.status === "SUCCESS") {
         loadCatalog();
       } else {
-        alert('Ошибка: ' + data.message);
+        alert('Ошибка удаления: ' + data.message);
       }
     } catch (err) {
       alert('Ошибка сети: ' + err.toString());
@@ -724,31 +959,42 @@
 
   function promptMove(level, type, category, subcategory, article = '') {
     activeModalPayload = { level, type, fromCategory: category, fromSubcategory: subcategory, article };
-    document.getElementById('modalMoveTitle').innerText = `Переместить ${level === 'subcategory' ? 'подкатегорию ' + subcategory : 'статью ' + article}`;
+    const titleEl = document.getElementById('modalMoveTitle');
+    if (titleEl) {
+      titleEl.innerText = `Переместить ${level === 'subcategory' ? 'подкатегорию ' + subcategory : 'статью ' + article}`;
+    }
 
     const catSelect = document.getElementById('modalMoveCatSelect');
-    catSelect.innerHTML = '';
-    const cats = Object.keys(globalTreeData[type] || {}).sort();
-    cats.forEach(c => {
-      const opt = document.createElement('option');
-      opt.value = c;
-      opt.innerText = c;
-      catSelect.appendChild(opt);
-    });
+    if (catSelect) {
+      catSelect.innerHTML = '';
+      const cats = Object.keys(globalTreeData[type] || {}).sort();
+      cats.forEach(c => {
+        const opt = document.createElement('option');
+        opt.value = c;
+        opt.innerText = c;
+        catSelect.appendChild(opt);
+      });
+    }
 
+    const subWrapper = document.getElementById('modalMoveSubWrapper');
     if (level === 'subcategory') {
-      document.getElementById('modalMoveSubWrapper').classList.add('hidden');
+      if (subWrapper) subWrapper.classList.add('hidden');
     } else {
-      document.getElementById('modalMoveSubWrapper').classList.remove('hidden');
+      if (subWrapper) subWrapper.classList.remove('hidden');
       syncMoveSubcategorySelect();
     }
-    document.getElementById('modalMove').classList.remove('hidden');
+
+    const modal = document.getElementById('modalMove');
+    if (modal) modal.classList.remove('hidden');
   }
 
   function syncMoveSubcategorySelect() {
     const type = activeModalPayload.type;
-    const cat = document.getElementById('modalMoveCatSelect').value;
+    const catSelect = document.getElementById('modalMoveCatSelect');
+    const cat = catSelect ? catSelect.value : '';
     const subSelect = document.getElementById('modalMoveSubSelect');
+    if (!subSelect) return;
+
     subSelect.innerHTML = '';
     const subs = Object.keys((globalTreeData[type] || {})[cat] || {}).sort();
     subs.forEach(s => {
@@ -760,9 +1006,12 @@
   }
 
   async function submitMoveEntity() {
-    activeModalPayload.toCategory = document.getElementById('modalMoveCatSelect').value;
+    const catSelect = document.getElementById('modalMoveCatSelect');
+    activeModalPayload.toCategory = catSelect ? catSelect.value : '';
+
     if (activeModalPayload.level === 'article') {
-      activeModalPayload.toSubcategory = document.getElementById('modalMoveSubSelect').value;
+      const subSelect = document.getElementById('modalMoveSubSelect');
+      activeModalPayload.toSubcategory = subSelect ? subSelect.value : '';
     }
 
     setStatus('Перемещение...');
@@ -777,7 +1026,7 @@
         closeModal('modalMove');
         loadCatalog();
       } else {
-        alert('Ошибка: ' + data.message);
+        alert('Ошибка перемещения: ' + data.message);
       }
     } catch (err) {
       alert('Ошибка сети: ' + err.toString());
@@ -785,26 +1034,38 @@
   }
 
   function closeModal(id) {
-    document.getElementById(id).classList.add('hidden');
+    const modal = document.getElementById(id);
+    if (modal) modal.classList.add('hidden');
   }
 
-  // ==============================================================
-  // МОДЕРАЦИЯ СЛОВ И КОРЗИНА
-  // ==============================================================
+  // ====================================================================
+  // 6. МОДЕРАЦИЯ НОВЫХ СЛОВ ПОЛЬЗОВАТЕЛЕЙ (USER_DICTIONARY) И КОРЗИНА
+  // ====================================================================
+
   function switchModerationTab(mode) {
     currentModerationMode = mode;
     selectedIndices.clear();
 
-    document.getElementById('subTabPendingBtn').className = mode === 'pending'
-      ? "px-4 py-2 text-sm font-semibold rounded-lg bg-indigo-600 text-white shadow"
-      : "px-4 py-2 text-sm font-semibold rounded-lg bg-slate-800 text-slate-400 hover:text-white";
+    const btnPending = document.getElementById('subTabPendingBtn');
+    const btnTrash = document.getElementById('subTabTrashBtn');
 
-    document.getElementById('subTabTrashBtn').className = mode === 'trash'
-      ? "px-4 py-2 text-sm font-semibold rounded-lg bg-rose-700 text-white shadow"
-      : "px-4 py-2 text-sm font-semibold rounded-lg bg-slate-800 text-slate-400 hover:text-white";
+    if (btnPending) {
+      btnPending.className = (mode === 'pending')
+        ? "px-4 py-2 text-sm font-semibold rounded-lg bg-indigo-600 text-white shadow flex items-center space-x-2"
+        : "px-4 py-2 text-sm font-semibold rounded-lg bg-slate-800 text-slate-400 hover:text-white flex items-center space-x-2";
+    }
 
-    document.getElementById('pendingActionButtons').classList.toggle('hidden', mode !== 'pending');
-    document.getElementById('trashActionButtons').classList.toggle('hidden', mode !== 'trash');
+    if (btnTrash) {
+      btnTrash.className = (mode === 'trash')
+        ? "px-4 py-2 text-sm font-semibold rounded-lg bg-rose-700 text-white shadow flex items-center space-x-2"
+        : "px-4 py-2 text-sm font-semibold rounded-lg bg-slate-800 text-slate-400 hover:text-white flex items-center space-x-2";
+    }
+
+    const pendingActions = document.getElementById('pendingActionButtons');
+    const trashActions = document.getElementById('trashActionButtons');
+
+    if (pendingActions) pendingActions.classList.toggle('hidden', mode !== 'pending');
+    if (trashActions) trashActions.classList.toggle('hidden', mode !== 'trash');
 
     loadModerationData();
   }
@@ -812,24 +1073,29 @@
   async function loadModerationData() {
     setStatus('Загрузка списка...');
     selectedIndices.clear();
-    const endpoint = currentModerationMode === 'pending' ? '/api/words/pending' : '/api/words/trash';
+    const endpoint = (currentModerationMode === 'pending') ? '/api/words/pending' : '/api/words/trash';
 
     try {
       const res = await fetch(endpoint);
       const data = await res.json();
+
       if (data.status === 'SUCCESS') {
         cachedData = data.rows || [];
-        if (currentModerationMode === 'pending') {
-          document.getElementById('userWordsBadge').innerText = cachedData.length;
-        } else {
-          document.getElementById('trashWordsBadge').innerText = cachedData.length;
+
+        const userWordsBadge = document.getElementById('userWordsBadge');
+        const trashWordsBadge = document.getElementById('trashWordsBadge');
+
+        if (currentModerationMode === 'pending' && userWordsBadge) {
+          userWordsBadge.innerText = cachedData.length;
+        } else if (trashWordsBadge) {
+          trashWordsBadge.innerText = cachedData.length;
         }
 
         let html = '';
         cachedData.forEach(row => {
-          html += `<tr class="hover:bg-slate-750">
+          html += `<tr class="hover:bg-slate-750 transition">
             <td class="px-4 py-2.5 text-center">
-              <input type="checkbox" onchange="toggleRowSelection(${row.id}, this.checked)" class="rounded bg-slate-700 border-slate-600 text-indigo-500">
+              <input type="checkbox" onchange="toggleRowSelection(${row.id}, this.checked)" class="rounded bg-slate-700 border-slate-600 text-indigo-500 focus:ring-0">
             </td>
             <td class="px-4 py-2.5"><span class="px-2 py-0.5 text-xs rounded ${row.type === 'Доход' ? 'bg-emerald-500/20 text-emerald-400' : 'bg-rose-500/20 text-rose-400'}">${row.type}</span></td>
             <td class="px-4 py-2.5 text-slate-300">${row.category || '—'}</td>
@@ -838,10 +1104,16 @@
             <td class="px-4 py-2.5 text-indigo-300 font-mono text-xs">${row.synonym}</td>
           </tr>`;
         });
-        document.getElementById('moderationTableBody').innerHTML = html || '<tr><td colspan="6" class="text-center py-6 text-slate-500">Записей нет</td></tr>';
+
+        const tbody = document.getElementById('moderationTableBody');
+        if (tbody) {
+          tbody.innerHTML = html || '<tr><td colspan="6" class="text-center py-6 text-slate-500">Записей нет</td></tr>';
+        }
+
         setStatus('Готово');
       }
     } catch (err) {
+      console.error('Ошибка загрузки модерации:', err);
       setStatus('Сбой сети');
     }
   }
@@ -856,12 +1128,17 @@
     const checkboxes = document.querySelectorAll('#moderationTableBody input[type="checkbox"]');
     checkboxes.forEach((cb, i) => {
       cb.checked = checked;
-      if (checked && cachedData[i]) selectedIndices.add(cachedData[i].id);
+      if (checked && cachedData[i]) {
+        selectedIndices.add(cachedData[i].id);
+      }
     });
   }
 
   async function deleteSelectedWords() {
-    if (selectedIndices.size === 0) return alert('Выберите хотя бы одну запись');
+    if (selectedIndices.size === 0) {
+      return alert('Выберите хотя бы одну запись для удаления');
+    }
+
     setStatus('Перемещение в корзину...');
     try {
       const res = await fetch('/api/words/trash', {
@@ -873,7 +1150,7 @@
       if (data.status === "SUCCESS") {
         loadModerationData();
       } else {
-        alert('Ошибка: ' + data.message);
+        alert('Ошибка удаления: ' + data.message);
       }
     } catch (err) {
       alert('Ошибка сети: ' + err.toString());
@@ -881,7 +1158,10 @@
   }
 
   async function restoreSelectedWords() {
-    if (selectedIndices.size === 0) return alert('Выберите хотя бы одну запись');
+    if (selectedIndices.size === 0) {
+      return alert('Выберите хотя бы одну запись для восстановления');
+    }
+
     setStatus('Восстановление...');
     try {
       const res = await fetch('/api/words/restore', {
@@ -893,7 +1173,7 @@
       if (data.status === "SUCCESS") {
         loadModerationData();
       } else {
-        alert('Ошибка: ' + data.message);
+        alert('Ошибка восстановления: ' + data.message);
       }
     } catch (err) {
       alert('Ошибка сети: ' + err.toString());
@@ -901,7 +1181,10 @@
   }
 
   async function approveSelectedWords() {
-    if (selectedIndices.size === 0) return alert('Выберите хотя бы одну запись');
+    if (selectedIndices.size === 0) {
+      return alert('Выберите хотя бы одну запись для одобрения');
+    }
+
     setStatus('Одобрение...');
     try {
       const res = await fetch('/api/words/approve', {
@@ -914,7 +1197,7 @@
         loadModerationData();
         loadCatalog();
       } else {
-        alert('Ошибка: ' + data.message);
+        alert('Ошибка одобрения: ' + data.message);
       }
     } catch (err) {
       alert('Ошибка сети: ' + err.toString());
