@@ -18,7 +18,6 @@ app = FastAPI(title="Оракул Admin | FastAPI Backend")
 # ====================================================================
 admin_dir = Path(__file__).resolve().parent
 
-# Раздаем static прямо из папки admin (для app.js)
 app.mount("/static", StaticFiles(directory=str(admin_dir)), name="static")
 templates = Jinja2Templates(directory=str(admin_dir))
 
@@ -28,30 +27,30 @@ templates = Jinja2Templates(directory=str(admin_dir))
 SYSTEM_HEALTH_STATE: Dict[str, Any] = {
     "last_heartbeat": 0.0,
     "bot_version": "1.0.0",
-    "trigger_test_requested": 0.0,
+    "trigger_test_requested": False,
     "module_statuses": {}
 }
 
 MODULES_REGISTRY = [
-    {"num": 1, "name": "Регистрация и контекст пользователя", "files": "db/connection.py, db/transactions.py", "test_cmd": "/start, начать, любое сообщение", "layer": "Core / Auth", "default_status": "В строю"},
-    {"num": 2, "name": "Быстрый ввод трат и доходов (текст)", "files": "config.py, handlers_transaction.py", "test_cmd": "Такси 500, кофе 250 в магните 1400", "layer": "NLP / Transaction", "default_status": "В строю"},
-    {"num": 3, "name": "Голосовой ввод операций", "files": "main.py, services.py, handlers_transaction.py", "test_cmd": "[Голосовое сообщение с перечислением трат]", "layer": "Media / NLP", "default_status": "В строю"},
-    {"num": 4, "name": "Интерактивная классификация статей", "files": "config.py, handlers_transaction.py, db/structure.py", "test_cmd": "Выбор кнопок категорий при записи", "layer": "Business Logic", "default_status": "В строю"},
-    {"num": 5, "name": "Голосовое и текстовое редактирование", "files": "config.py, handlers_transaction.py, db/transactions.py", "test_cmd": "Измени сумму на 1350, перенеси в продукты", "layer": "NLP / Edit", "default_status": "В строю"},
-    {"num": 6, "name": "Пакетная привязка категорий к списку", "files": "config.py, handlers_voice_commands.py", "test_cmd": "Второе это другое, третье быт, пятое гигиена", "layer": "Batch Processing", "default_status": "В строю"},
-    {"num": 7, "name": "Пакетное редактирование сумм и названий", "files": "handlers_voice_commands.py, db/transactions.py", "test_cmd": "Измени сумму у четвертой на 250, первая огурцы", "layer": "Batch Processing", "default_status": "В строю"},
-    {"num": 8, "name": "Пакетное и точечное удаление записей", "files": "handlers_voice_commands.py, db/transactions.py", "test_cmd": "Удали первую и третью, удали всё", "layer": "CRUD Operations", "default_status": "В строю"},
-    {"num": 9, "name": "Выписка и история транзакций", "files": "db/transactions.py, handlers_transaction.py", "test_cmd": "Покажи траты за неделю, выписка", "layer": "Reporting", "default_status": "В строю"},
-    {"num": 10, "name": "Распознавание чека (общая сумма)", "files": "config.py, handlers_receipt.py", "test_cmd": "[Фотография чека из супермаркета]", "layer": "Vision / OCR", "default_status": "В строю"},
-    {"num": 11, "name": "Построчный разбор кассовых чеков", "files": "config.py, handlers_receipt.py", "test_cmd": "Разбери чек построчно", "layer": "Vision / Parser", "default_status": "В строю"},
-    {"num": 12, "name": "Пакетная авто-классификация чека", "files": "config.py, handlers_receipt.py, db/structure.py", "test_cmd": "[Автоматический вызов после сканирования чека]", "layer": "AI / Batch", "default_status": "В строю"},
-    {"num": 13, "name": "Очередь нераспознанных операций", "files": "handlers_queue.py, handlers_queue_batch.py", "test_cmd": "Разобрать операции, разобрать завалы", "layer": "Queue Management", "default_status": "В строю"},
-    {"num": 14, "name": "Обучение бота новым синонимам", "files": "handlers_learning.py, db/structure.py", "test_cmd": "[Подтверждение новой привязки в диалоге]", "layer": "Active Learning", "default_status": "В строю"},
-    {"num": 15, "name": "Импорт банковских выписок (CSV/XLSX)", "files": "config.py, handlers_base.py, db/imports.py", "test_cmd": "Импорт статистики прошлого + [Файл выписки]", "layer": "Data Ingestion", "default_status": "В строю"},
-    {"num": 16, "name": "Управление структурой (CRUD статей)", "files": "handlers_structure.py, db/structure.py, keyboards.py", "test_cmd": "Категории и статьи, Создать, Переименовать", "layer": "Metadata CRUD", "default_status": "В строю"},
-    {"num": 17, "name": "Двусторонняя синхронизация словарей", "files": "handlers_base.py, db/migration.py, services.py", "test_cmd": "Миграция базы, Сбор новых слов", "layer": "ETL / Integration", "default_status": "В строю"},
+    {"num": 1, "name": "Регистрация и контекст пользователя", "files": "db/connection.py, db/transactions.py", "test_cmd": "/start, начать, любое сообщение", "layer": "Core / Auth", "default_status": "Не проверялся"},
+    {"num": 2, "name": "Быстрый ввод трат и доходов (текст)", "files": "config.py, handlers_transaction.py", "test_cmd": "Такси 500, кофе 250 в магните 1400", "layer": "NLP / Transaction", "default_status": "Не проверялся"},
+    {"num": 3, "name": "Голосовой ввод операций", "files": "main.py, services.py, handlers_transaction.py", "test_cmd": "[Голосовое сообщение с перечислением трат]", "layer": "Media / NLP", "default_status": "Не проверялся"},
+    {"num": 4, "name": "Интерактивная классификация статей", "files": "config.py, handlers_transaction.py, db/structure.py", "test_cmd": "Выбор кнописок категорий при записи", "layer": "Business Logic", "default_status": "Не проверялся"},
+    {"num": 5, "name": "Голосовое и текстовое редактирование", "files": "config.py, handlers_transaction.py, db/transactions.py", "test_cmd": "Измени сумму на 1350, перенеси в продукты", "layer": "NLP / Edit", "default_status": "Не проверялся"},
+    {"num": 6, "name": "Пакетная привязка категорий к списку", "files": "config.py, handlers_voice_commands.py", "test_cmd": "Второе это другое, третье быт, пятое гигиена", "layer": "Batch Processing", "default_status": "Не проверялся"},
+    {"num": 7, "name": "Пакетное редактирование сумм и названий", "files": "handlers_voice_commands.py, db/transactions.py", "test_cmd": "Измени сумму у четвертой на 250, первая огурцы", "layer": "Batch Processing", "default_status": "Не проверялся"},
+    {"num": 8, "name": "Пакетное и точечное удаление записей", "files": "handlers_voice_commands.py, db/transactions.py", "test_cmd": "Удали первую и третью, удали всё", "layer": "CRUD Operations", "default_status": "Не проверялся"},
+    {"num": 9, "name": "Выписка и история транзакций", "files": "db/transactions.py, handlers_transaction.py", "test_cmd": "Покажи траты за неделю, выписка", "layer": "Reporting", "default_status": "Не проверялся"},
+    {"num": 10, "name": "Распознавание чека (общая сумма)", "files": "config.py, handlers_receipt.py", "test_cmd": "[Фотография чека из супермаркета]", "layer": "Vision / OCR", "default_status": "Не проверялся"},
+    {"num": 11, "name": "Построчный разбор кассовых чеков", "files": "config.py, handlers_receipt.py", "test_cmd": "Разбери чек построчно", "layer": "Vision / Parser", "default_status": "Не проверялся"},
+    {"num": 12, "name": "Пакетная авто-классификация чека", "files": "config.py, handlers_receipt.py, db/structure.py", "test_cmd": "[Автоматический вызов после сканирования чека]", "layer": "AI / Batch", "default_status": "Не проверялся"},
+    {"num": 13, "name": "Очередь нераспознанных операций", "files": "handlers_queue.py, handlers_queue_batch.py", "test_cmd": "Разобрать операции, разобрать завалы", "layer": "Queue Management", "default_status": "Не проверялся"},
+    {"num": 14, "name": "Обучение бота новым синонимам", "files": "handlers_learning.py, db/structure.py", "test_cmd": "[Подтверждение новой привязки в диалоге]", "layer": "Active Learning", "default_status": "Не проверялся"},
+    {"num": 15, "name": "Импорт банковских выписок (CSV/XLSX)", "files": "config.py, handlers_base.py, db/imports.py", "test_cmd": "Импорт статистики прошлого + [Файл выписки]", "layer": "Data Ingestion", "default_status": "Не проверялся"},
+    {"num": 16, "name": "Управление структурой (CRUD статей)", "files": "handlers_structure.py, db/structure.py, keyboards.py", "test_cmd": "Категории и статьи, Создать, Переименовать", "layer": "Metadata CRUD", "default_status": "Не проверялся"},
+    {"num": 17, "name": "Двусторонняя синхронизация словарей", "files": "handlers_base.py, db/migration.py, services.py", "test_cmd": "Миграция базы, Сбор новых слов", "layer": "ETL / Integration", "default_status": "Не проверялся"},
     {"num": 18, "name": "Административная веб-панель", "files": "admin/admin_server.py, admin/", "test_cmd": "[Открытие URL веб-панели администрирования]", "layer": "Web Admin / UI", "default_status": "В строю"},
-    {"num": 19, "name": "Навигация и управление состояниями", "files": "handlers_base.py, keyboards.py", "test_cmd": "Отмена, назад, помощь, старт", "layer": "Navigation / FSM", "default_status": "В строю"}
+    {"num": 19, "name": "Навигация и управление состояниями", "files": "handlers_base.py, keyboards.py", "test_cmd": "Отмена, назад, помощь, старт", "layer": "Navigation / FSM", "default_status": "Не проверялся"}
 ]
 
 @app.get("/", response_class=HTMLResponse)
@@ -68,9 +67,9 @@ async def ping_db():
         with get_db_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute("SELECT 1;")
-        return {"status": "SUCCESS", "message": "Подключение к Supabase PostgreSQL активно!"}
+        return JSONResponse(content={"status": "SUCCESS", "message": "Подключение к Supabase PostgreSQL активно!"})
     except Exception as e:
-        return {"status": "ERROR", "message": str(e)}
+        return JSONResponse(content={"status": "ERROR", "message": str(e)})
 
 @app.get("/api/stats")
 async def get_system_stats():
@@ -103,7 +102,7 @@ async def get_system_stats():
                 """)
                 m_row = cur.fetchone()
 
-        return {
+        return JSONResponse(content={
             "status": "SUCCESS",
             "stats": {
                 "categories": g_row[0] or 0,
@@ -113,9 +112,9 @@ async def get_system_stats():
                 "pending": m_row[0] or 0,
                 "trash": m_row[1] or 0
             }
-        }
+        })
     except Exception as e:
-        return {"status": "ERROR", "message": str(e)}
+        return JSONResponse(content={"status": "ERROR", "message": str(e)})
 
 # ====================================================================
 # МОНИТОРИНГ ФУНКЦИОНАЛА И WATCHDOG (ТЕЛЕМЕТРИЯ БОТА)
@@ -130,11 +129,18 @@ async def receive_heartbeat(p: HeartbeatPayload):
     SYSTEM_HEALTH_STATE["last_heartbeat"] = now
     if p.bot_version:
         SYSTEM_HEALTH_STATE["bot_version"] = p.bot_version
-    return {
+
+    # Проверяем, запрашивал ли оператор запуск автотестов через админку
+    should_run_tests = bool(SYSTEM_HEALTH_STATE.get("trigger_test_requested", False))
+    if should_run_tests:
+        SYSTEM_HEALTH_STATE["trigger_test_requested"] = False
+
+    return JSONResponse(content={
         "status": "SUCCESS",
         "message": "Heartbeat acknowledged",
-        "server_time": now
-    }
+        "server_time": now,
+        "run_tests": should_run_tests
+    })
 
 class ModuleStatusPayload(BaseModel):
     module_num: int
@@ -150,8 +156,8 @@ async def update_module_status(p: ModuleStatusPayload):
             "error": p.error_details or "",
             "updated_at": time.time()
         }
-        return {"status": "SUCCESS", "module_num": p.module_num, "current_status": p.status}
-    return {"status": "ERROR", "message": "Номер модуля должен быть от 1 до 19"}
+        return JSONResponse(content={"status": "SUCCESS", "module_num": p.module_num, "current_status": p.status})
+    return JSONResponse(content={"status": "ERROR", "message": "Номер модуля должен быть от 1 до 19"})
 
 @app.get("/api/health")
 async def get_system_health():
@@ -159,7 +165,9 @@ async def get_system_health():
     now = time.time()
     last_hb = SYSTEM_HEALTH_STATE["last_heartbeat"]
     diff_sec = int(now - last_hb) if last_hb > 0 else 999999
-    timeout_threshold = 180  # 3 минуты
+    
+    # Реактивный порог: если бот молчит более 75 секунд — объявляется обрыв связи
+    timeout_threshold = 75
 
     is_online = (last_hb > 0) and (diff_sec <= timeout_threshold)
 
@@ -195,7 +203,7 @@ async def get_system_health():
 
     readiness = int(round((operational_count / total_modules) * 100)) if is_online else 0
 
-    return {
+    return JSONResponse(content={
         "status": "SUCCESS",
         "connection_status": "ONLINE" if is_online else "OFFLINE",
         "last_heartbeat": last_hb,
@@ -206,16 +214,16 @@ async def get_system_health():
         "attention_count": attention_count if is_online else total_modules,
         "readiness_percentage": readiness,
         "modules": processed_modules
-    }
+    })
 
 @app.post("/api/trigger_test")
 async def trigger_self_test():
     """Устанавливает флаг необходимости запуска автотестов ботом."""
-    SYSTEM_HEALTH_STATE["trigger_test_requested"] = time.time()
-    return {
+    SYSTEM_HEALTH_STATE["trigger_test_requested"] = True
+    return JSONResponse(content={
         "status": "SUCCESS",
-        "message": "Команда автотестирования зарегистрирована. Бот инициирует прогон модулей."
-    }
+        "message": "Сигнал на автотестирование передан боту. Тесты запустятся в течение минуты."
+    })
 
 # ====================================================================
 # КАТАЛОГ И ЭТАЛОН (GLOBAL_DICTIONARY)
@@ -266,13 +274,13 @@ async def get_catalog():
                 "synonyms": ", ".join(art_obj["synonyms"])
             })
 
-        return {
+        return JSONResponse(content={
             "status": "SUCCESS",
             "items": items,
             "tree": tree
-        }
+        })
     except Exception as e:
-        return {"status": "ERROR", "message": str(e)}
+        return JSONResponse(content={"status": "ERROR", "message": str(e)})
 
 class MovePayload(BaseModel):
     level: str # 'subcategory' или 'article'
@@ -302,9 +310,9 @@ async def move_catalog_entity(p: MovePayload):
                         WHERE type = %s AND category = %s AND subcategory = %s;
                     """, (p.toCategory, p.type, p.fromCategory, p.fromSubcategory))
                 conn.commit()
-        return {"status": "SUCCESS"}
+        return JSONResponse(content={"status": "SUCCESS"})
     except Exception as e:
-        return {"status": "ERROR", "message": str(e)}
+        return JSONResponse(content={"status": "ERROR", "message": str(e)})
 
 class EntityPayload(BaseModel):
     level: str # 'category', 'subcategory', 'article'
@@ -335,9 +343,9 @@ async def create_catalog_entity(p: EntityPayload):
                         ON CONFLICT DO NOTHING;
                     """, (p.type, cat, sub, art, syn))
                 conn.commit()
-        return {"status": "SUCCESS"}
+        return JSONResponse(content={"status": "SUCCESS"})
     except Exception as e:
-        return {"status": "ERROR", "message": str(e)}
+        return JSONResponse(content={"status": "ERROR", "message": str(e)})
 
 class RenamePayload(BaseModel):
     level: str
@@ -369,9 +377,9 @@ async def rename_catalog_entity(p: RenamePayload):
                         WHERE type = %s AND category = %s AND subcategory = %s AND article = %s;
                     """, (p.newName, p.type, p.category, p.subcategory, p.oldName))
                 conn.commit()
-        return {"status": "SUCCESS"}
+        return JSONResponse(content={"status": "SUCCESS"})
     except Exception as e:
-        return {"status": "ERROR", "message": str(e)}
+        return JSONResponse(content={"status": "ERROR", "message": str(e)})
 
 class DeletePayload(BaseModel):
     level: str
@@ -393,9 +401,9 @@ async def delete_catalog_entity(p: DeletePayload):
                 elif p.level == 'article':
                     cur.execute("DELETE FROM global_dictionary WHERE type = %s AND category = %s AND subcategory = %s AND article = %s;", (p.type, p.category, p.subcategory, p.article))
                 conn.commit()
-        return {"status": "SUCCESS"}
+        return JSONResponse(content={"status": "SUCCESS"})
     except Exception as e:
-        return {"status": "ERROR", "message": str(e)}
+        return JSONResponse(content={"status": "ERROR", "message": str(e)})
 
 # ====================================================================
 # МОДЕРАЦИЯ НОВЫХ СЛОВ ПОЛЬЗОВАТЕЛЕЙ (USER_DICTIONARY)
@@ -422,9 +430,9 @@ async def get_pending_words():
             "id": r[0], "type": r[1], "category": r[2], 
             "subcategory": r[3], "article": r[4], "synonym": r[5]
         } for r in rows]
-        return {"status": "SUCCESS", "rows": results}
+        return JSONResponse(content={"status": "SUCCESS", "rows": results})
     except Exception as e:
-        return {"status": "ERROR", "message": str(e)}
+        return JSONResponse(content={"status": "ERROR", "message": str(e)})
 
 @app.get("/api/words/trash")
 async def get_trash_words():
@@ -444,9 +452,9 @@ async def get_trash_words():
             "id": r[0], "type": r[1], "category": r[2], 
             "subcategory": r[3], "article": r[4], "synonym": r[5]
         } for r in rows]
-        return {"status": "SUCCESS", "rows": results}
+        return JSONResponse(content={"status": "SUCCESS", "rows": results})
     except Exception as e:
-        return {"status": "ERROR", "message": str(e)}
+        return JSONResponse(content={"status": "ERROR", "message": str(e)})
 
 class BatchIds(BaseModel):
     ids: List[int]
@@ -470,9 +478,9 @@ async def approve_words(p: BatchIds):
                         ON CONFLICT DO NOTHING;
                     """, row)
                 conn.commit()
-        return {"status": "SUCCESS", "count": len(to_insert)}
+        return JSONResponse(content={"status": "SUCCESS", "count": len(to_insert)})
     except Exception as e:
-        return {"status": "ERROR", "message": str(e)}
+        return JSONResponse(content={"status": "ERROR", "message": str(e)})
 
 @app.post("/api/words/trash")
 async def trash_words(p: BatchIds):
@@ -482,9 +490,9 @@ async def trash_words(p: BatchIds):
             with conn.cursor() as cur:
                 cur.execute("UPDATE user_dictionary SET is_deleted = TRUE WHERE id = ANY(%s);", (p.ids,))
                 conn.commit()
-        return {"status": "SUCCESS", "count": len(p.ids)}
+        return JSONResponse(content={"status": "SUCCESS", "count": len(p.ids)})
     except Exception as e:
-        return {"status": "ERROR", "message": str(e)}
+        return JSONResponse(content={"status": "ERROR", "message": str(e)})
 
 @app.post("/api/words/restore")
 async def restore_words(p: BatchIds):
@@ -494,6 +502,6 @@ async def restore_words(p: BatchIds):
             with conn.cursor() as cur:
                 cur.execute("UPDATE user_dictionary SET is_deleted = FALSE WHERE id = ANY(%s);", (p.ids,))
                 conn.commit()
-        return {"status": "SUCCESS", "count": len(p.ids)}
+        return JSONResponse(content={"status": "SUCCESS", "count": len(p.ids)})
     except Exception as e:
-        return {"status": "ERROR", "message": str(e)}
+        return JSONResponse(content={"status": "ERROR", "message": str(e)})
