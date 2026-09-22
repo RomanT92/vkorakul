@@ -19,9 +19,10 @@ from db import (
     smart_search_item,
     save_transaction,
     learn_user_word,
-    get_full_menu
+    get_full_menu,
+    get_last_transaction
 )
-from handlers_history import handle_history_and_edits
+from handlers_history import handle_history_and_edits, apply_edit_to_last_transaction
 from handlers_structure_nlp import handle_structure_nlp_action
 from handlers_tx_parser import (
     detect_operation_type,
@@ -91,7 +92,7 @@ def handle_transaction(user_id, user_text, state, user_states):
     user_text_lower = user_text.lower().strip()
     internal_uid = get_or_create_user(user_id)
 
-    # 1. Просмотр/правка истории
+    # 1. Просмотр/правка истории (быстрые команды, в т.ч. «измени категорию у последней...»)
     if handle_history_and_edits(user_id, internal_uid, user_text, user_text_lower, state, user_states):
         return True
 
@@ -189,10 +190,36 @@ def handle_transaction(user_id, user_text, state, user_states):
 
     parsed_data = _extract_json_data(reply_text)
     if parsed_data:
-        # ВОТ ЗДЕСЬ: перехватываем голосовое/текстовое управление структурой!
+        # 5.1 Управление структурой (создание, переименование, удаление, перенос)
         if handle_structure_nlp_action(user_id, internal_uid, parsed_data, user_states):
             return True
 
+        action = parsed_data.get("action")
+
+        # 5.2 Редактирование операции через ИИ (Режим 2 системного промпта)
+        if action == "edit_tx":
+            target = parsed_data.get("target", "last")
+            if target == "last":
+                return apply_edit_to_last_transaction(
+                    user_id=user_id,
+                    internal_uid=internal_uid,
+                    new_category_hint=parsed_data.get("new_category_hint"),
+                    new_amount=parsed_data.get("new_amount"),
+                    new_item_name=parsed_data.get("new_item_name"),
+                    new_type=parsed_data.get("new_type")
+                )
+
+        # 5.3 Просмотр истории через ИИ (Режим 3 системного промпта)
+        if action == "show_history":
+            return handle_history_and_edits(user_id, internal_uid, "покажи историю", "покажи историю", state, user_states)
+
+        # 5.4 Удаление операций через ИИ (Режим 4 системного промпта)
+        if action == "delete_last_tx":
+            return handle_history_and_edits(user_id, internal_uid, "удали последнюю операцию", "удали последнюю операцию", state, user_states)
+        elif action == "delete_all_tx":
+            return handle_history_and_edits(user_id, internal_uid, "удали все операции", "удали все операции", state, user_states)
+
+        # 5.5 Стандартная запись транзакций (Режим 1)
         raw_ops = parsed_data.get("operations", [])
         if not raw_ops and "item" in parsed_data:
             raw_ops = [parsed_data]
