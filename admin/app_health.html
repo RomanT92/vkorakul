@@ -1,0 +1,146 @@
+<script>
+  async function loadHealthData(isSilent = false) {
+    if (!isSilent) setStatus('Опрос телеметрии...');
+    try {
+      const res = await fetch('/api/health');
+      const data = await res.json();
+      if (data.status === 'SUCCESS') {
+        healthModulesData = data.modules || [];
+
+        const topBadge = document.getElementById('topConnectionBadge');
+        if (topBadge) {
+          topBadge.className = data.connection_status === 'ONLINE'
+            ? "text-xs px-3 py-1 rounded-full border bg-emerald-500/10 border-emerald-500/30 text-emerald-400"
+            : "text-xs px-3 py-1 rounded-full border bg-rose-500/10 border-rose-500/30 text-rose-400";
+          topBadge.innerHTML = data.connection_status === 'ONLINE'
+            ? `<i class="fa-solid fa-circle text-emerald-400 text-[9px] mr-1.5 animate-pulse"></i> В СЕТИ (${data.diff_seconds}с назад)`
+            : `<i class="fa-solid fa-circle text-rose-500 text-[9px] mr-1.5"></i> ОБРЫВ СВЯЗИ`;
+        }
+
+        const connEl = document.getElementById('healthConnectionStatus');
+        const pingEl = document.getElementById('healthLastPing');
+        const pulseIcon = document.getElementById('healthPulseIcon');
+
+        if (connEl && pingEl) {
+          if (data.connection_status === 'ONLINE') {
+            connEl.innerText = "В СЕТИ";
+            connEl.className = "text-xl font-bold text-emerald-400";
+            pingEl.innerText = `Пинг: ${data.diff_seconds} сек. назад (v${data.bot_version})`;
+            if (pulseIcon) pulseIcon.className = "w-2.5 h-2.5 rounded-full bg-emerald-400 animate-ping";
+          } else {
+            connEl.innerText = "ОБРЫВ СВЯЗИ";
+            connEl.className = "text-xl font-bold text-rose-400";
+            pingEl.innerText = data.last_heartbeat === 0 ? "Сигналов не поступало" : `Молчит > ${Math.floor(data.diff_seconds / 60)} мин.`;
+            if (pulseIcon) pulseIcon.className = "w-2.5 h-2.5 rounded-full bg-rose-500";
+          }
+        }
+
+        document.getElementById('healthTotalMods').innerText = data.total_modules;
+        document.getElementById('healthOperational').innerText = data.operational_count;
+        document.getElementById('healthAttention').innerText = data.attention_count;
+        document.getElementById('healthPercentage').innerText = data.readiness_percentage + '%';
+        document.getElementById('healthProgressBar').style.width = data.readiness_percentage + '%';
+
+        applyHealthFilters();
+        if (!isSilent) setStatus('Готово');
+      }
+    } catch (err) {
+      if (!isSilent) setStatus('Сбой связи');
+    }
+  }
+
+  function applyHealthFilters() {
+    const q = (document.getElementById('healthSearchInput')?.value || '').toLowerCase().trim();
+    const statusFilter = document.getElementById('healthStatusFilter')?.value || 'ALL';
+
+    const filtered = healthModulesData.filter(m => {
+
+      const matchQ = !q || m.name.toLowerCase().includes(q) || m.files.toLowerCase().includes(q) || m.test_cmd.toLowerCase().includes(q);
+      const matchStatus = statusFilter === 'ALL' || m.status === statusFilter;
+      return matchQ && matchStatus;
+    });
+
+    renderHealthTable(filtered);
+  }
+
+  function renderHealthTable(modules) {
+    const tbody = document.getElementById('healthTableBody');
+    if (!tbody) return;
+    tbody.innerHTML = '';
+
+    if (modules.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="7" class="px-4 py-8 text-center text-slate-500">Модули не найдены</td></tr>';
+      return;
+    }
+
+    modules.forEach(m => {
+      const tr = document.createElement('tr');
+      tr.className = "hover:bg-slate-750 transition";
+
+      let badgeClass = "bg-slate-700 text-slate-300 border-slate-600";
+      if (m.status === 'В строю') badgeClass = "bg-emerald-500/20 text-emerald-400 border-emerald-500/30";
+      else if (m.status === 'Нет связи') badgeClass = "bg-rose-500/20 text-rose-400 border-rose-500/30";
+      else if (m.status === 'Ошибка' || m.status === 'Требует внимания') badgeClass = "bg-amber-500/20 text-amber-400 border-amber-500/30";
+      else if (m.status.includes('Тестируется')) badgeClass = "bg-indigo-500/20 text-indigo-300 border-indigo-500/30 animate-pulse";
+
+      const hasError = m.error && m.error.trim().length > 0;
+
+      tr.innerHTML = `
+        <td class="px-4 py-3 text-center font-bold text-slate-400">${m.num}</td>
+        <td class="px-4 py-3 font-semibold text-white">${m.name}</td>
+        <td class="px-4 py-3 font-mono text-xs text-indigo-300">${m.files}</td>
+        <td class="px-4 py-3 text-xs text-slate-300 font-mono bg-slate-900/40 p-1.5 rounded">${m.test_cmd}</td>
+        <td class="px-4 py-3 text-xs text-slate-400"><span class="px-2 py-0.5 rounded bg-slate-800 border border-slate-700">${m.layer}</span></td>
+        <td class="px-4 py-3 text-center">
+          <span class="px-2.5 py-1 text-xs font-semibold rounded-full border ${badgeClass}">
+            ${m.status}
+          </span>
+        </td>
+        <td class="px-4 py-3 text-right">
+          ${hasError ? `
+            <button onclick="showHealthError(${m.num})" class="px-2 py-1 bg-rose-600/20 hover:bg-rose-600/40 text-rose-300 border border-rose-500/30 rounded text-xs">
+              <i class="fa-solid fa-bug mr-1"></i> Ошибка
+            </button>
+          ` : `<span class="text-xs text-slate-600">—</span>`}
+        </td>
+      `;
+      tbody.appendChild(tr);
+    });
+  }
+
+  function showHealthError(moduleNum) {
+    const mod = healthModulesData.find(x => x.num === moduleNum);
+    if (!mod) return;
+    document.getElementById('modalHealthTitle').innerText = `Сбой модуля №${mod.num}: ${mod.name}`;
+    document.getElementById('modalHealthFiles').innerText = mod.files;
+    document.getElementById('modalHealthDetails').innerText = mod.error || "Детали ошибки не зафиксированы.";
+    document.getElementById('modalHealthError').classList.remove('hidden');
+  }
+
+  async function triggerSelfTestBtn() {
+    if (!confirm('Запустить полный комплекс автоматического тестирования всех 26 модулей бота?')) return;
+
+    setStatus('Запуск тестов...');
+    healthModulesData.forEach(m => m.status = '⏳ Тестируется...');
+    renderHealthTable(healthModulesData);
+
+    try {
+      const res = await fetch('/api/trigger_test', { method: 'POST' });
+      const data = await res.json();
+      setStatus('Тесты запущены...');
+
+      let checkCount = 0;
+      const fastInterval = setInterval(async () => {
+        await loadHealthData(true);
+        checkCount++;
+        if (checkCount >= 20 || !healthModulesData.some(m => m.status.includes('Тестируется'))) {
+          clearInterval(fastInterval);
+          setStatus('Готово');
+        }
+      }, 2000);
+    } catch (err) {
+      alert('Ошибка отправки: ' + err.toString());
+      setStatus('Сбой');
+    }
+  }
+</script>
