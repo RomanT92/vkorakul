@@ -13,7 +13,7 @@ from db import (
     update_transaction_amount,
     update_transaction_category
 )
-from db.transactions import delete_unverified_by_text
+from db.transactions import delete_unverified_by_text, promote_synonym_to_article
 from handlers_tx_parser import (
     detect_operation_type,
     _match_category_tree,
@@ -179,8 +179,20 @@ def _try_fast_deterministic_single_clause(clause_text, items_len):
     if target_idx is None or not (0 <= target_idx < items_len):
         return None
 
-    # 1. Изменение суммы
+    # 1. Создание новой статьи для конкретной операции
+    # Примеры: "у второго это настенные часы в новую статью", "перенеси в новую статью настенные часы", "в новую статью настенные часы"
 
+    new_art_m = re.search(r'(?:перенеси|перенести|создай|создать|сделай|сделать|запиши)?\s*(?:в|на)?\s*нов(?:ую|ая|ой)\s*стать(?:ю|я|е)\s*(?:под\s*названием|с\s*названием|это|как)?\s*(.+)$', clean)
+    if not new_art_m:
+        new_art_m = re.search(r'(?:это|назови)?\s*(.+?)\s*(?:в|на)?\s*нов(?:ую|ая|ой)\s*стать(?:ю|я|е)$', clean)
+    if new_art_m:
+        val_art = new_art_m.group(1).strip()
+        val_art = re.sub(r'^(?:в|на|под\s*названием|это|как)\s+', '', val_art).strip()
+        val_art = re.sub(r'\bна\s+стенн', 'настенн', val_art, flags=re.IGNORECASE).strip()
+        if val_art and not any(sw in val_art for sw in ["удали", "отмена", "назад", "сумм"]):
+            return {"action": "create_article", "index": target_idx, "name": val_art}
+
+    # 2. Изменение суммы
     amt_m = re.search(r'(?:сумму|сумма|поменяй сумму|измени сумму|поставь сумму)\s*(?:на|в|равна)?\s*(\d+(?:[.,]\d+)?)$', clean)
     if not amt_m:
         amt_m = re.search(r'(\d+(?:[.,]\d+)?)\s*(?:руб|рублей|р)?$', clean)
@@ -190,18 +202,18 @@ def _try_fast_deterministic_single_clause(clause_text, items_len):
         except ValueError:
             pass
 
-    # 2. Переименование названия товара
+    # 3. Переименование названия товара
     rename_m = re.search(r'(?:назови|переименуй|исправь название|название)\s*(?:как|в|на)?\s+(.+)$', clean)
     if rename_m:
         val = rename_m.group(1).strip()
         val = re.sub(r'^(?:как|в|на)\s+', '', val).strip()
         return {"action": "rename_item", "index": target_idx, "name": val}
 
-    # 3. Удаление
+    # 4. Удаление
     if any(w in clean for w in ["удали", "стереть", "убрать", "вычеркни"]):
         return {"action": "delete", "index": target_idx}
 
-    # 4. Изменение категории / статьи
+    # 5. Изменение категории / статьи
     cat_m = re.search(r'(?:категорию|категория|статью|статья)\s*(?:это|в|на|как)?\s+(.+)$', clean)
     if not cat_m:
         cat_m = re.search(r'(?:измени|поменяй|поставь|смени|перенеси)\s*(?:на|в|как)\s+(.+)$', clean)
@@ -305,7 +317,7 @@ def handle_list_voice_commands(user_id, user_text, user_text_lower, state, user_
         "название", "товар", "все", "всё", "всех", "очисти", "категори", "тоже",
         "также", "перв", "втор", "трет", "четверт", "пят", "шест", "седьм", "восьм",
         "девят", "десят", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10",
-        "операци", "строк", "пункт", "корзин", "мусор"
+        "операци", "строк", "пункт", "корзин", "мусор", "стать", "нов"
     ]
     if not any(t in user_text_lower for t in cmd_triggers):
         return False
@@ -334,7 +346,27 @@ def handle_list_voice_commands(user_id, user_text, user_text_lower, state, user_
             it = items[idx]
             old_name = it.get("item") or it.get("article", "Операция")
 
-            if act["action"] == "edit_amount":
+            if act["action"] == "create_article":
+                clean_art = act["name"].strip()
+                clean_art = re.sub(r'\bна\s+стенн', 'настенн', clean_art, flags=re.IGNORECASE).strip().capitalize()
+                cur_cat = it.get("category", "Разное")
+                cur_sub = it.get("subcategory", "Разное")
+                op_type = it.get("type", "Расход")
+
+                promote_synonym_to_article(internal_uid, op_type, cur_cat, cur_sub, clean_art)
+                learn_user_word(internal_uid, op_type, cur_cat, cur_sub, clean_art, clean_art)
+                orig_desc = it.get("original_text") or it.get("article") or it.get("item")
+                if orig_desc and orig_desc.lower() != clean_art.lower():
+                    learn_user_word(internal_uid, op_type, cur_cat, cur_sub, clean_art, orig_desc)
+
+                if state == "history_view" and "id" in it:
+                    update_transaction_category(internal_uid, it["id"], cur_cat, cur_sub, clean_art, op_type=op_type)
+
+                it["article"] = clean_art
+                it["item"] = clean_art
+                report_lines.append(f"• №{idx+1}: 🆕 создана статья «{clean_art}» (📂 {cur_cat} -> {cur_sub})")
+
+            elif act["action"] == "edit_amount":
                 new_amt = act["amount"]
                 old_amt = it.get("amount", 0)
                 it["amount"] = new_amt
@@ -387,6 +419,26 @@ def handle_list_voice_commands(user_id, user_text, user_text_lower, state, user_
             it = items[idx]
             old_name = it.get("item") or it.get("article", "Операция")
 
+            if "new_article" in up or "new_article_name" in up:
+                raw_new_art = up.get("new_article") or up.get("new_article_name")
+                clean_art = re.sub(r'\bна\s+стенн', 'настенн', str(raw_new_art).strip(), flags=re.IGNORECASE).strip().capitalize()
+                cur_cat = it.get("category", "Разное")
+                cur_sub = it.get("subcategory", "Разное")
+                op_type = it.get("type", "Расход")
+
+                promote_synonym_to_article(internal_uid, op_type, cur_cat, cur_sub, clean_art)
+                learn_user_word(internal_uid, op_type, cur_cat, cur_sub, clean_art, clean_art)
+                orig_desc = it.get("original_text") or it.get("article") or it.get("item")
+                if orig_desc and orig_desc.lower() != clean_art.lower():
+                    learn_user_word(internal_uid, op_type, cur_cat, cur_sub, clean_art, orig_desc)
+
+                if state == "history_view" and "id" in it:
+                    update_transaction_category(internal_uid, it["id"], cur_cat, cur_sub, clean_art, op_type=op_type)
+
+                it["article"] = clean_art
+                it["item"] = clean_art
+                report_lines.append(f"• №{idx+1}: 🆕 создана статья «{clean_art}» (📂 {cur_cat} -> {cur_sub})")
+
             if "amount" in up:
                 new_a = float(up["amount"])
                 it["amount"] = new_a
@@ -418,7 +470,36 @@ def handle_list_voice_commands(user_id, user_text, user_text_lower, state, user_
         raw_indices = []
     valid_indices = [int(i) - 1 for i in raw_indices if 0 <= int(i) - 1 < len(items)]
 
-    # 3.2 SET CATEGORY
+    # 3.2 CREATE ARTICLE (СОЗДАНИЕ СТАТЬИ И ПРИВЯЗКА ЧЕРЕЗ ИИ)
+    if action == "create_article":
+        new_art = (parsed_cmd.get("name") or parsed_cmd.get("new_article_name") or "").strip()
+        if valid_indices and new_art:
+            idx = valid_indices[0]
+            it = items[idx]
+            clean_art = re.sub(r'\bна\s+стенн', 'настенн', new_art, flags=re.IGNORECASE).strip().capitalize()
+            cur_cat = it.get("category", "Разное")
+            cur_sub = it.get("subcategory", "Разное")
+            op_type = it.get("type", "Расход")
+
+            promote_synonym_to_article(internal_uid, op_type, cur_cat, cur_sub, clean_art)
+            learn_user_word(internal_uid, op_type, cur_cat, cur_sub, clean_art, clean_art)
+            orig_desc = it.get("original_text") or it.get("article") or it.get("item")
+            if orig_desc and orig_desc.lower() != clean_art.lower():
+                learn_user_word(internal_uid, op_type, cur_cat, cur_sub, clean_art, orig_desc)
+
+            if state == "history_view" and "id" in it:
+                update_transaction_category(internal_uid, it["id"], cur_cat, cur_sub, clean_art, op_type=op_type)
+
+            it["article"] = clean_art
+            it["item"] = clean_art
+            send_vk_message(
+                user_id,
+                f"✅ Позиция №{idx+1} обновлена:\n🆕 Создана статья «{clean_art}»!\n📂 {cur_cat} -> {cur_sub}"
+            )
+            _refresh_screen(user_id, state, state_data)
+            return True
+
+    # 3.3 SET CATEGORY
     if action == "set_category":
         hint_text = (parsed_cmd.get("hint") or parsed_cmd.get("category") or "").strip()
         if not valid_indices and any(w in user_text_lower for w in ["все", "всё"]):
@@ -433,7 +514,7 @@ def handle_list_voice_commands(user_id, user_text, user_text_lower, state, user_
             _refresh_screen(user_id, state, state_data)
             return True
 
-    # 3.3 RENAME ITEM
+    # 3.4 RENAME ITEM
     if action in ["rename_item", "rename_item_and_amount"]:
         new_name = (parsed_cmd.get("name") or parsed_cmd.get("new_name") or "").strip()
         new_amount = float(parsed_cmd.get("amount", 0)) if action == "rename_item_and_amount" else None
@@ -469,7 +550,7 @@ def handle_list_voice_commands(user_id, user_text, user_text_lower, state, user_
             _refresh_screen(user_id, state, state_data)
             return True
 
-    # 3.4 EDIT AMOUNT
+    # 3.5 EDIT AMOUNT
     if action == "edit_amount":
         new_amount = float(parsed_cmd.get("amount", 0))
         if valid_indices and new_amount > 0:
@@ -484,7 +565,7 @@ def handle_list_voice_commands(user_id, user_text, user_text_lower, state, user_
             _refresh_screen(user_id, state, state_data)
             return True
 
-    # 3.5 DELETE
+    # 3.6 DELETE
     if action in ["delete", "delete_all", "delete_last_n"]:
         del_indices = []
         if action == "delete_all":
