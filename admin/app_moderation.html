@@ -1,0 +1,92 @@
+<script>
+  function switchModerationTab(mode) {
+    currentModerationMode = mode;
+    selectedIndices.clear();
+
+    const isPending = mode === 'pending';
+    document.getElementById('subTabPendingBtn').className = isPending
+      ? "px-4 py-2 text-sm font-semibold rounded-lg bg-indigo-600 text-white shadow flex items-center space-x-2"
+      : "px-4 py-2 text-sm font-semibold rounded-lg bg-slate-800 text-slate-400 hover:text-white flex items-center space-x-2";
+
+    document.getElementById('subTabTrashBtn').className = !isPending
+      ? "px-4 py-2 text-sm font-semibold rounded-lg bg-rose-700 text-white shadow flex items-center space-x-2"
+      : "px-4 py-2 text-sm font-semibold rounded-lg bg-slate-800 text-slate-400 hover:text-white flex items-center space-x-2";
+
+    document.getElementById('pendingActionButtons').classList.toggle('hidden', !isPending);
+    document.getElementById('trashActionButtons').classList.toggle('hidden', isPending);
+
+    loadModerationData();
+  }
+
+  async function loadModerationData() {
+    setStatus('Загрузка списка...');
+    selectedIndices.clear();
+    const endpoint = (currentModerationMode === 'pending') ? '/api/words/pending' : '/api/words/trash';
+
+    try {
+      const res = await fetch(endpoint);
+      const data = await res.json();
+
+      if (data.status === 'SUCCESS') {
+        cachedData = data.rows || [];
+        const badge = currentModerationMode === 'pending' ? document.getElementById('userWordsBadge') : document.getElementById('trashWordsBadge');
+        if (badge) badge.innerText = cachedData.length;
+
+        let html = '';
+        cachedData.forEach(row => {
+          html += `<tr class="hover:bg-slate-750 transition">
+            <td class="px-4 py-2.5 text-center">
+              <input type="checkbox" onchange="toggleRowSelection(${row.id}, this.checked)" class="rounded bg-slate-700 border-slate-600 text-indigo-500 focus:ring-0">
+            </td>
+            <td class="px-4 py-2.5"><span class="px-2 py-0.5 text-xs rounded ${row.type === 'Доход' ? 'bg-emerald-500/20 text-emerald-400' : 'bg-rose-500/20 text-rose-400'}">${row.type}</span></td>
+            <td class="px-4 py-2.5 text-slate-300">${row.category || '—'}</td>
+            <td class="px-4 py-2.5 text-slate-400">${row.subcategory || '—'}</td>
+            <td class="px-4 py-2.5 text-white font-medium">${row.article}</td>
+            <td class="px-4 py-2.5 text-indigo-300 font-mono text-xs">${row.synonym}</td>
+          </tr>`;
+        });
+
+        document.getElementById('moderationTableBody').innerHTML = html || '<tr><td colspan="6" class="text-center py-6 text-slate-500">Записей нет</td></tr>';
+        setStatus('Готово');
+      }
+    } catch (err) {
+      setStatus('Сбой сети');
+    }
+  }
+
+  function toggleRowSelection(id, checked) {
+    if (checked) selectedIndices.add(id);
+    else selectedIndices.delete(id);
+  }
+
+  function toggleSelectAll(checked) {
+    selectedIndices.clear();
+    document.querySelectorAll('#moderationTableBody input[type="checkbox"]').forEach((cb, i) => {
+      cb.checked = checked;
+      if (checked && cachedData[i]) selectedIndices.add(cachedData[i].id);
+    });
+  }
+
+  async function handleBatchWords(action, endpoint) {
+    if (selectedIndices.size === 0) return alert('Выберите хотя бы одну запись');
+    setStatus('Обработка...');
+    try {
+      const res = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ids: Array.from(selectedIndices) })
+      });
+      const data = await res.json();
+      if (data.status === "SUCCESS") {
+        loadModerationData();
+        if (action === 'approve') loadCatalog();
+      } else {
+        alert('Ошибка: ' + data.message);
+      }
+    } catch (err) { alert('Ошибка сети: ' + err.toString()); }
+  }
+
+  function deleteSelectedWords() { handleBatchWords('delete', '/api/words/trash'); }
+  function restoreSelectedWords() { handleBatchWords('restore', '/api/words/restore'); }
+  function approveSelectedWords() { handleBatchWords('approve', '/api/words/approve'); }
+</script>
