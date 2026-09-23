@@ -1,0 +1,67 @@
+<style>
+  .drag-over {
+    border: 2px dashed #6366f1 !important;
+    background-color: rgba(99, 102, 241, 0.1) !important;
+  }
+  .dragging {
+    opacity: 0.4;
+    transform: scale(0.98);
+  }
+</style>
+
+<script>
+  // Глобальное состояние веб-админки
+  let currentMainTab = 'catalog';
+  let currentModerationMode = 'pending';
+  let selectedIndices = new Set();
+  let cachedData = [];
+
+  let globalCatalog = [];
+  let globalTreeData = {};
+  let activeModalPayload = {};
+  let draggedEntity = null;
+
+  let healthModulesData = [];
+  let healthPollingTimer = null;
+
+  window.onload = function() {
+    loadCatalog();
+    loadModerationData();
+    loadHealthData();
+
+    if (healthPollingTimer) clearInterval(healthPollingTimer);
+    healthPollingTimer = setInterval(() => loadHealthData(true), 30000);
+  };
+
+  function setStatus(text) {
+    const el = document.getElementById('statusIndicator');
+    if (el) el.innerHTML = `<i class="fa-solid fa-circle text-indigo-400 text-[9px] mr-1.5 animate-pulse"></i> ${text}`;
+  }
+
+  function switchMainTab(tab) {
+    currentMainTab = tab;
+    document.getElementById('catalogTab')?.classList.toggle('hidden', tab !== 'catalog');
+    document.getElementById('moderationTab')?.classList.toggle('hidden', tab !== 'moderation');
+    document.getElementById('healthTab')?.classList.toggle('hidden', tab !== 'health');
+    document.getElementById('navigationTab')?.classList.toggle('hidden', tab !== 'navigation');
+
+    const setActive = (id, active) => {
+      const btn = document.getElementById(id);
+      if (!btn) return;
+      btn.className = active
+        ? "py-3 text-sm font-semibold border-b-2 border-indigo-500 text-indigo-400 flex items-center space-x-2 whitespace-nowrap"
+        : "py-3 text-sm font-semibold border-b-2 border-transparent text-slate-400 hover:text-slate-200 flex items-center space-x-2 whitespace-nowrap";
+    };
+
+    setActive('mainTabCatalogBtn', tab === 'catalog');
+    setActive('mainTabModBtn', tab === 'moderation');
+    setActive('mainTabHealthBtn', tab === 'health');
+    setActive('mainTabNavBtn', tab === 'navigation');
+
+    if (tab === 'health') loadHealthData();
+  }
+
+  function closeModal(id) {
+    document.getElementById(id)?.classList.add('hidden');
+  }
+</script>
