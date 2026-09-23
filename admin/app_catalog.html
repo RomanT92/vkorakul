@@ -1,0 +1,448 @@
+<script>
+  async function loadCatalog() {
+    setStatus('Загрузка эталона...');
+    try {
+      const res = await fetch('/api/catalog');
+      const data = await res.json();
+      if (data.status === 'SUCCESS') {
+        globalCatalog = data.items || [];
+        globalTreeData = data.tree || {};
+
+        loadSystemStats();
+        populateCatalogCatSelect();
+        applyCatalogFilters();
+        setStatus('Готово');
+      }
+    } catch (err) {
+      setStatus('Сбой сети');
+    }
+  }
+
+  async function loadSystemStats() {
+    try {
+      const res = await fetch('/api/stats');
+      const data = await res.json();
+      if (data.status === 'SUCCESS') {
+        document.getElementById('statCats').innerText = data.stats.categories;
+        document.getElementById('statSubs').innerText = data.stats.subcategories;
+        document.getElementById('statArts').innerText = data.stats.articles;
+        document.getElementById('statSyns').innerText = data.stats.synonyms;
+      }
+    } catch (e) {}
+  }
+
+  function populateCatalogCatSelect() {
+    const sel = document.getElementById('catalogFilterCat');
+    if (!sel) return;
+    const cats = Array.from(new Set(globalCatalog.map(x => x.category))).sort();
+    sel.innerHTML = '<option value="ALL">Все категории</option>';
+    cats.forEach(c => {
+      const opt = document.createElement('option');
+      opt.value = c;
+      opt.innerText = c;
+      sel.appendChild(opt);
+    });
+  }
+
+  function setCatalogView(mode) {
+    const isTree = mode === 'tree';
+    document.getElementById('catalogTreeContainer')?.classList.toggle('hidden', !isTree);
+    document.getElementById('catalogTableContainer')?.classList.toggle('hidden', isTree);
+
+    const btnTree = document.getElementById('btnViewTree');
+    const btnTable = document.getElementById('btnViewTable');
+    if (btnTree) btnTree.className = isTree ? "px-3 py-1.5 text-xs font-semibold rounded-md bg-indigo-600 text-white shadow-sm" : "px-3 py-1.5 text-xs font-semibold rounded-md text-slate-400 hover:text-white";
+    if (btnTable) btnTable.className = !isTree ? "px-3 py-1.5 text-xs font-semibold rounded-md bg-indigo-600 text-white shadow-sm" : "px-3 py-1.5 text-xs font-semibold rounded-md text-slate-400 hover:text-white";
+  }
+
+  function applyCatalogFilters() {
+    const q = (document.getElementById('catalogSearch')?.value || '').toLowerCase().trim();
+    const typeFilter = document.getElementById('catalogFilterType')?.value || 'ALL';
+    const catFilter = document.getElementById('catalogFilterCat')?.value || 'ALL';
+
+    const filtered = globalCatalog.filter(item => {
+      const matchesQ = !q || item.article.toLowerCase().includes(q) || item.category.toLowerCase().includes(q) || item.subcategory.toLowerCase().includes(q) || item.synonyms.toLowerCase().includes(q);
+      const matchesType = typeFilter === "ALL" || item.type === typeFilter;
+      const matchesCat = catFilter === "ALL" || item.category === catFilter;
+      return matchesQ && matchesType && matchesCat;
+    });
+
+    renderCatalogTable(filtered);
+    renderCatalogTree(filtered);
+  }
+
+  function renderCatalogTable(rows) {
+    const tbody = document.getElementById('catalogTableBody');
+    if (!tbody) return;
+    tbody.innerHTML = rows.length === 0 ? '<tr><td colspan="6" class="px-4 py-8 text-center text-slate-500">Ничего не найдено</td></tr>' : '';
+
+    rows.forEach(item => {
+      const tr = document.createElement('tr');
+      tr.className = "hover:bg-slate-750 transition";
+      const badge = item.type === "Доход"
+        ? `<span class="bg-emerald-500/20 text-emerald-400 px-2 py-0.5 rounded text-xs border border-emerald-500/30">Доход</span>`
+        : `<span class="bg-slate-700 text-slate-300 px-2 py-0.5 rounded text-xs border border-slate-600">Расход</span>`;
+
+      tr.innerHTML = `
+        <td class="px-4 py-2.5">${badge}</td>
+        <td class="px-4 py-2.5 font-medium text-white">${item.category}</td>
+        <td class="px-4 py-2.5 text-slate-400">${item.subcategory}</td>
+        <td class="px-4 py-2.5 text-indigo-300 font-medium">${item.article}</td>
+        <td class="px-4 py-2.5 text-slate-400 text-xs truncate max-w-xs" title="${item.synonyms || ''}">${item.synonyms || '—'}</td>
+        <td class="px-4 py-2.5 text-right space-x-1 whitespace-nowrap">
+          <button onclick="promptRename('article', '${item.type}', '${item.category}', '${item.subcategory}', '${item.article}')" class="p-1.5 text-slate-400 hover:text-indigo-400 rounded"><i class="fa-solid fa-pen text-xs"></i></button>
+          <button onclick="promptMove('article', '${item.type}', '${item.category}', '${item.subcategory}', '${item.article}')" class="p-1.5 text-slate-400 hover:text-indigo-400 rounded"><i class="fa-solid fa-arrows-up-down-left-right text-xs"></i></button>
+          <button onclick="promptDelete('article', '${item.type}', '${item.category}', '${item.subcategory}', '${item.article}')" class="p-1.5 text-slate-400 hover:text-rose-400 rounded"><i class="fa-solid fa-trash text-xs"></i></button>
+        </td>
+      `;
+      tbody.appendChild(tr);
+    });
+  }
+
+  function renderCatalogTree(filteredItems = null) {
+    const container = document.getElementById('catalogTreeContainer');
+    if (!container) return;
+    container.innerHTML = '';
+
+    let treeToRender = globalTreeData;
+    if (filteredItems) {
+      treeToRender = { "Расход": {}, "Доход": {} };
+      filteredItems.forEach(item => {
+        if (!treeToRender[item.type]) treeToRender[item.type] = {};
+        if (!treeToRender[item.type][item.category]) treeToRender[item.type][item.category] = {};
+        if (!treeToRender[item.type][item.category][item.subcategory]) treeToRender[item.type][item.category][item.subcategory] = [];
+        treeToRender[item.type][item.category][item.subcategory].push({
+          article: item.article,
+          synonyms: item.synonyms ? item.synonyms.split(',') : []
+        });
+      });
+    }
+
+    for (const opType of ['Расход', 'Доход']) {
+      const catObj = treeToRender[opType] || {};
+      const catKeys = Object.keys(catObj).sort();
+      if (catKeys.length === 0 && filteredItems) continue;
+
+      const typeCard = document.createElement('div');
+      typeCard.className = "bg-slate-800 rounded-xl border border-slate-700 shadow-sm p-5 space-y-4";
+      typeCard.innerHTML = `
+        <div class="flex items-center justify-between border-b border-slate-700 pb-3">
+          <h3 class="text-base font-bold text-white flex items-center gap-2">
+            <span class="${opType === 'Доход' ? 'text-emerald-400' : 'text-slate-400'}">●</span>
+            ${opType} (${catKeys.length} категорий)
+          </h3>
+          <button onclick="openCreateModal('category', '${opType}')" class="text-xs bg-slate-700 hover:bg-slate-600 text-slate-200 px-2.5 py-1.5 rounded-lg font-semibold flex items-center gap-1.5">
+            <i class="fa-solid fa-plus"></i> Категория
+          </button>
+        </div>
+        <div class="space-y-4" id="treeContent${opType}"></div>
+      `;
+      container.appendChild(typeCard);
+
+      const typeBody = typeCard.querySelector(`#treeContent${opType}`);
+
+      catKeys.forEach(catName => {
+        const subsObj = catObj[catName];
+        const subKeys = Object.keys(subsObj).sort();
+
+        const catBlock = document.createElement('div');
+        catBlock.className = "border border-slate-700/80 rounded-xl bg-slate-850/70 p-4 space-y-3 transition";
+
+        catBlock.ondragover = (e) => onDragOverContainer(e, catBlock);
+        catBlock.ondragleave = () => onDragLeaveContainer(catBlock);
+        catBlock.ondrop = (e) => onDropOnCategory(e, opType, catName, catBlock);
+
+        catBlock.innerHTML = `
+          <div class="flex items-center justify-between">
+            <div class="flex items-center gap-2 cursor-pointer select-none" onclick="toggleSection(this)">
+              <i class="fa-solid fa-chevron-down text-slate-400 text-xs transition-transform transform" style="transform: rotate(-90deg);"></i>
+              <span class="text-indigo-400 font-mono text-sm">📁</span>
+              <span class="font-bold text-white text-sm">${catName}</span>
+              <span class="text-xs text-slate-400 font-normal">(${subKeys.length} подкат.)</span>
+            </div>
+            <div class="flex items-center gap-1">
+              <button onclick="openCreateModal('subcategory', '${opType}', '${catName}')" class="px-2 py-1 text-slate-400 hover:text-indigo-300 text-xs"><i class="fa-solid fa-plus mr-0.5"></i>Подкатегория</button>
+              <button onclick="promptRename('category', '${opType}', '${catName}', '', '${catName}')" class="p-1.5 text-slate-400 hover:text-indigo-300 rounded text-xs"><i class="fa-solid fa-pen"></i></button>
+              <button onclick="promptDelete('category', '${opType}', '${catName}')" class="p-1.5 text-slate-400 hover:text-rose-400 rounded text-xs"><i class="fa-solid fa-trash"></i></button>
+            </div>
+          </div>
+          <div class="pl-4 border-l-2 border-slate-700/80 space-y-3 subcategories-list hidden"></div>
+        `;
+        typeBody.appendChild(catBlock);
+
+        const subList = catBlock.querySelector('.subcategories-list');
+
+        subKeys.forEach(subName => {
+          const arts = subsObj[subName];
+
+          const subCard = document.createElement('div');
+          subCard.className = "bg-slate-800 p-3 rounded-lg border border-slate-700 shadow-xs space-y-2.5 transition";
+          subCard.draggable = true;
+          subCard.ondragstart = (e) => onDragStartSubcategory(e, opType, catName, subName, subCard);
+          subCard.ondragend = () => onDragEnd(subCard);
+          subCard.ondragover = (e) => onDragOverContainer(e, subCard);
+          subCard.ondragleave = () => onDragLeaveContainer(subCard);
+          subCard.ondrop = (e) => onDropArticleOnSubcategory(e, opType, catName, subName, subCard);
+
+          subCard.innerHTML = `
+            <div class="flex items-center justify-between">
+              <div class="flex items-center gap-1.5 cursor-grab">
+                <i class="fa-solid fa-grip-vertical text-slate-500 text-xs mr-1"></i>
+                <span class="font-semibold text-xs text-slate-200">📂 ${subName}</span>
+                <span class="text-[11px] text-slate-400">(${arts.length} ст.)</span>
+              </div>
+              <div class="flex items-center gap-1">
+                <button onclick="openCreateModal('article', '${opType}', '${catName}', '${subName}')" class="text-[11px] text-indigo-400 hover:underline mr-1 font-medium">+ Статья</button>
+                <button onclick="promptRename('subcategory', '${opType}', '${catName}', '${subName}', '${subName}')" class="p-1 text-slate-400 hover:text-indigo-300 rounded text-xs"><i class="fa-solid fa-pen"></i></button>
+                <button onclick="promptMove('subcategory', '${opType}', '${catName}', '${subName}')" class="p-1 text-slate-400 hover:text-indigo-300 rounded text-xs"><i class="fa-solid fa-arrows-up-down-left-right"></i></button>
+                <button onclick="promptDelete('subcategory', '${opType}', '${catName}', '${subName}')" class="p-1 text-slate-400 hover:text-rose-400 rounded text-xs"><i class="fa-solid fa-trash"></i></button>
+              </div>
+            </div>
+            <div class="flex flex-wrap gap-1.5 pt-1">
+              ${arts.map(a => `
+                <div draggable="true"
+                     ondragstart="onDragStartArticle(event, '${opType}', '${catName}', '${subName}', '${a.article}', this)"
+                     ondragend="onDragEnd(this)"
+                     class="group/art inline-flex items-center gap-1.5 bg-slate-900/80 hover:bg-indigo-950/60 border border-slate-700 hover:border-indigo-500/50 px-2.5 py-1 rounded-md text-xs font-medium text-slate-200 cursor-grab transition">
+                  <i class="fa-solid fa-grip-lines-vertical text-slate-600 text-[10px]"></i>
+                  <span>${a.article}</span>
+                  <button onclick="promptRename('article', '${opType}', '${catName}', '${subName}', '${a.article}')" class="text-slate-500 hover:text-indigo-300 ml-1 opacity-0 group-hover/art:opacity-100"><i class="fa-solid fa-pen text-[10px]"></i></button>
+                  <button onclick="promptDelete('article', '${opType}', '${catName}', '${subName}', '${a.article}')" class="text-slate-500 hover:text-rose-400 opacity-0 group-hover/art:opacity-100"><i class="fa-solid fa-xmark text-[10px]"></i></button>
+                </div>
+              `).join('')}
+            </div>
+          `;
+          subList.appendChild(subCard);
+        });
+      });
+    }
+  }
+
+  function toggleSection(headerElem) {
+    const catBlock = headerElem.closest('.border');
+    const subList = catBlock?.querySelector('.subcategories-list');
+    const icon = headerElem.querySelector('.fa-chevron-down');
+    if (!subList) return;
+    const isHidden = subList.classList.toggle('hidden');
+    if (icon) icon.style.transform = isHidden ? 'rotate(-90deg)' : 'rotate(0deg)';
+  }
+
+  // Drag & Drop
+  function onDragStartArticle(e, type, category, subcategory, article, elem) {
+    draggedEntity = { level: 'article', type, category, subcategory, article };
+    elem.classList.add('dragging');
+    e.stopPropagation();
+  }
+
+  function onDragStartSubcategory(e, type, category, subcategory, elem) {
+    draggedEntity = { level: 'subcategory', type, category, subcategory };
+    elem.classList.add('dragging');
+    e.stopPropagation();
+  }
+
+  function onDragEnd(elem) {
+    elem?.classList.remove('dragging');
+  }
+
+  function onDragOverContainer(e, elem) {
+    e.preventDefault();
+    e.stopPropagation();
+    elem.classList.add('drag-over');
+  }
+
+  function onDragLeaveContainer(elem) {
+    elem.classList.remove('drag-over');
+  }
+
+  async function onDropArticleOnSubcategory(e, toType, toCat, toSub, elem) {
+    e.preventDefault();
+    e.stopPropagation();
+    elem.classList.remove('drag-over');
+    if (!draggedEntity || draggedEntity.level !== 'article') return;
+    if (draggedEntity.category === toCat && draggedEntity.subcategory === toSub) return;
+
+    const payload = {
+      level: 'article', type: draggedEntity.type, fromCategory: draggedEntity.category,
+      fromSubcategory: draggedEntity.subcategory, article: draggedEntity.article,
+      toCategory: toCat, toSubcategory: toSub
+    };
+
+    setStatus(`Перемещение «${draggedEntity.article}»...`);
+    try {
+      const res = await fetch('/api/catalog/move', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+      const data = await res.json();
+      if (data.status === "SUCCESS") loadCatalog();
+      else alert('Ошибка: ' + data.message);
+    } catch (err) { alert('Ошибка сети: ' + err.toString()); }
+  }
+
+  async function onDropOnCategory(e, toType, toCat, elem) {
+    e.preventDefault();
+    e.stopPropagation();
+    elem.classList.remove('drag-over');
+    if (!draggedEntity || draggedEntity.level !== 'subcategory') return;
+    if (draggedEntity.category === toCat) return;
+
+    const payload = {
+      level: 'subcategory', type: draggedEntity.type, fromCategory: draggedEntity.category,
+      fromSubcategory: draggedEntity.subcategory, toCategory: toCat
+    };
+
+    setStatus(`Перемещение «${draggedEntity.subcategory}»...`);
+    try {
+      const res = await fetch('/api/catalog/move', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+      const data = await res.json();
+      if (data.status === "SUCCESS") loadCatalog();
+      else alert('Ошибка: ' + data.message);
+    } catch (err) { alert('Ошибка сети: ' + err.toString()); }
+  }
+
+  // Модальные окна каталога
+  function openCreateModal(level = 'article', type = 'Расход', cat = '', sub = '') {
+    document.getElementById('createLevel').value = level;
+    document.getElementById('createType').value = type;
+    updateCreateModalFields();
+    if (cat) {
+      document.getElementById('createCatSelect').value = cat;
+      syncCreateSubcategorySelect();
+      if (sub) document.getElementById('createSubSelect').value = sub;
+    }
+    document.getElementById('modalCreate').classList.remove('hidden');
+  }
+
+  function updateCreateModalFields() {
+    const lvl = document.getElementById('createLevel').value;
+    syncCreateCategorySelect();
+    const isCat = lvl === 'category';
+    const isSub = lvl === 'subcategory';
+
+    document.getElementById('createCatInput').classList.toggle('hidden', !isCat);
+    document.getElementById('createCatSelectWrapper').classList.toggle('hidden', isCat);
+    document.getElementById('createSubInput').classList.toggle('hidden', !isCat && !isSub);
+    document.getElementById('createSubSelectWrapper').classList.toggle('hidden', isCat || isSub);
+    document.getElementById('createArtContainer').classList.toggle('hidden', isCat || isSub);
+    document.getElementById('createSynsContainer').classList.toggle('hidden', isCat || isSub);
+  }
+
+  function syncCreateCategorySelect() {
+    const type = document.getElementById('createType').value;
+    const select = document.getElementById('createCatSelect');
+    select.innerHTML = '';
+    const cats = Object.keys(globalTreeData[type] || {}).sort();
+    cats.forEach(c => {
+      const opt = document.createElement('option');
+      opt.value = c; opt.innerText = c;
+      select.appendChild(opt);
+    });
+    syncCreateSubcategorySelect();
+  }
+
+  function syncCreateSubcategorySelect() {
+    const type = document.getElementById('createType').value;
+    const cat = document.getElementById('createCatSelect').value;
+    const select = document.getElementById('createSubSelect');
+    select.innerHTML = '';
+    const subs = Object.keys((globalTreeData[type] || {})[cat] || {}).sort();
+    subs.forEach(s => {
+      const opt = document.createElement('option');
+      opt.value = s; opt.innerText = s;
+      select.appendChild(opt);
+    });
+  }
+
+  async function submitCreateEntity() {
+    const lvl = document.getElementById('createLevel').value;
+    const type = document.getElementById('createType').value;
+    const cat = (lvl === 'category') ? document.getElementById('createCatInput').value : document.getElementById('createCatSelect').value;
+    const sub = (lvl === 'category' || lvl === 'subcategory') ? document.getElementById('createSubInput').value : document.getElementById('createSubSelect').value;
+    const art = document.getElementById('createArtInput').value;
+    const syns = document.getElementById('createSynsInput').value;
+
+    const payload = { level: lvl, type, category: cat, subcategory: sub, article: art, synonyms: syns };
+    setStatus('Создание...');
+    try {
+      const res = await fetch('/api/catalog/create', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+      const data = await res.json();
+      if (data.status === "SUCCESS") { closeModal('modalCreate'); loadCatalog(); }
+      else alert('Ошибка: ' + data.message);
+    } catch (err) { alert('Ошибка сети: ' + err.toString()); }
+  }
+
+  function promptRename(level, type, category, subcategory, oldName) {
+    activeModalPayload = { level, type, category, subcategory, oldName };
+    document.getElementById('modalRenameTitle').innerText = `Переименовать ${level === 'category' ? 'категорию' : level === 'subcategory' ? 'подкатегорию' : 'статью'}`;
+    document.getElementById('modalRenameInput').value = oldName;
+    document.getElementById('modalRename').classList.remove('hidden');
+  }
+
+  async function submitRenameEntity() {
+    const newName = document.getElementById('modalRenameInput').value.trim();
+    if (!newName) return;
+    activeModalPayload.newName = newName;
+
+    setStatus('Сохранение...');
+    try {
+      const res = await fetch('/api/catalog/rename', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(activeModalPayload) });
+      const data = await res.json();
+      if (data.status === "SUCCESS") { closeModal('modalRename'); loadCatalog(); }
+      else alert('Ошибка: ' + data.message);
+    } catch (err) { alert('Ошибка сети: ' + err.toString()); }
+  }
+
+  async function promptDelete(level, type, category, subcategory = '', article = '') {
+    const title = level === 'category' ? `КАТЕГОРИЮ «${category}»` : level === 'subcategory' ? `ПОДКАТЕГОРИЮ «${subcategory}»` : `СТАТЬЮ «${article}»`;
+    if (!confirm(`Удалить ${title}?`)) return;
+
+    setStatus('Удаление...');
+    try {
+      const res = await fetch('/api/catalog/delete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ level, type, category, subcategory, article }) });
+      const data = await res.json();
+      if (data.status === "SUCCESS") loadCatalog();
+      else alert('Ошибка: ' + data.message);
+    } catch (err) { alert('Ошибка сети: ' + err.toString()); }
+  }
+
+  function promptMove(level, type, category, subcategory, article = '') {
+    activeModalPayload = { level, type, fromCategory: category, fromSubcategory: subcategory, article };
+    document.getElementById('modalMoveTitle').innerText = `Переместить ${level === 'subcategory' ? 'подкатегорию ' + subcategory : 'статью ' + article}`;
+
+    const catSelect = document.getElementById('modalMoveCatSelect');
+    catSelect.innerHTML = '';
+    Object.keys(globalTreeData[type] || {}).sort().forEach(c => {
+      const opt = document.createElement('option');
+      opt.value = c; opt.innerText = c;
+      catSelect.appendChild(opt);
+    });
+
+    document.getElementById('modalMoveSubWrapper').classList.toggle('hidden', level === 'subcategory');
+    if (level === 'article') syncMoveSubcategorySelect();
+    document.getElementById('modalMove').classList.remove('hidden');
+  }
+
+  function syncMoveSubcategorySelect() {
+    const type = activeModalPayload.type;
+    const cat = document.getElementById('modalMoveCatSelect').value;
+    const subSelect = document.getElementById('modalMoveSubSelect');
+    subSelect.innerHTML = '';
+    Object.keys((globalTreeData[type] || {})[cat] || {}).sort().forEach(s => {
+      const opt = document.createElement('option');
+      opt.value = s; opt.innerText = s;
+      subSelect.appendChild(opt);
+    });
+  }
+
+  async function submitMoveEntity() {
+    activeModalPayload.toCategory = document.getElementById('modalMoveCatSelect').value;
+    if (activeModalPayload.level === 'article') {
+      activeModalPayload.toSubcategory = document.getElementById('modalMoveSubSelect').value;
+    }
+
+    setStatus('Перемещение...');
+    try {
+      const res = await fetch('/api/catalog/move', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(activeModalPayload) });
+      const data = await res.json();
+      if (data.status === "SUCCESS") { closeModal('modalMove'); loadCatalog(); }
+      else alert('Ошибка: ' + data.message);
+    } catch (err) { alert('Ошибка сети: ' + err.toString()); }
+  }
+</script>
