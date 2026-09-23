@@ -14,7 +14,7 @@ def smart_search_item(user_id, item_name, op_type=None):
     Поиск с наивысшим приоритетом персонального словаря пользователя:
     1. Точное совпадение в user_dictionary (синоним или статья)
     2. Поиск в global_dictionary (с фильтрацией удаленных и переопределенных пользователем слов)
-    3. Поиск по названиям подкатегорий и категорий
+    3. Поиск по названиям подкатегорий и категорий с приоритизацией базовых статей (не экзотических тарифов)
     4. Нечёткий поиск триграммами pg_trgm (сходство >= 0.65)
     """
     conn = get_db_connection()
@@ -55,7 +55,7 @@ def smart_search_item(user_id, item_name, op_type=None):
                 "article": user_match[3].strip()
             }
 
-        # 2. ГЛОБАЛЬНЫЙ ЭТАЛОН
+        # 2. ГЛОБАЛЬНЫЙ ЭТАЛОН (с корректной изоляцией удалений по конкретным синонимам)
         type_clause_global = "AND LOWER(TRIM(g.type)) = %s" if clean_type else ""
         global_sql = f"""
             SELECT g.type, g.category, g.subcategory, g.article
@@ -66,8 +66,7 @@ def smart_search_item(user_id, item_name, op_type=None):
                   WHERE u.user_id = %s
                     AND LOWER(TRIM(u.type)) = LOWER(TRIM(g.type))
                     AND (
-                        u.is_deleted = TRUE
-                        OR (LOWER(TRIM(u.synonym)) = LOWER(TRIM(g.synonym)) AND u.is_deleted = FALSE)
+                        (LOWER(TRIM(u.synonym)) = LOWER(TRIM(g.synonym)))
                         OR (
                             LOWER(TRIM(u.category)) = LOWER(TRIM(g.category))
                             AND (u.subcategory = '' OR u.subcategory IS NULL)
@@ -77,6 +76,12 @@ def smart_search_item(user_id, item_name, op_type=None):
                             LOWER(TRIM(u.category)) = LOWER(TRIM(g.category))
                             AND LOWER(TRIM(u.subcategory)) = LOWER(TRIM(g.subcategory))
                             AND (u.article = '' OR u.article IS NULL)
+                            AND u.is_deleted = TRUE
+                        )
+                        OR (
+                            LOWER(TRIM(u.category)) = LOWER(TRIM(g.category))
+                            AND LOWER(TRIM(u.subcategory)) = LOWER(TRIM(g.subcategory))
+                            AND LOWER(TRIM(u.article)) = LOWER(TRIM(g.article))
                             AND u.is_deleted = TRUE
                         )
                     )
@@ -98,41 +103,63 @@ def smart_search_item(user_id, item_name, op_type=None):
                 "article": global_match[3].strip()
             }
 
-        # 3. ПРОВЕРКА ПО ИМЕНАМ ПОДКАТЕГОРИЙ И КАТЕГОРИЙ
+        # 3. ПРОВЕРКА ПО ИМЕНАМ ПОДКАТЕГОРИЙ И КАТЕГОРИЙ (с защитой от тарифов вроде 'Элит')
         group_sql = f"""
             SELECT type, category, subcategory, article
             FROM (
-                SELECT type, category, subcategory, article
+                SELECT type, category, subcategory, article, 1 as prio
                 FROM user_dictionary
                 WHERE user_id = %s AND is_deleted = FALSE
                 UNION ALL
-                SELECT type, category, subcategory, article
+                SELECT type, category, subcategory, article, 2 as prio
                 FROM global_dictionary
                 WHERE is_default IS NOT FALSE
             ) AS combined
             WHERE (LOWER(TRIM(subcategory)) = %s OR LOWER(TRIM(category)) = %s)
             {'AND LOWER(TRIM(type)) = %s' if clean_type else ''}
             ORDER BY
+                prio ASC,
                 CASE
                     WHEN LOWER(TRIM(subcategory)) = %s THEN 1
                     WHEN LOWER(TRIM(category)) = %s THEN 2
                     ELSE 3
+                END,
+                CASE
+                    WHEN LOWER(TRIM(article)) = %s THEN 1
+                    WHEN LOWER(TRIM(article)) = LOWER(TRIM(subcategory)) THEN 2
+                    WHEN LOWER(TRIM(article)) LIKE 'другое %%' THEN 3
+                    WHEN LOWER(TRIM(article)) = 'эконом' THEN 4
+                    ELSE 10
                 END
             LIMIT 1;
         """
         if clean_type:
-            cur.execute(group_sql, (uid, clean_item, clean_item, clean_type, clean_item, clean_item))
+            cur.execute(group_sql, (uid, clean_item, clean_item, clean_type, clean_item, clean_item, clean_item))
         else:
-            cur.execute(group_sql, (uid, clean_item, clean_item, clean_item, clean_item))
+            cur.execute(group_sql, (uid, clean_item, clean_item, clean_item, clean_item, clean_item))
 
         group_match = cur.fetchone()
         if group_match:
+            m_type = group_match[0].strip()
+            m_cat = group_match[1].strip()
+            m_sub = group_match[2].strip()
+            raw_art = (group_match[3] or "").strip()
+
+            if clean_item == m_sub.lower():
+                if raw_art.lower() == clean_item or "другое" in raw_art.lower():
+                    final_art = raw_art
+                else:
+                    canonical = get_canonical_article_for_sub(uid, m_type, m_cat, m_sub, m_sub)
+                    final_art = canonical
+            else:
+                final_art = raw_art if raw_art else item_name.strip().capitalize()
+
             return {
                 "status": "FOUND",
-                "type": group_match[0].strip(),
-                "category": group_match[1].strip(),
-                "subcategory": group_match[2].strip(),
-                "article": group_match[3].strip() if group_match[3] else item_name.strip()
+                "type": m_type,
+                "category": m_cat,
+                "subcategory": m_sub,
+                "article": final_art
             }
 
         # 4. НЕЧЁТКИЙ ТРИГРАММНЫЙ ПОИСК (pg_trgm)
