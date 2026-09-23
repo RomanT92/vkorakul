@@ -162,13 +162,13 @@ def _apply_category_to_item(internal_uid, it, hint_text, menu_full, state):
 
     return found_cat, found_sub
 
-def _try_fast_deterministic_cmd(clean_text, items_len):
+def _try_fast_deterministic_single_clause(clause_text, items_len):
     """
-    Быстрый перехват команд управления списком за 1 мс:
-    - Разделяет намерения: 'Куда положить (категория)' vs 'Переименовать название товара'
+    Разбор одной клаузы (например: 'у первой измени сумму на 600') за 1 мс.
     """
+    clean = clause_text.strip()
     target_idx = None
-    for token in clean_text.split():
+    for token in clean.split():
         for prefix, num in ORDINAL_MAP.items():
             if token.startswith(prefix):
                 target_idx = (items_len - 1) if num == -1 else (num - 1)
@@ -179,37 +179,59 @@ def _try_fast_deterministic_cmd(clean_text, items_len):
     if target_idx is None or not (0 <= target_idx < items_len):
         return None
 
-    # ЯВНОЕ переименование названия товара
+    # 1. Изменение суммы
 
-    rename_m = re.search(r'(?:назови|переименуй|исправь название|название)\s+(?:у\s+)?(?:перв\w*|втор\w*|трет\w*|четверт\w*|пят\w*|шест\w*|сед\w*|сем\w*|восьм\w*|девят\w*|десят\w*|\d+)\s*(?:как|в|на)?\s+(.+)$', clean_text)
-    if rename_m:
-        return {"action": "rename_item", "indices": [target_idx + 1], "name": rename_m.group(1).strip()}
-
-    # Изменение суммы
-    amt_m = re.search(r'(?:сумму|сумма|поменяй сумму|измени сумму|поставь сумму)\s*(?:у\s+)?(?:перв\w*|втор\w*|трет\w*|четверт\w*|пят\w*|шест\w*|сед\w*|сем\w*|восьм\w*|девят\w*|десят\w*|\d+)?\s*(?:на|в|равна)?\s*(\d+(?:[.,]\d+)?)$', clean_text)
+    amt_m = re.search(r'(?:сумму|сумма|поменяй сумму|измени сумму|поставь сумму)\s*(?:на|в|равна)?\s*(\d+(?:[.,]\d+)?)$', clean)
     if not amt_m:
-        amt_m = re.search(r'(?:перв\w*|втор\w*|трет\w*|четверт\w*|пят\w*|шест\w*|сед\w*|сем\w*|восьм\w*|девят\w*|десят\w*|\d+)\s+(?:сумма|сумму)?\s*(?:на|в|равна)?\s*(\d+(?:[.,]\d+)?)$', clean_text)
-    if amt_m:
+        amt_m = re.search(r'(\d+(?:[.,]\d+)?)\s*(?:руб|рублей|р)?$', clean)
+    if amt_m and ("сумм" in clean or "на" in clean):
         try:
-            return {"action": "edit_amount", "indices": [target_idx + 1], "amount": float(amt_m.group(1).replace(',', '.'))}
+            return {"action": "edit_amount", "index": target_idx, "amount": float(amt_m.group(1).replace(',', '.'))}
         except ValueError:
             pass
 
-    # Удаление
-    if any(w in clean_text for w in ["удали", "стереть", "убрать", "вычеркни"]):
-        return {"action": "delete", "indices": [target_idx + 1]}
+    # 2. Переименование названия товара
+    rename_m = re.search(r'(?:назови|переименуй|исправь название|название)\s*(?:как|в|на)?\s+(.+)$', clean)
+    if rename_m:
+        val = rename_m.group(1).strip()
+        val = re.sub(r'^(?:как|в|на)\s+', '', val).strip()
+        return {"action": "rename_item", "index": target_idx, "name": val}
 
-    # Изменение категории / статьи («Куда положить»)
-    cat_m = re.search(r'(?:перв\w*|втор\w*|трет\w*|четверт\w*|пят\w*|шест\w*|сед\w*|сем\w*|восьм\w*|девят\w*|десят\w*|\d+)\s+(?:категория|статья)?\s*(?:это|в|на|как)\s+(.+)$', clean_text)
+    # 3. Удаление
+    if any(w in clean for w in ["удали", "стереть", "убрать", "вычеркни"]):
+        return {"action": "delete", "index": target_idx}
+
+    # 4. Изменение категории / статьи
+    cat_m = re.search(r'(?:категорию|категория|статью|статья)\s*(?:это|в|на|как)?\s+(.+)$', clean)
     if not cat_m:
-        cat_m = re.search(r'(?:измени|поменяй|поставь|смени|перенеси)\s+(?:категорию|статью)?\s*(?:у\s+)?(?:перв\w*|втор\w*|трет\w*|четверт\w*|пят\w*|шест\w*|сед\w*|сем\w*|восьм\w*|девят\w*|десят\w*|\d+)\s*(?:на|в|как)\s+(.+)$', clean_text)
+        cat_m = re.search(r'(?:измени|поменяй|поставь|смени|перенеси)\s*(?:на|в|как)\s+(.+)$', clean)
     if cat_m:
         hint = cat_m.group(1).strip()
+        hint = re.sub(r'^(?:на|в|как|категорию|статью)\s+', '', hint).strip()
         stop_words = ["удали", "готово", "сохрани", "отмена", "назад"]
         if hint and not any(sw in hint for sw in stop_words):
-            return {"action": "set_category", "indices": [target_idx + 1], "hint": hint}
+            return {"action": "set_category", "index": target_idx, "hint": hint}
 
     return None
+
+def _parse_compound_voice_command(user_text_lower, items_len):
+    """
+    Разбивает составную фразу на несколько клауз по знакам препинания и союзам.
+    Пример: 'У первой измени сумму на 600, у второй название на обед, а у третьей категорию на быт.'
+    """
+    clean_text = re.sub(r'[!?«»"\'\-]+', ' ', user_text_lower).strip()
+    raw_clauses = re.split(r'[,.]+|\s+(?:а|и)\s+(?=(?:у\s+)?(?:перв|втор|трет|четверт|пят|шест|сед|сем|восьм|девят|десят|\d+))', clean_text)
+
+    actions = []
+    for cl in raw_clauses:
+        cl_clean = cl.strip()
+        if not cl_clean:
+            continue
+        parsed = _try_fast_deterministic_single_clause(cl_clean, items_len)
+        if parsed:
+            actions.append(parsed)
+
+    return actions
 
 def handle_list_voice_commands(user_id, user_text, user_text_lower, state, user_states):
     target_states = ["multi_tx_review", "receipt_review", "queue_batch_review", "history_view"]
@@ -298,38 +320,96 @@ def handle_list_voice_commands(user_id, user_text, user_text_lower, state, user_
     if not items:
         return False
 
-    # Нормализация текста от пунктуации Whisper
-    clean_text = re.sub(r'[,.!?«»"\'\-]+', ' ', user_text_lower).strip()
-    clean_text = re.sub(r'\s+', ' ', clean_text)
+    menu_full = get_full_menu(internal_uid)
+    report_lines = []
 
-    # 1. Быстрый детерминированный разбор за 1 мс
-    parsed_cmd = _try_fast_deterministic_cmd(clean_text, len(items))
+    # ====================================================================
+    # 2. МУЛЬТИ-КОМАНДЫ (БЫСТРЫЙ РАЗБОР СОСТАВНЫХ ПРЕДЛОЖЕНИЙ)
+    # ====================================================================
+    compound_actions = _parse_compound_voice_command(user_text_lower, len(items))
+    if compound_actions:
+        indices_to_delete = []
+        for act in compound_actions:
+            idx = act["index"]
+            it = items[idx]
+            old_name = it.get("item") or it.get("article", "Операция")
 
-    # 2. Если быстрого шаблона нет — вызываем ИИ-парсер
-    if not parsed_cmd:
-        parsed_cmd = parse_voice_list_command_with_ai(user_text)
+            if act["action"] == "edit_amount":
+                new_amt = act["amount"]
+                old_amt = it.get("amount", 0)
+                it["amount"] = new_amt
+                if state == "history_view" and "id" in it:
+                    update_transaction_amount(internal_uid, it["id"], new_amt)
+                report_lines.append(f"• №{idx+1} («{old_name}»): сумма {old_amt:g} ➔ {new_amt:g} руб.")
 
+            elif act["action"] == "rename_item":
+                new_n = act["name"].capitalize()
+                it["item"] = new_n
+                it["article"] = new_n
+                cat, sub = _apply_category_to_item(internal_uid, it, new_n, menu_full, state)
+                report_lines.append(f"• №{idx+1}: название изменено на «{new_n}» (📂 {cat} -> {sub})")
+
+            elif act["action"] == "set_category":
+                cat, sub = _apply_category_to_item(internal_uid, it, act["hint"], menu_full, state)
+                report_lines.append(f"• №{idx+1} («{old_name}»): категория 📂 {cat} -> {sub}")
+
+            elif act["action"] == "delete":
+                indices_to_delete.append(idx)
+
+        if indices_to_delete:
+            for d_idx in sorted(set(indices_to_delete), reverse=True):
+                del_it = items.pop(d_idx)
+                d_name = del_it.get("item") or del_it.get("article", "Операция")
+                if state == "history_view" and "id" in del_it:
+                    delete_transaction_by_id(internal_uid, del_it["id"])
+                report_lines.append(f"• №{d_idx+1} («{d_name}»): удалено из списка")
+
+        if report_lines:
+            send_vk_message(user_id, "✅ Изменения применены:\n" + "\n".join(report_lines))
+            _refresh_screen(user_id, state, state_data)
+            return True
+
+    # ====================================================================
+    # 3. ЕСЛИ СОСТАВНОЙ ШАБЛОН НЕ СРАБОТАЛ — ПЕРЕДАЕМ В ИИ-ПАРСЕР
+    # ====================================================================
+    parsed_cmd = parse_voice_list_command_with_ai(user_text)
     action = parsed_cmd.get("action") if parsed_cmd else None
     if action == "unknown" or not action:
         return False
 
-    menu_full = get_full_menu(internal_uid)
-
-    # 1. BATCH SET
-    if action == "batch_set":
+    # 3.1 BATCH SET / BATCH UPDATE (УНИВЕРСАЛЬНЫЙ ПАКЕТ ИЗ ИИ)
+    if action in ["batch_set", "batch_update"]:
         updates = parsed_cmd.get("updates", [])
-        applied_indices = []
         for up in updates:
             idx = int(up.get("index", 0)) - 1
-            hint = up.get("hint", "").strip()
-            if 0 <= idx < len(items) and hint:
-                _apply_category_to_item(internal_uid, items[idx], hint, menu_full, state)
-                applied_indices.append(idx + 1)
-        if applied_indices:
-            report_str = ", ".join([f"№{i}" for i in applied_indices])
-            send_vk_message(user_id, f"✅ Обновлены позиции: {report_str}")
+            if not (0 <= idx < len(items)):
+                continue
+            it = items[idx]
+            old_name = it.get("item") or it.get("article", "Операция")
+
+            if "amount" in up:
+                new_a = float(up["amount"])
+                it["amount"] = new_a
+                if state == "history_view" and "id" in it:
+                    update_transaction_amount(internal_uid, it["id"], new_a)
+                report_lines.append(f"• №{idx+1} («{old_name}»): сумма изменена на {new_a:g} руб.")
+
+            if "name" in up or "new_name" in up:
+                new_n = (up.get("name") or up.get("new_name")).capitalize()
+                it["item"] = new_n
+                it["article"] = new_n
+                cat, sub = _apply_category_to_item(internal_uid, it, new_n, menu_full, state)
+                report_lines.append(f"• №{idx+1}: название изменено на «{new_n}» (📂 {cat} -> {sub})")
+
+            if "hint" in up or "category" in up:
+                h = up.get("hint") or up.get("category")
+                cat, sub = _apply_category_to_item(internal_uid, it, h, menu_full, state)
+                report_lines.append(f"• №{idx+1} («{old_name}»): категория 📂 {cat} -> {sub}")
+
+        if report_lines:
+            send_vk_message(user_id, "✅ Изменения применены:\n" + "\n".join(report_lines))
             _refresh_screen(user_id, state, state_data)
-        return True
+            return True
 
     raw_indices = parsed_cmd.get("indices")
     if not raw_indices and "index" in parsed_cmd:
@@ -338,10 +418,9 @@ def handle_list_voice_commands(user_id, user_text, user_text_lower, state, user_
         raw_indices = []
     valid_indices = [int(i) - 1 for i in raw_indices if 0 <= int(i) - 1 < len(items)]
 
-    # 2. SET CATEGORY («КУДА ПОЛОЖИТЬ»)
+    # 3.2 SET CATEGORY
     if action == "set_category":
         hint_text = (parsed_cmd.get("hint") or parsed_cmd.get("category") or "").strip()
-        # Если команда типа "это всё подарок", а indices пустые — применяем ко ВСЕМ элементам
         if not valid_indices and any(w in user_text_lower for w in ["все", "всё"]):
             valid_indices = list(range(len(items)))
 
@@ -354,15 +433,13 @@ def handle_list_voice_commands(user_id, user_text, user_text_lower, state, user_
             _refresh_screen(user_id, state, state_data)
             return True
 
-    # 3. RENAME ITEM («ИСПРАВИТЬ ОШИБКУ РАСПОЗНАВАНИЯ ТОВАРА»)
+    # 3.3 RENAME ITEM
     if action in ["rename_item", "rename_item_and_amount"]:
         new_name = (parsed_cmd.get("name") or parsed_cmd.get("new_name") or "").strip()
         new_amount = float(parsed_cmd.get("amount", 0)) if action == "rename_item_and_amount" else None
 
-        # Защита: если названо существующее имя категории/подкатегории без явного намерения переименовать,
-        # перенаправляем действие в set_category («Куда положить»)
         is_menu_match, m_type, c_name, s_name = _find_category_in_menu(menu_full, new_name)
-        if is_menu_match and not any(w in clean_text for w in ["назови", "переименуй", "название"]):
+        if is_menu_match and not any(w in user_text_lower for w in ["назови", "переименуй", "название"]):
             if valid_indices:
                 for idx in valid_indices:
                     _apply_category_to_item(internal_uid, items[idx], new_name, menu_full, state)
@@ -374,52 +451,25 @@ def handle_list_voice_commands(user_id, user_text, user_text_lower, state, user_
         if valid_indices and new_name:
             idx = valid_indices[0]
             it = items[idx]
-            op_type = it.get("type", "Расход")
-            db_match = smart_search_item(internal_uid, new_name, op_type=op_type)
-            if db_match.get("status") != "FOUND":
-                db_match = smart_search_item(internal_uid, new_name, op_type=None)
+            clean_name = new_name.capitalize()
+            it["item"] = clean_name
+            it["article"] = clean_name
+            cat, sub = _apply_category_to_item(internal_uid, it, clean_name, menu_full, state)
 
-            if db_match.get("status") == "FOUND":
-                target_art = db_match.get("article", new_name.capitalize())
-                target_cat = db_match["category"]
-                target_sub = db_match["subcategory"]
-                target_type = db_match.get("type", op_type)
-            else:
-                target_art = new_name.capitalize()
-                target_cat = it.get("category", "Разное")
-                target_sub = it.get("subcategory", "Требует проверки")
-                target_type = op_type
-
-            if state == "history_view" and "id" in it:
-                update_transaction_category(internal_uid, it["id"], target_cat, target_sub, target_art, op_type=target_type)
-                if new_amount:
+            if new_amount:
+                it["amount"] = new_amount
+                if state == "history_view" and "id" in it:
                     update_transaction_amount(internal_uid, it["id"], new_amount)
-                    it["amount"] = new_amount
-                it["article"] = target_art
-                it["category"] = target_cat
-                it["subcategory"] = target_sub
-                it["type"] = target_type
-            else:
-                if "item" in it:
-                    it["item"] = target_art
-                elif "original_item" in it:
-                    it["original_item"] = target_art
-                it["article"] = target_art
-                it["category"] = target_cat
-                it["subcategory"] = target_sub
-                it["type"] = target_type
-                if new_amount:
-                    it["amount"] = new_amount
 
             amt_info = f" ({new_amount:g} руб.)" if new_amount else ""
             send_vk_message(
                 user_id,
-                f"✅ Позиция №{idx+1} обновлена:\n• Название: «{target_art}»{amt_info}\n• Категория: 📂 {target_cat} -> {target_sub}"
+                f"✅ Позиция №{idx+1} обновлена:\n• Название: «{clean_name}»{amt_info}\n• Категория: 📂 {cat} -> {sub}"
             )
             _refresh_screen(user_id, state, state_data)
             return True
 
-    # 4. EDIT AMOUNT
+    # 3.4 EDIT AMOUNT
     if action == "edit_amount":
         new_amount = float(parsed_cmd.get("amount", 0))
         if valid_indices and new_amount > 0:
@@ -427,16 +477,14 @@ def handle_list_voice_commands(user_id, user_text, user_text_lower, state, user_
             it = items[idx]
             name = it.get("article") or it.get("original_item") or it.get("item") or "Операция"
             old_amt = it.get("amount", 0)
+            it["amount"] = new_amount
             if state == "history_view" and "id" in it:
                 update_transaction_amount(internal_uid, it["id"], new_amount)
-                it["amount"] = new_amount
-            else:
-                it["amount"] = new_amount
             send_vk_message(user_id, f"✅ Сумма позиции №{idx+1} («{name}») изменена: {old_amt:g} руб. ➔ {new_amount:g} руб.")
             _refresh_screen(user_id, state, state_data)
             return True
 
-    # 5. DELETE
+    # 3.5 DELETE
     if action in ["delete", "delete_all", "delete_last_n"]:
         del_indices = []
         if action == "delete_all":
