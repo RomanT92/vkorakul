@@ -53,13 +53,14 @@ from handlers_tx_parser import (
     _find_best_matching_article_in_sub
 )
 from handlers_structure_nlp import find_entity_in_menu
+from handlers_history import apply_edit_to_last_transaction
 
 # Служебный ID для тестов в песочнице
 TEST_VK_ID = 999999999
 
 def run_test_module(mod_num: int, name: str, test_func):
     """Выполняет тест, замеряет время и отправляет статус в дашборд."""
-    print(f"[{mod_num:02d}/26] Тестирую: {name}...", end=" ", flush=True)
+    print(f"[{mod_num:02d}/27] Тестирую: {name}...", end=" ", flush=True)
     start_t = time.time()
     try:
         ok, err_msg = test_func()
@@ -80,7 +81,7 @@ def run_test_module(mod_num: int, name: str, test_func):
         return False, err
 
 # ====================================================================
-# ТЕСТОВЫЕ КЕЙСЫ ДЛЯ КАЖДОГО ИЗ 26 МОДУЛЕЙ
+# ТЕСТОВЫЕ КЕЙСЫ ДЛЯ КАЖДОГО ИЗ 27 МОДУЛЕЙ
 # ====================================================================
 
 # 1. Авторизация и профиль пользователя
@@ -317,8 +318,29 @@ def test_mod_26():
     except Exception as e:
         return False, f"Локальный веб-сервер админки не отвечает: {e}"
 
+# 27. Создание новой статьи голосом при правке транзакций
+def test_mod_27():
+    uid = get_or_create_user(TEST_VK_ID)
+    save_transaction(uid, "Расход", "Быт", "Мебель", "ТестЧасы", 500.0, "", "ТестЧасы", "verified")
+    last_tx = get_last_transaction(uid)
+    if not last_tx:
+        return False, "Не удалось создать исходную транзакцию для теста"
+    tx_id = last_tx["id"]
+
+    # Вызываем перенос в новую статью «ТестНастенныеЧасы»
+    ok_edit = apply_edit_to_last_transaction(TEST_VK_ID, uid, new_article_name="ТестНастенныеЧасы")
+    updated_tx = get_last_transaction(uid)
+    
+    # Очистка за собой
+    delete_transaction_by_id(uid, tx_id)
+    db_delete_entity(uid, "article", "Расход", "Быт", "Мебель", "ТестНастенныеЧасы")
+
+    if ok_edit and updated_tx and updated_tx.get("article") == "ТестНастенныеЧасы":
+        return True, ""
+    return False, f"Сбой переноса в новую статью: ok={ok_edit}, tx_art={updated_tx.get('article') if updated_tx else None}"
+
 # ====================================================================
-# ГЛАВНЫЙ РЕЕСТР ПРОГОНА 26 ТЕСТОВ
+# ГЛАВНЫЙ РЕЕСТР ПРОГОНА 27 ТЕСТОВ
 # ====================================================================
 TESTS_REGISTRY = [
     (1, "Авторизация и профиль пользователя", test_mod_01),
@@ -347,12 +369,13 @@ TESTS_REGISTRY = [
     (24, "Выписка и история транзакций", test_mod_24),
     (25, "Управление структурой (CRUD статей)", test_mod_25),
     (26, "Сторожевой таймер и панель контроля (Watchdog)", test_mod_26),
+    (27, "Создание новой статьи голосом при правке транзакций", test_mod_27),
 ]
 
 def run_all_self_tests():
-    """Запускает полный аудит всех 26 функциональных узлов."""
+    """Запускает полный аудит всех 27 функциональных узлов."""
     print("=" * 65)
-    print("🚀 СТАРТ СКВОЗНОГО АУДИТА СИСТЕМЫ «ОРАКУЛ» (26 МОДУЛЕЙ)")
+    print("🚀 СТАРТ СКВОЗНОГО АУДИТА СИСТЕМЫ «ОРАКУЛ» (27 МОДУЛЕЙ)")
     print(f"⏰ Время запуска: {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}")
     print("=" * 65)
 
@@ -376,4 +399,4 @@ def run_all_self_tests():
     return passed, failed, errors
 
 if __name__ == "__main__":
-    run_all_self_tests()
+    run_all_self_tests() 
