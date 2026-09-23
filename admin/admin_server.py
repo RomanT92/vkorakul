@@ -2,6 +2,7 @@
 import os
 import json
 import time
+import threading
 from pathlib import Path
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -232,12 +233,23 @@ async def get_system_health():
 
 @app.post("/api/trigger_test")
 async def trigger_self_test():
-    """Устанавливает флаг необходимости запуска автотестов ботом."""
-    SYSTEM_HEALTH_STATE["trigger_test_requested"] = True
-    return JSONResponse(content={
-        "status": "SUCCESS",
-        "message": "Сигнал на автотестирование передан боту. Тесты запустятся в течение минуты."
-    })
+    """
+    Моментальный запуск полного аудита 26 модулей без задержек.
+    Запускает run_all_self_tests() напрямую в фоновом потоке.
+    """
+    try:
+        from test_runner import run_all_self_tests
+        threading.Thread(target=run_all_self_tests, daemon=True).start()
+        return JSONResponse(content={
+            "status": "SUCCESS",
+            "message": "Автотесты запущены моментально в фоновом потоке!"
+        })
+    except Exception as e:
+        SYSTEM_HEALTH_STATE["trigger_test_requested"] = True
+        return JSONResponse(content={
+            "status": "SUCCESS",
+            "message": f"Тесты инициированы через очередь: {e}"
+        })
 
 # ====================================================================
 # КАТАЛОГ И ЭТАЛОН (GLOBAL_DICTIONARY)
