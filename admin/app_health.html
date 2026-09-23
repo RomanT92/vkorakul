@@ -54,7 +54,6 @@
     const statusFilter = document.getElementById('healthStatusFilter')?.value || 'ALL';
 
     const filtered = healthModulesData.filter(m => {
-
       const matchQ = !q || m.name.toLowerCase().includes(q) || m.files.toLowerCase().includes(q) || m.test_cmd.toLowerCase().includes(q);
       const matchStatus = statusFilter === 'ALL' || m.status === statusFilter;
       return matchQ && matchStatus;
@@ -98,7 +97,7 @@
         </td>
         <td class="px-4 py-3 text-right">
           ${hasError ? `
-            <button onclick="showHealthError(${m.num})" class="px-2 py-1 bg-rose-600/20 hover:bg-rose-600/40 text-rose-300 border border-rose-500/30 rounded text-xs">
+            <button onclick="showHealthError(${m.num})" class="px-2 py-1 bg-rose-600/20 hover:bg-rose-600/40 text-rose-300 border border-rose-500/30 rounded text-xs transition">
               <i class="fa-solid fa-bug mr-1"></i> Ошибка
             </button>
           ` : `<span class="text-xs text-slate-600">—</span>`}
@@ -133,13 +132,14 @@
       const fastInterval = setInterval(async () => {
         await loadHealthData(true);
         checkCount++;
-        if (checkCount >= 20 || !healthModulesData.some(m => m.status.includes('Тестируется'))) {
+        const stillTesting = healthModulesData.some(m => m.status.includes('Тестируется'));
+        if (checkCount >= 25 || !stillTesting) {
           clearInterval(fastInterval);
           setStatus('Готово');
         }
       }, 2000);
     } catch (err) {
-      alert('Ошибка отправки: ' + err.toString());
+      alert('Ошибка отправки команды тестирования: ' + err.toString());
       setStatus('Сбой');
     }
   }
