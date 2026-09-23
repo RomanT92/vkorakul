@@ -47,9 +47,9 @@ def _show_history_screen(user_id, items, title_period, total_expense, total_inco
     msg += "\n👉 Чтобы изменить сумму, категорию или удалить операцию — нажмите НОМЕР операции или скажите (например: «Удали вторую и третью»):"
     send_vk_message(user_id, msg, get_numbered_keyboard(min(len(items), 15), show_back=True))
 
-def apply_edit_to_last_transaction(user_id, internal_uid, new_category_hint=None, new_amount=None, new_item_name=None, new_type=None):
+def apply_edit_to_last_transaction(user_id, internal_uid, new_category_hint=None, new_amount=None, new_item_name=None, new_type=None, new_article_name=None):
     """
-    Применяет изменения (категория, сумма, статья/название, тип операции) к самой последней операции пользователя.
+    Применяет изменения (категория, сумма, статья/название, тип операции, новая статья) к самой последней операции пользователя.
     Используется как быстрыми локальными командами, так и диспетчером ИИ (action: edit_tx).
     """
     last_op = get_last_transaction(internal_uid)
@@ -74,8 +74,28 @@ def apply_edit_to_last_transaction(user_id, internal_uid, new_category_hint=None
         except (ValueError, TypeError):
             pass
 
+    # 1.1 Создание новой статьи и перенос последней операции туда
+    if new_article_name:
+        clean_new_art = re.sub(r'\bна\s+стенн', 'настенн', str(new_article_name).strip(), flags=re.IGNORECASE)
+        clean_new_art = clean_new_art.strip().capitalize()
+        target_cat = last_op.get("category", "Разное")
+        target_sub = last_op.get("subcategory", "Разное")
+        final_type = current_type
+
+        # Создаем статью в структуре каталога и персональном словаре
+        promote_synonym_to_article(internal_uid, final_type, target_cat, target_sub, clean_new_art)
+        learn_user_word(internal_uid, final_type, target_cat, target_sub, clean_new_art, clean_new_art)
+        orig_desc = last_op.get("original_text") or current_art
+        if orig_desc and orig_desc.lower() != clean_new_art.lower():
+            learn_user_word(internal_uid, final_type, target_cat, target_sub, clean_new_art, orig_desc)
+
+        update_transaction_category(internal_uid, tx_id, target_cat, target_sub, clean_new_art, op_type=final_type)
+        type_notice = f" ({final_type})" if final_type != last_op.get("type") else ""
+        changes_made.append(f"🆕 Создана статья: «{clean_new_art}»\n📂 {target_cat} -> {target_sub} (статья: «{clean_new_art}»){type_notice}")
+        current_art = clean_new_art
+
     # 2. Изменение категории / статьи / типа операции
-    if new_category_hint:
+    elif new_category_hint:
         hint_clean = new_category_hint.strip()
         op_type, is_exp_inc = detect_operation_type(hint_clean, current_type)
         menu_full = get_full_menu(internal_uid)
@@ -179,17 +199,45 @@ def handle_history_and_edits(user_id, internal_uid, user_text, user_text_lower, 
                 del user_states[user_id]
             return True
 
+    # 1.1. ПЕРЕНОС В НОВУЮ СТАТЬЮ / СОЗДАНИЕ НОВОЙ СТАТЬИ ДЛЯ ПОСЛЕДНЕЙ ОПЕРАЦИИ (ГОЛОС/ТЕКСТ)
+    # Примеры:
+    # "у последней операции перенеси в новую статью на стенные часы"
+    # "перенеси в новую статью настенные часы"
+    # "в новую статью настенные часы"
+    # "создай новую статью настенные часы"
+    new_art_match = re.search(
+
+        r'^(?:(?:у|в|для|о)?\s*(?:последней|прошлой|предыдущей)\s*(?:операции|траты|записи|покупки))?\s*(?:перенеси|перенести|создай|создать|сделай|сделать|добавь|добавить|запиши|отправь)?\s*(?:в|на|как)?\s*нов(?:ую|ая|ой)\s*стать(?:ю|я|е|и)\s*(?:под\s*названием|с\s*названием|название|это|как)?\s*(.+)$',
+        clean_t
+    )
+    if not new_art_match:
+        new_art_match = re.search(
+            r'^(?:перенеси|перенести|создай|создать|сделай|сделать|добавь|добавить|запиши)?\s*(?:в|на|как)?\s*нов(?:ую|ая|ой)\s*стать(?:ю|я|е|и)\s*(?:под\s*названием|с\s*названием|название|это|как)?\s*(.+?)\s*(?:у|в|для|о)?\s*(?:последней|прошлой|предыдущей)\s*(?:операции|траты|записи|покупки)$',
+            clean_t
+        )
+    if not new_art_match:
+        new_art_match = re.search(
+            r'^(?:у|в|для|о)?\s*(?:последней|прошлой|предыдущей)\s*(?:операции|траты|записи|покупки)\s*(?:перенеси|перенести)?\s*(?:в|на)?\s*(?:новую\s*статью|новую\s*статью\s*это)\s*(.+)$',
+            clean_t
+        )
+
+    if new_art_match:
+        raw_art = new_art_match.group(1).strip()
+        stop_words_art = ["удали", "покажи", "история", "список", "отмена", "помощь"]
+        if raw_art and not any(sw in raw_art for sw in stop_words_art):
+            clean_art = re.sub(r'\bна\s+стенн', 'настенн', raw_art, flags=re.IGNORECASE).strip().capitalize()
+            return apply_edit_to_last_transaction(user_id, internal_uid, new_article_name=clean_art)
+
     # 2. БЫСТРОЕ РЕДАКТИРОВАНИЕ КАТЕГОРИИ ПОСЛЕДНЕЙ ОПЕРАЦИИ (ГОЛОС/ТЕКСТ)
     # Шаблон А: "измени категорию в/у/о/для последней операции на самозанятость"
     cat_edit_match = re.search(
-
         r'^(?:измени|поменяй|поставь|смени|исправь|сделай|перенеси)\s+(?:категорию|подкатегорию|статью)?\s*(?:у|в|во|о|об|обо|для|по)?\s*(?:последней|прошлой|предыдущей)?\s*(?:операции|траты|записи|покупки)?\s*(?:на|в|как)?\s+(.+)$',
         clean_t
     )
     # Шаблон Б: "измени категорию на самозанятость в последней операции" (обратный порядок)
     if not cat_edit_match:
         cat_edit_match = re.search(
-            r'^(?:измени|поменяй|поставь|смени|исправь|сделай|перенеси)\s+(?:категорию|подкатегорию|статью)?\s*(?:на|в|как)\s+(.+?)\s+(?:у|в|во|о|об|обо|для|по)?\s*(?:последней|прошлой|предыдущей)\s*(?:операции|траты|записи|покупки)?$',
+            r'^(?:измени|поменяй|поставь|смени|исправь|сделай|перенеси)\s+(?:категорию|подкатегорию|статью)?\s*(?:на|в|как)\s+(.+?)\s*(?:у|в|во|о|об|обо|для|по)?\s*(?:последней|прошлой|предыдущей)\s*(?:операции|траты|записи|покупки)?$',
             clean_t
         )
     # Шаблон В: "у последней операции категория самозанятость" / "последняя операция это самозанятость"
@@ -252,8 +300,7 @@ def handle_history_and_edits(user_id, internal_uid, user_text, user_text_lower, 
             send_vk_message(user_id, "📭 В журнале пока нет операций для удаления.", get_main_keyboard(user_id))
             return True
         user_states[user_id] = {"state": "confirm_delete_all_tx", "period": "all"}
-        send_vk_message(user_id, f"⚠️ Вы уверены, что хотите удалить ВСЕ операции за всё время?\n\n• Найдено операций: {total_ops} шт.\n• Данные будут удалены безвозвратно!", get_yes_no_keyboard(show_back=True))
-        return True
+        send_vk_message(user_id, f"⚠️ Вы уверены, что хотите удалить ВСЕ операции за всё время?\n\n• Найдено операций: {total_ops} шт.\n• Данные будут удалены безвозвратно!", get_yes_no_keyboard(show_back=True))\n        return True
 
     # 6. УДАЛИТЬ ПОСЛЕДНЮЮ ОПЕРАЦИЮ
     delete_last_fast_triggers = [
@@ -315,6 +362,24 @@ def handle_history_and_edits(user_id, internal_uid, user_text, user_text_lower, 
             orig = sel_op.get("original_text") or sel_op["article"]
             promote_synonym_to_article(internal_uid, sel_op["type"], sel_op["category"], sel_op["subcategory"], orig)
             send_vk_message(user_id, f"✅ Готово! Статья «{orig.capitalize()}» создана в подкатегории «{sel_op['subcategory']}».", get_main_keyboard(user_id))
+            del user_states[user_id]
+            return True
+
+        # Перенос выбранной операции в новую статью
+        new_art_sel_match = re.search(
+            r'^(?:перенеси|перенести|создай|создать|сделай|сделать|добавь)?\s*(?:в|на)?\s*нов(?:ую|ая|ой)\s*стать(?:ю|я|е)\s*(?:под\s*названием|с\s*названием|это|как)?\s*(.+)$',
+            clean_t
+        )
+        if new_art_sel_match:
+            raw_art = new_art_sel_match.group(1).strip()
+            clean_art = re.sub(r'\bна\s+стенн', 'настенн', raw_art, flags=re.IGNORECASE).strip().capitalize()
+            promote_synonym_to_article(internal_uid, sel_op["type"], sel_op["category"], sel_op["subcategory"], clean_art)
+            learn_user_word(internal_uid, sel_op["type"], sel_op["category"], sel_op["subcategory"], clean_art, clean_art)
+            orig_desc = sel_op.get("original_text") or sel_op["article"]
+            if orig_desc and orig_desc.lower() != clean_art.lower():
+                learn_user_word(internal_uid, sel_op["type"], sel_op["category"], sel_op["subcategory"], clean_art, orig_desc)
+            update_transaction_category(internal_uid, sel_op["id"], sel_op["category"], sel_op["subcategory"], clean_art, op_type=sel_op["type"])
+            send_vk_message(user_id, f"✅ Создана новая статья «{clean_art}»!\nОперация успешно перенесена:\n📂 {sel_op['category']} -> {sel_op['subcategory']} (статья: «{clean_art}»)\n💰 {sel_op['amount']:g} руб.", get_main_keyboard(user_id))
             del user_states[user_id]
             return True
 
