@@ -88,11 +88,45 @@ def _save_items_batch(internal_uid, items):
 
     return saved_count, needs_review_count
 
+def _try_parse_multiple_transactions(text):
+    """
+    Быстрый детерминированный разбор строк с несколькими операциями.
+    Пример: 'такси 350, кофе 180, аптека 900'
+    Используется в test_runner.py (тест №8) и в fast-path обработке.
+    """
+    if not text:
+        return []
+    parts = re.split(r'[,;\n]+', text.strip())
+    if len(parts) < 2:
+        return []
+
+    parsed_items = []
+    for part in parts:
+        part_clean = part.strip()
+        if not part_clean:
+            continue
+        parsed_single = _try_fast_single_transaction_parse(part_clean)
+        if parsed_single:
+            parsed_items.append(parsed_single)
+        else:
+            amt_match = re.search(r'(\d+(?:[.,]\d+)?)\s*(?:руб|р)?$', part_clean, re.IGNORECASE)
+            if amt_match:
+                raw_amt = amt_match.group(1).replace(',', '.')
+                raw_name = part_clean[:amt_match.start()].strip()
+                try:
+                    amt_val = float(raw_amt)
+                    if amt_val > 0 and len(raw_name) >= 2:
+                        parsed_items.append({"item": raw_name, "amount": amt_val})
+                except ValueError:
+                    pass
+
+    return parsed_items if len(parsed_items) >= 2 else []
+
 def handle_transaction(user_id, user_text, state, user_states):
     user_text_lower = user_text.lower().strip()
     internal_uid = get_or_create_user(user_id)
 
-    # 1. Просмотр/правка истории (быстрые команды, в т.ч. «измени категорию у последней...»)
+    # 1. Просмотр/правка истории
     if handle_history_and_edits(user_id, internal_uid, user_text, user_text_lower, state, user_states):
         return True
 
@@ -107,7 +141,44 @@ def handle_transaction(user_id, user_text, state, user_states):
             send_vk_message(user_id, "Главное меню.", get_main_keyboard(user_id))
             return True
 
-    # 3. FAST-PATH: Детерминированная запись "Кофе 250" за 1 мс
+    # 3. FAST-PATH: Множественный ввод операций за 1 мс
+    fast_multi = _try_parse_multiple_transactions(user_text)
+    if fast_multi and state == "":
+        menu_full = get_full_menu(internal_uid)
+        processed_items = []
+        for op in fast_multi:
+            cur_item = op["item"]
+            amt = op["amount"]
+            op_t, _ = detect_operation_type(user_text, "Расход", cur_item)
+            s_res = smart_search_item(internal_uid, cur_item, op_type=op_t)
+            if s_res["status"] != "FOUND":
+                s_res = smart_search_item(internal_uid, cur_item, op_type=None)
+
+            if s_res["status"] == "FOUND":
+                final_t = s_res.get("type", op_t)
+                c, s, a = s_res["category"], s_res["subcategory"], s_res.get("article", cur_item.capitalize())
+                processed_items.append({
+                    "item": cur_item, "article": a, "amount": amt, "type": final_t,
+                    "category": c, "subcategory": s, "comment": "", "is_known": True
+                })
+            else:
+                type_menu = menu_full.get(op_t, {})
+                menu_str = f"[{op_t}]\n" + "\n".join([f"{cat}: {', '.join(subs.keys() if isinstance(subs, dict) else subs)}" for cat, subs in type_menu.items()])
+                rc, rs = categorize_with_ai(cur_item, menu_str)
+                vc, vs = _validate_ai_category_choice(menu_full, op_t, rc, rs)
+                fc = vc or "Разное"
+                fs = vs or "Требует проверки"
+                fa = _find_best_matching_article_in_sub(menu_full, op_t, fc, fs, cur_item)
+                processed_items.append({
+                    "item": cur_item, "article": fa, "amount": amt, "type": op_t,
+                    "category": fc, "subcategory": fs, "comment": "", "is_known": (fs != "Требует проверки")
+                })
+
+        user_states[user_id] = {"state": "multi_tx_review", "items": processed_items, "menu": menu_full}
+        _show_multi_tx_items(user_id, processed_items, show_apply_all=False)
+        return True
+
+    # 4. FAST-PATH: Одиночная запись "Кофе 250" за 1 мс
     fast_parsed = _try_fast_single_transaction_parse(user_text)
     if fast_parsed:
         if user_id in user_states:
@@ -161,7 +232,7 @@ def handle_transaction(user_id, user_text, state, user_states):
                 send_vk_message(user_id, f"🤔 Я записал операцию на {f_amt:g} руб., но не знаю статью «{f_item}».\nПодскажи в двух словах, к чему это относится:", get_cancel_keyboard(show_back=True))
             return True
 
-    # 4. Ревью массового ввода
+    # 5. Ревью массового ввода
     if state == "multi_tx_review":
         state_data = user_states[user_id]
         items = state_data["items"]
@@ -183,20 +254,20 @@ def handle_transaction(user_id, user_text, state, user_states):
     if state != "":
         return False
 
-    # 5. Анализ ввода через ИИ
+    # 6. Анализ ввода через ИИ
     reply_text = extract_transaction_with_ai(user_text)
     if not reply_text:
         return False
 
     parsed_data = _extract_json_data(reply_text)
     if parsed_data:
-        # 5.1 Управление структурой (создание, переименование, удаление, перенос)
+        # 6.1 Управление структурой
         if handle_structure_nlp_action(user_id, internal_uid, parsed_data, user_states):
             return True
 
         action = parsed_data.get("action")
 
-        # 5.2 Редактирование операции через ИИ (Режим 2 системного промпта)
+        # 6.2 Редактирование операции через ИИ
         if action == "edit_tx":
             target = parsed_data.get("target", "last")
             if target == "last":
@@ -209,17 +280,17 @@ def handle_transaction(user_id, user_text, state, user_states):
                     new_type=parsed_data.get("new_type")
                 )
 
-        # 5.3 Просмотр истории через ИИ (Режим 3 системного промпта)
+        # 6.3 Просмотр истории
         if action == "show_history":
             return handle_history_and_edits(user_id, internal_uid, "покажи историю", "покажи историю", state, user_states)
 
-        # 5.4 Удаление операций через ИИ (Режим 4 системного промпта)
+        # 6.4 Удаление операций
         if action == "delete_last_tx":
             return handle_history_and_edits(user_id, internal_uid, "удали последнюю операцию", "удали последнюю операцию", state, user_states)
         elif action == "delete_all_tx":
             return handle_history_and_edits(user_id, internal_uid, "удали все операции", "удали все операции", state, user_states)
 
-        # 5.5 Стандартная запись транзакций (Режим 1)
+        # 6.5 Запись транзакций
         raw_ops = parsed_data.get("operations", [])
         if not raw_ops and "item" in parsed_data:
             raw_ops = [parsed_data]
@@ -235,7 +306,7 @@ def handle_transaction(user_id, user_text, state, user_states):
                 continue
             cur_item = op.get("item", "").strip() or clean_fallback_item(user_text)
             op_t, is_inc = detect_operation_type(user_text, op.get("type", "Расход"), cur_item)
-            
+
             s_res = smart_search_item(internal_uid, cur_item, op_type=op_t)
             if s_res["status"] == "FOUND":
                 processed_items.append({
@@ -277,8 +348,7 @@ def handle_transaction(user_id, user_text, state, user_states):
             _show_multi_tx_items(user_id, processed_items, show_apply_all=False)
             return True
 
-    # 6. НАДРЕЖИМ «ПОБОЛТАТЬ» / ДИАЛОГОВЫЙ ОТВЕТ ИИ (Режим 6 системного промпта)
-    # Если ИИ вернул не JSON, а живой диалоговый ответ (приветствие, финансовый совет, ответ на вопрос)
+    # 7. НАДРЕЖИМ «ПОБОЛТАТЬ»
     clean_reply = reply_text.strip()
     if clean_reply and not clean_reply.startswith("{") and not clean_reply.startswith("["):
         send_vk_message(user_id, clean_reply, get_main_keyboard(user_id))
