@@ -12,7 +12,7 @@
     <div class="flex items-center space-x-3">
       <span class="text-2xl">🔮</span>
       <div>
-        <h1 class="text-lg font-bold text-white tracking-wide">Оракул Admin <span class="text-xs bg-indigo-500/20 text-indigo-400 px-2 py-0.5 rounded border border-indigo-500/30 ml-2">FastAPI Edition</span></h1>
+        <h1 class="text-lg font-bold text-white tracking-wide">Оракул Admin <span class="text-xs bg-indigo-500/20 text-indigo-400 px-2 py-0.5 rounded border border-indigo-500/30 ml-2">FastAPI Modular</span></h1>
         <p class="text-xs text-slate-400">PostgreSQL (Supabase) + Bothost</p>
       </div>
     </div>
@@ -37,7 +37,7 @@
     </button>
     <button onclick="switchMainTab('health')" id="mainTabHealthBtn" class="py-3 text-sm font-semibold border-b-2 border-transparent text-slate-400 hover:text-slate-200 flex items-center space-x-2 whitespace-nowrap">
       <i class="fa-solid fa-heart-pulse"></i>
-      <span>Контроль функционала (19)</span>
+      <span>Контроль функционала (26)</span>
     </button>
     <button onclick="switchMainTab('navigation')" id="mainTabNavBtn" class="py-3 text-sm font-semibold border-b-2 border-transparent text-slate-400 hover:text-slate-200 flex items-center space-x-2 whitespace-nowrap">
       <i class="fa-solid fa-compass"></i>
@@ -60,6 +60,10 @@
     </div>
   </main>
 
-  {% include 'app_js.html' %}
+  <!-- Модульные клиентские скрипты -->
+  {% include 'app_core.html' %}
+  {% include 'app_catalog.html' %}
+  {% include 'app_moderation.html' %}
+  {% include 'app_health.html' %}
 </body>
 </html>
