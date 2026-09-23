@@ -52,32 +52,35 @@ ai_client = OpenAI(api_key=AI_TUNNEL_KEY, base_url=AI_BASE_URL)
 def send_heartbeat():
     """
     Отправляет ежеминутный сигнал активности:
-    1. В локальную FastAPI веб-админку на порт 3000 (/api/heartbeat).
-    2. В Google Таблицу (если указан GOOGLE_SHEETS_URL).
+    1. В локальную FastAPI веб-админку на порт 3000 (/api/heartbeat) мгновенно.
+    2. В Google Таблицу (если указан GOOGLE_SHEETS_URL) с изолированным перехватом.
     """
     local_port = int(os.environ.get("PORT", 3000))
     local_url = f"http://127.0.0.1:{local_port}/api/heartbeat"
+    local_result = {"status": "SUCCESS"}
     
-    # 1. Отправка в локальную админку
+    # 1. Отправка в локальную админку (быстрый таймаут 1.5с)
     try:
-        requests.post(local_url, json={"bot_version": "6.5.0"}, timeout=3)
+        resp = requests.post(local_url, json={"bot_version": "6.5.0"}, timeout=1.5)
+        if resp.status_code == 200:
+            local_result = resp.json()
     except Exception:
         pass
 
-    # 2. Дублирование в Google Таблицу
+    # 2. Дублирование в Google Таблицу (с защитой от зависания цикла бота)
     if GOOGLE_SHEETS_URL:
         try:
-            response = requests.post(GOOGLE_SHEETS_URL, json={"action": "heartbeat"}, timeout=10)
+            response = requests.post(GOOGLE_SHEETS_URL, json={"action": "heartbeat"}, timeout=5)
             return response.json()
         except Exception as e:
             print(f"[WATCHDOG] Ошибка отправки сигнала активности в таблицу: {e}")
             return {"status": "ERROR", "message": str(e)}
 
-    return {"status": "SUCCESS"}
+    return local_result
 
 def report_module_health(module_num: int, status: str = "В строю", error_details: str = ""):
     """
-    Отправляет статус модуля (№1-19):
+    Отправляет статус модуля (№1-26):
     1. В локальную FastAPI веб-админку (/api/module_status).
     2. В Google Таблицу (если указан GOOGLE_SHEETS_URL).
     status: 'В строю', 'Требует внимания', 'Ошибка'.
@@ -86,7 +89,7 @@ def report_module_health(module_num: int, status: str = "В строю", error_d
     local_url = f"http://127.0.0.1:{local_port}/api/module_status"
     err_str = str(error_details)[:300] if error_details else ""
 
-    # 1. Отправка в локальную админку
+    # 1. Отправка в локальную админку (быстрый таймаут 1.5с)
     try:
         requests.post(
             local_url,
@@ -95,7 +98,7 @@ def report_module_health(module_num: int, status: str = "В строю", error_d
                 "status": status,
                 "error_details": err_str
             },
-            timeout=3
+            timeout=1.5
         )
     except Exception:
         pass
@@ -109,7 +112,7 @@ def report_module_health(module_num: int, status: str = "В строю", error_d
             "error": err_str
         }
         try:
-            response = requests.post(GOOGLE_SHEETS_URL, json=payload, timeout=10)
+            response = requests.post(GOOGLE_SHEETS_URL, json=payload, timeout=5)
             return response.json()
         except Exception as e:
             print(f"Ошибка отправки статуса модуля №{module_num} в таблицу: {e}")
