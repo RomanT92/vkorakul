@@ -47,7 +47,7 @@ def _show_history_screen(user_id, items, title_period, total_expense, total_inco
     msg += "\n👉 Чтобы изменить сумму, категорию или удалить операцию — нажмите НОМЕР операции или скажите (например: «Удали вторую и третью»):"
     send_vk_message(user_id, msg, get_numbered_keyboard(min(len(items), 15), show_back=True))
 
-def apply_edit_to_last_transaction(user_id, internal_uid, new_category_hint=None, new_amount=None, new_item_name=None, new_type=None, new_article_name=None):
+def apply_edit_to_last_transaction(user_id, internal_uid, new_category_hint=None, new_amount=None, new_item_name=None, new_type=None, new_article_name=None, user_states=None):
     """
     Применяет изменения (категория, сумма, статья/название, тип операции, новая статья) к самой последней операции пользователя.
     Используется как быстрыми локальными командами, так и диспетчером ИИ (action: edit_tx).
@@ -77,7 +77,8 @@ def apply_edit_to_last_transaction(user_id, internal_uid, new_category_hint=None
     # 1.1 Создание новой статьи и перенос последней операции туда
     if new_article_name:
         clean_new_art = re.sub(r'\bна\s+стенн', 'настенн', str(new_article_name).strip(), flags=re.IGNORECASE)
-        clean_new_art = clean_new_art.strip().capitalize()
+        if clean_new_art:
+            clean_new_art = clean_new_art[0].upper() + clean_new_art[1:]
         target_cat = last_op.get("category", "Разное")
         target_sub = last_op.get("subcategory", "Разное")
         final_type = current_type
@@ -164,11 +165,15 @@ def apply_edit_to_last_transaction(user_id, internal_uid, new_category_hint=None
 
     elif new_item_name:
         # Переименование статьи без изменения категории
-        clean_name = new_item_name.strip().capitalize()
+        clean_name = new_item_name.strip()
+        if clean_name:
+            clean_name = clean_name[0].upper() + clean_name[1:]
         update_transaction_category(internal_uid, tx_id, last_op["category"], last_op["subcategory"], clean_name)
         changes_made.append(f"✏️ Статья: «{clean_name}»")
 
     if changes_made:
+        if user_states is not None and user_id in user_states:
+            del user_states[user_id]
         res_text = f"✅ Последняя операция («{current_art}») успешно обновлена!\n\n" + "\n".join(changes_made)
         send_vk_message(user_id, res_text, get_main_keyboard(user_id))
         return True
@@ -220,8 +225,10 @@ def handle_history_and_edits(user_id, internal_uid, user_text, user_text_lower, 
         raw_art = new_art_match.group(1).strip()
         stop_words_art = ["удали", "покажи", "история", "список", "отмена", "помощь"]
         if raw_art and not any(sw in raw_art for sw in stop_words_art):
-            clean_art = re.sub(r'\bна\s+стенн', 'настенн', raw_art, flags=re.IGNORECASE).strip().capitalize()
-            return apply_edit_to_last_transaction(user_id, internal_uid, new_article_name=clean_art)
+            clean_art = re.sub(r'\bна\s+стенн', 'настенн', raw_art, flags=re.IGNORECASE).strip()
+            if clean_art:
+                clean_art = clean_art[0].upper() + clean_art[1:]
+            return apply_edit_to_last_transaction(user_id, internal_uid, new_article_name=clean_art, user_states=user_states)
 
     # 2. БЫСТРОЕ РЕДАКТИРОВАНИЕ КАТЕГОРИИ ПОСЛЕДНЕЙ ОПЕРАЦИИ (ГОЛОС/ТЕКСТ)
     cat_edit_match = re.search(
@@ -243,7 +250,7 @@ def handle_history_and_edits(user_id, internal_uid, user_text, user_text_lower, 
         target_hint = cat_edit_match.group(1).strip()
         stop_words_hint = ["удали", "покажи", "история", "список", "отмена"]
         if target_hint and not any(sw in target_hint for sw in stop_words_hint):
-            return apply_edit_to_last_transaction(user_id, internal_uid, new_category_hint=target_hint)
+            return apply_edit_to_last_transaction(user_id, internal_uid, new_category_hint=target_hint, user_states=user_states)
 
     # 3. БЫСТРОЕ РЕДАКТИРОВАНИЕ СУММЫ ПОСЛЕДНЕЙ ОПЕРАЦИИ (ГОЛОС/ТЕКСТ)
     amt_edit_match = re.search(
@@ -257,7 +264,7 @@ def handle_history_and_edits(user_id, internal_uid, user_text, user_text_lower, 
         )
     if amt_edit_match:
         raw_amt = amt_edit_match.group(1).replace(',', '.')
-        return apply_edit_to_last_transaction(user_id, internal_uid, new_amount=raw_amt)
+        return apply_edit_to_last_transaction(user_id, internal_uid, new_amount=raw_amt, user_states=user_states)
 
     # 4. ПРОСМОТР ПОСЛЕДНЕЙ ОПЕРАЦИИ ИЛИ ИСТОРИИ
     history_fast_triggers = [
@@ -364,7 +371,9 @@ def handle_history_and_edits(user_id, internal_uid, user_text, user_text_lower, 
         )
         if new_art_sel_match:
             raw_art = new_art_sel_match.group(1).strip()
-            clean_art = re.sub(r'\bна\s+стенн', 'настенн', raw_art, flags=re.IGNORECASE).strip().capitalize()
+            clean_art = re.sub(r'\bна\s+стенн', 'настенн', raw_art, flags=re.IGNORECASE).strip()
+            if clean_art:
+                clean_art = clean_art[0].upper() + clean_art[1:]
             promote_synonym_to_article(internal_uid, sel_op["type"], sel_op["category"], sel_op["subcategory"], clean_art)
             learn_user_word(internal_uid, sel_op["type"], sel_op["category"], sel_op["subcategory"], clean_art, clean_art)
             orig_desc = sel_op.get("original_text") or sel_op["article"]
