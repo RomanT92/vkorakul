@@ -29,6 +29,7 @@ SYSTEM_HEALTH_STATE: Dict[str, Any] = {
     "last_heartbeat": 0.0,
     "bot_version": "6.5.0",
     "trigger_test_requested": False,
+    "is_testing": False,
     "module_statuses": {}
 }
 
@@ -231,18 +232,44 @@ async def get_system_health():
         "operational_count": operational_count if is_online else 0,
         "attention_count": attention_count if is_online else total_modules,
         "readiness_percentage": readiness,
+        "is_testing": SYSTEM_HEALTH_STATE.get("is_testing", False),
         "modules": processed_modules
     })
+
+def _run_tests_thread():
+    """Фоновый поток сквозного тестирования с актуализацией состояний модулей."""
+    try:
+        SYSTEM_HEALTH_STATE["is_testing"] = True
+        now = time.time()
+        for m in MODULES_REGISTRY:
+            k = str(m["num"])
+            SYSTEM_HEALTH_STATE["module_statuses"][k] = {
+                "status": "⏳ Тестируется...",
+                "error": "",
+                "updated_at": now
+            }
+        from test_runner import run_all_self_tests
+        run_all_self_tests()
+    except Exception as ex:
+        print(f"[Admin Server] Сбой при фоновом запуске run_all_self_tests: {ex}")
+    finally:
+        SYSTEM_HEALTH_STATE["is_testing"] = False
 
 @app.post("/api/trigger_test")
 async def trigger_self_test():
     """
     Моментальный запуск полного аудита всех зарегистрированных модулей без задержек.
-    Запускает run_all_self_tests() напрямую в фоновом потоке.
+    Запускает run_all_self_tests() напрямую в фоновом потоке с отслеживанием прогресса.
     """
+    if SYSTEM_HEALTH_STATE.get("is_testing", False):
+        return JSONResponse(content={
+            "status": "IN_PROGRESS",
+            "message": "Тестирование уже выполняется в данный момент!"
+        })
+
     try:
-        from test_runner import run_all_self_tests
-        threading.Thread(target=run_all_self_tests, daemon=True).start()
+        th = threading.Thread(target=_run_tests_thread, daemon=True)
+        th.start()
         return JSONResponse(content={
             "status": "SUCCESS",
             "message": "Автотесты запущены моментально в фоновом потоке!"
