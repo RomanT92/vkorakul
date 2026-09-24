@@ -434,7 +434,7 @@ def normalize_receipt_items_with_ai(raw_items_list):
 def categorize_batch_with_ai(items_list, menu_str):
     """
     Пакетная классификация списка товаров по эталонному меню.
-    Использует gpt-4o-mini для идеального соблюдения JSON и точного маппинга.
+    Использует gemini-2.5-flash для идеального соблюдения JSON и точного маппинга.
     """
     prompt = f"Меню:\n{menu_str}\n\nОперации:\n"
     for item in items_list:
@@ -444,7 +444,7 @@ def categorize_batch_with_ai(items_list, menu_str):
 
     try:
         response = ai_client.chat.completions.create(
-            model="gpt-4o-mini",
+            model="gemini-2.5-flash",
             temperature=0.0,
             messages=[
                 {"role": "system", "content": PROMPT_BATCH_CATEGORIZE},
