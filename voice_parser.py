@@ -22,14 +22,16 @@ ORDINAL_MAP = {
 
 def _try_fast_deterministic_single_clause(clause_text, items_len):
     """
-    Разбор одной клаузы (например: 'у первой измени сумму на 600') за 1 мс.
+    Разбор одной клаузы (например: 'первое это фастфуд' или 'у первой измени сумму на 600') за 1 мс.
     """
     clean = clause_text.strip()
     target_idx = None
+    matched_token = None
     for token in clean.split():
         for prefix, num in ORDINAL_MAP.items():
             if token.startswith(prefix):
                 target_idx = (items_len - 1) if num == -1 else (num - 1)
+                matched_token = token
                 break
         if target_idx is not None:
             break
@@ -71,13 +73,23 @@ def _try_fast_deterministic_single_clause(clause_text, items_len):
         return {"action": "delete", "index": target_idx}
 
     # 5. Изменение категории / статьи
+    # 5.1. Явные команды с ключевыми словами
     cat_m = re.search(r'(?:категорию|категория|статью|статья)\s*(?:это|в|на|как)?\s+(.+)$', clean)
     if not cat_m:
         cat_m = re.search(r'(?:измени|поменяй|поставь|смени|перенеси)\s*(?:на|в|как)\s+(.+)$', clean)
+    
+    # 5.2. Естественные разговорные формы («первое это фастфуд», «второе мясо рыба», «а третье это бокалье», «1 - еда»)
+    if not cat_m and matched_token:
+        # Убираем сам порядковый токен и служебные предлоги перед ним
+        rest = re.sub(r'^(?:а\s+|и\s+|у\s+)?' + re.escape(matched_token) + r'[:\s\-]+', '', clean).strip()
+        rest = re.sub(r'^(?:это|в|на|как)\s+', '', rest).strip()
+        if rest:
+            cat_m = re.search(r'^(.+)$', rest)
+
     if cat_m:
         hint = cat_m.group(1).strip()
-        hint = re.sub(r'^(?:на|в|как|категорию|статью)\s+', '', hint).strip()
-        stop_words = ["удали", "готово", "сохрани", "отмена", "назад"]
+        hint = re.sub(r'^(?:на|в|как|категорию|статью|это)\s+', '', hint).strip()
+        stop_words = ["удали", "готово", "сохрани", "отмена", "назад", "сумма", "руб"]
         if hint and not any(sw in hint for sw in stop_words):
             return {"action": "set_category", "index": target_idx, "hint": hint}
 
@@ -86,7 +98,7 @@ def _try_fast_deterministic_single_clause(clause_text, items_len):
 def _parse_compound_voice_command(user_text_lower, items_len):
     """
     Разбивает составную фразу на несколько клауз по знакам препинания и союзам.
-    Пример: 'У первой измени сумму на 600, у второй название на обед, а у третьей категорию на быт.'
+    Пример: 'Первое это фастфуд, второе это мясо рыба, а третье это бокалье'
     """
     clean_text = re.sub(r'[!?«»"\'\-]+', ' ', user_text_lower).strip()
     raw_clauses = re.split(r'[,.]+|\s+(?:а|и)\s+(?=(?:у\s+)?(?:перв|втор|трет|четверт|пят|шест|сед|сем|восьм|девят|десят|\d+))', clean_text)
