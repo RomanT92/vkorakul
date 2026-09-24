@@ -23,6 +23,7 @@ from db import (
     learn_user_word
 )
 from handlers_tx_parser import _match_category_tree, _find_best_matching_article_in_sub
+from voice_matcher import _apply_category_to_item
 
 def _extract_json_object(text):
     """Безопасно вырезает JSON-объект {...} из ответа нейросети."""
@@ -68,7 +69,7 @@ def handle_receipt(user_id, user_text, user_text_lower, state, user_states):
             user_states[user_id]["state"] = "receipt_mode_select"
             send_vk_message(user_id, "👀 Выберите режим записи чека:", get_receipt_mode_keyboard(show_back=True))
             return True
-        elif state == "receipt_edit_hint":
+        elif state in ["receipt_edit_hint", "receipt_pick_target_for_hint"]:
             user_states[user_id]["state"] = "receipt_review"
             _show_receipt_items(user_id, user_states[user_id]["items"])
             return True
@@ -151,7 +152,7 @@ def handle_receipt(user_id, user_text, user_text_lower, state, user_states):
 
         # --- РЕЖИМ 2: ПО ПОЗИЦИЯМ (ДВУХЭТАПНЫЙ БЕСШОВНЫЙ КОНВЕЙЕР) ---
         elif any(w in user_text_lower for w in ["по позициям", "позициям", "разбей", "товарам", "построчно"]):
-            send_vk_message(user_id, "👀 Изучаю чек и считываю товары (GPT-4o Vision)...", get_cancel_keyboard(show_back=True))
+            send_vk_message(user_id, "👀 Изучаю чек и считываю товары (GPT-4o Vision)...", get_cancel_keyboard(show_back=True))\
 
             # ЭТАП 1: Чистый OCR строк и сумм
             reply_text = extract_receipt_items_with_ai(photo_url)
@@ -272,11 +273,12 @@ def handle_receipt(user_id, user_text, user_text_lower, state, user_states):
                 return True
 
     # =========================================================
-    # 2. РЕВЬЮ ПОЗИЦИЙ (Кнопка "Готово" или выбор номера)
+    # 2. РЕВЬЮ ПОЗИЦИЙ (Кнопка "Готово", выбор номера или авто-фокус)
     # =========================================================
     if state == "receipt_review":
+        items = user_states[user_id].get("items", [])
+
         if any(w in user_text_lower for w in ["готово", "записать всё", "записать все", "сохранить", "подтвердить"]):
-            items = user_states[user_id]["items"]
             send_vk_message(user_id, "⏳ Сохраняю товары в базу данных...", get_cancel_keyboard(show_back=False))
             success_count = 0
             needs_review_count = 0
@@ -320,7 +322,6 @@ def handle_receipt(user_id, user_text, user_text_lower, state, user_states):
 
         elif user_text.isdigit():
             idx = int(user_text) - 1
-            items = user_states[user_id]["items"]
             if 0 <= idx < len(items):
                 user_states[user_id]["edit_idx"] = idx
                 user_states[user_id]["state"] = "receipt_edit_hint"
@@ -333,6 +334,63 @@ def handle_receipt(user_id, user_text, user_text_lower, state, user_states):
                 )
                 return True
 
+        # УМНЫЙ АВТО-ФОКУС: если пользователь назвал категорию голосом без номера
+        clean_hint = user_text.strip().rstrip('.')
+        if clean_hint and not any(w in user_text_lower for w in ["отмена", "назад", "стоп"]):
+            # Ищем позиции, требующие проверки
+            unverified_indices = [
+                idx for idx, it in enumerate(items)
+                if it.get("category") == "Разное" or it.get("subcategory") == "Требует проверки"
+            ]
+
+            # Случай А: Ровно одна позиция требует проверки -> автоматически применяем подсказку к ней!
+            if len(unverified_indices) == 1:
+                target_idx = unverified_indices[0]
+                sel_item = items[target_idx]
+                menu_full = user_states[user_id].get("menu") or get_full_menu(internal_uid)
+                f_cat, f_sub = _apply_category_to_item(internal_uid, sel_item, clean_hint, menu_full, state)
+
+                send_vk_message(
+                    user_id,
+                    f"🎯 Позиция #{target_idx + 1} «{sel_item.get('item')}» обновлена:\n📂 {f_cat} -> {f_sub}"
+                )
+                _show_receipt_items(user_id, items)
+                return True
+
+            # Случай Б: Несколько позиций требуют проверки -> переспрашиваем номер
+            elif len(unverified_indices) > 1:
+                user_states[user_id]["pending_hint"] = clean_hint
+                user_states[user_id]["state"] = "receipt_pick_target_for_hint"
+                send_vk_message(
+                    user_id,
+                    f"💡 Понял подсказку «{clean_hint}».\n"
+                    f"К какому товару её применить? Отправьте номер позиции (от 1 до {len(items)}):",
+                    get_cancel_keyboard(show_back=True)
+                )
+                return True
+
+    # =========================================================
+    # 2.1 ВЫБОР ЦЕЛЕВОГО ТОВАРА ДЛЯ РАНЕЕ СКАЗАННОЙ ПОДСКАЗКИ
+    # =========================================================
+    if state == "receipt_pick_target_for_hint":
+        items = user_states[user_id].get("items", [])
+        pending_hint = user_states[user_id].get("pending_hint", "")
+        if user_text.isdigit():
+            idx = int(user_text) - 1
+            if 0 <= idx < len(items):
+                sel_item = items[idx]
+                menu_full = user_states[user_id].get("menu") or get_full_menu(internal_uid)
+                f_cat, f_sub = _apply_category_to_item(internal_uid, sel_item, pending_hint, menu_full, state)
+                user_states[user_id]["state"] = "receipt_review"
+                user_states[user_id].pop("pending_hint", None)
+
+                send_vk_message(
+                    user_id,
+                    f"🎯 Позиция #{idx + 1} «{sel_item.get('item')}» обновлена:\n📂 {f_cat} -> {f_sub}"
+                )
+                _show_receipt_items(user_id, items)
+                return True
+
     # =========================================================
     # 3. ИСПРАВЛЕНИЕ КАТЕГОРИИ У КОНКРЕТНОГО ТОВАРА
     # =========================================================
@@ -340,43 +398,9 @@ def handle_receipt(user_id, user_text, user_text_lower, state, user_states):
         idx = user_states[user_id]["edit_idx"]
         items = user_states[user_id]["items"]
         sel_item = items[idx]
+        menu_full = user_states[user_id].get("menu") or get_full_menu(internal_uid)
 
-        db_match = smart_search_item(internal_uid, user_text, op_type="Расход")
-        if db_match["status"] != "FOUND":
-            db_match = smart_search_item(internal_uid, user_text, op_type=None)
-
-        if db_match["status"] == "FOUND":
-            ai_cat = db_match["category"]
-            ai_sub = db_match["subcategory"]
-        else:
-            menu_full = get_full_menu(internal_uid)
-            u_clean = user_text.lower().strip()
-            found_in_tree = False
-            type_cats = menu_full.get("Расход", {})
-            for m_cat, m_subs in type_cats.items():
-                if m_cat.lower() == u_clean:
-                    ai_cat = m_cat
-                    sub_keys = list(m_subs.keys()) if isinstance(m_subs, dict) else (m_subs if m_subs else [])
-                    ai_sub = sub_keys[0] if sub_keys else "Разное"
-                    found_in_tree = True
-                    break
-                sub_keys = list(m_subs.keys()) if isinstance(m_subs, dict) else (m_subs if m_subs else [])
-                for s_name in sub_keys:
-                    if s_name.lower() == u_clean:
-                        ai_cat = m_cat
-                        ai_sub = s_name
-                        found_in_tree = True
-                        break
-                if found_in_tree:
-                    break
-
-            if not found_in_tree:
-                send_vk_message(user_id, "🧠 Подбираю категорию с помощью ИИ...", get_cancel_keyboard(show_back=True))
-                menu_str = user_states[user_id]["menu_str"]
-                ai_cat, ai_sub = categorize_with_ai(sel_item.get("item"), menu_str, context=user_text)
-
-        sel_item["category"] = ai_cat
-        sel_item["subcategory"] = ai_sub
+        f_cat, f_sub = _apply_category_to_item(internal_uid, sel_item, user_text.strip(), menu_full, state)
         user_states[user_id]["state"] = "receipt_review"
         _show_receipt_items(user_id, items)
         return True
