@@ -13,9 +13,37 @@ from handlers_tx_parser import (
     _find_best_matching_article_in_sub
 )
 
+# Словарь типичных фонетических искажений Whisper и разговорных форм
+VOICE_PHONETIC_FIXES = {
+    "бокалье": "бакалея",
+    "бокалея": "бакалея",
+    "бакалье": "бакалея",
+    "фасфуд": "фастфуд",
+    "фаст фуд": "фастфуд",
+    "мясо рыба": "мясо и рыба",
+    "рыба мясо": "мясо и рыба",
+    "хоз товары": "хозтовары",
+    "хозтовары": "хозтовары",
+    "быт химия": "бытовая химия",
+    "бытоваяхимия": "бытовая химия",
+    "вкусняшки к пиву": "снеки",
+    "закуски к пиву": "снеки",
+    "к пиву": "снеки"
+}
+
+def _simplify_str(s: str) -> str:
+    """Удаляет пробелы, знаки препинания и союзы для строгого сопоставления составных имен."""
+    clean = re.sub(r'[\s,.\-—–/]+', '', s.lower())
+    clean = re.sub(r'\b(?:и|а|в|с)\b', '', clean)
+    return clean
+
 def _find_category_in_menu(menu_full, hint_text):
-    """Полноценный трехуровневый поиск по меню категорий и подкатегорий."""
-    clean = hint_text.lower().strip()
+    """Полноценный трехуровневый поиск по меню категорий и подкатегорий с устойчивостью к оговоркам."""
+    raw_clean = hint_text.lower().strip()
+    # Применяем фонетические исправления Whisper
+    clean = VOICE_PHONETIC_FIXES.get(raw_clean, raw_clean)
+    clean_simple = _simplify_str(clean)
+
     cat_candidates = []
     sub_candidates = []
 
@@ -23,32 +51,35 @@ def _find_category_in_menu(menu_full, hint_text):
         type_cats = menu_full.get(m_type, {})
         for cat_name, subs in type_cats.items():
             sub_keys = list(subs.keys()) if isinstance(subs, dict) else (subs if subs else [])
+            cat_simple = _simplify_str(cat_name)
 
-            # 1. ТОЧНОЕ СОВПАДЕНИЕ
-            if cat_name.lower() == clean:
-                matching_sub = next((s for s in sub_keys if s.lower() == clean), (sub_keys[0] if sub_keys else "Разное"))
+            # 1. ТОЧНОЕ СОВПАДЕНИЕ (с учетом нормализации союзов и дефисов)
+            if cat_name.lower() == clean or cat_simple == clean_simple:
+                matching_sub = next((s for s in sub_keys if s.lower() == clean or _simplify_str(s) == clean_simple), (sub_keys[0] if sub_keys else "Разное"))
                 return True, m_type, cat_name, matching_sub
 
             for s_name in sub_keys:
-                if s_name.lower() == clean:
+                if s_name.lower() == clean or _simplify_str(s_name) == clean_simple:
                     return True, m_type, cat_name, s_name
 
             # 2. ЧАСТИЧНОЕ ВХОЖДЕНИЕ
             if len(clean) >= 3:
-                if clean in cat_name.lower() or cat_name.lower() in clean:
+                if clean in cat_name.lower() or cat_name.lower() in clean or (clean_simple and clean_simple in cat_simple):
                     matching_sub = sub_keys[0] if sub_keys else "Разное"
                     return True, m_type, cat_name, matching_sub
                 for s_name in sub_keys:
-                    if clean in s_name.lower() or s_name.lower() in clean:
+                    s_simple = _simplify_str(s_name)
+                    if clean in s_name.lower() or s_name.lower() in clean or (clean_simple and (clean_simple in s_simple or s_simple in clean_simple)):
                         return True, m_type, cat_name, s_name
 
             cat_candidates.append((cat_name.lower(), m_type, cat_name, sub_keys))
             for s_name in sub_keys:
                 sub_candidates.append((s_name.lower(), m_type, cat_name, s_name))
 
-    # 3. НЕЧЕТКИЙ ПОИСК
+    # 3. НЕЧЕТКИЙ ПОИСК (FUZZY MATCHING) С АДАПТИВНЫМ ПОРОГОМ
     all_sub_names = [item[0] for item in sub_candidates]
-    matches_sub = difflib.get_close_matches(clean, all_sub_names, n=1, cutoff=0.68)
+    cutoff_val = 0.58 if len(clean) >= 6 else 0.68
+    matches_sub = difflib.get_close_matches(clean, all_sub_names, n=1, cutoff=cutoff_val)
     if matches_sub:
         matched_str = matches_sub[0]
         for item in sub_candidates:
@@ -56,7 +87,7 @@ def _find_category_in_menu(menu_full, hint_text):
                 return True, item[1], item[2], item[3]
 
     all_cat_names = [item[0] for item in cat_candidates]
-    matches_cat = difflib.get_close_matches(clean, all_cat_names, n=1, cutoff=0.68)
+    matches_cat = difflib.get_close_matches(clean, all_cat_names, n=1, cutoff=cutoff_val)
     if matches_cat:
         matched_str = matches_cat[0]
         for item in cat_candidates:
@@ -78,6 +109,7 @@ def _apply_category_to_item(internal_uid, it, hint_text, menu_full, state):
     m_type = op_type
     target_art = current_art_name
     hint_clean = hint_text.strip()
+    hint_clean = VOICE_PHONETIC_FIXES.get(hint_clean.lower(), hint_clean)
 
     # 0. ПРОВЕРКА РАСЩЕПЛЕНИЯ СВЯЗКИ «Категория, Подкатегория» / «Категория -> Подкатегория»
     compound_delims = [r'\s*->\s*', r'\s*,\s*', r'\s*-\s*', r'\s*/\s*']
