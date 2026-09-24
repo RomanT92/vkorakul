@@ -1,0 +1,103 @@
+# -*- coding: utf-8 -*-
+import re
+
+ORDINAL_MAP = {
+    "перв": 1, "один": 1, "1": 1,
+    "втор": 2, "два": 2, "2": 2,
+    "трет": 3, "три": 3, "3": 3,
+    "четверт": 4, "четыр": 4, "4": 4,
+    "пят": 5, "5": 5,
+    "шест": 6, "6": 6,
+    "сед": 7, "сем": 7, "7": 7,
+    "восьм": 8, "8": 8,
+    "девят": 9, "9": 9,
+    "десят": 10, "10": 10,
+    "одиннадцат": 11, "11": 11,
+    "двенадцат": 12, "12": 12,
+    "тринадцат": 13, "13": 13,
+    "четырнадцат": 14, "14": 14,
+    "пятнадцат": 15, "15": 15,
+    "последн": -1
+}
+
+def _try_fast_deterministic_single_clause(clause_text, items_len):
+    """
+    Разбор одной клаузы (например: 'у первой измени сумму на 600') за 1 мс.
+    """
+    clean = clause_text.strip()
+    target_idx = None
+    for token in clean.split():
+        for prefix, num in ORDINAL_MAP.items():
+            if token.startswith(prefix):
+                target_idx = (items_len - 1) if num == -1 else (num - 1)
+                break
+        if target_idx is not None:
+            break
+
+    if target_idx is None or not (0 <= target_idx < items_len):
+        return None
+
+    # 1. Создание новой статьи для конкретной операции
+
+    new_art_m = re.search(r'(?:перенеси|перенести|создай|создать|сделай|сделать|запиши)?\s*(?:в|на)?\s*нов(?:ую|ая|ой)\s*стать(?:ю|я|е)\s*(?:под\s*названием|с\s*названием|это|как)?\s*(.+)$', clean)
+    if not new_art_m:
+        new_art_m = re.search(r'(?:это|назови)?\s*(.+?)\s*(?:в|на)?\s*нов(?:ую|ая|ой)\s*стать(?:ю|я|е)$', clean)
+    if new_art_m:
+        val_art = new_art_m.group(1).strip()
+        val_art = re.sub(r'^(?:в|на|под\s*названием|это|как)\s+', '', val_art).strip()
+        val_art = re.sub(r'\bна\s+стенн', 'настенн', val_art, flags=re.IGNORECASE).strip()
+        if val_art and not any(sw in val_art for sw in ["удали", "отмена", "назад", "сумм"]):
+            return {"action": "create_article", "index": target_idx, "name": val_art}
+
+    # 2. Изменение суммы
+    amt_m = re.search(r'(?:сумму|сумма|поменяй сумму|измени сумму|поставь сумму)\s*(?:на|в|равна)?\s*(\d+(?:[.,]\d+)?)$', clean)
+    if not amt_m:
+        amt_m = re.search(r'(\d+(?:[.,]\d+)?)\s*(?:руб|рублей|р)?$', clean)
+    if amt_m and ("сумм" in clean or "на" in clean):
+        try:
+            return {"action": "edit_amount", "index": target_idx, "amount": float(amt_m.group(1).replace(',', '.'))}
+        except ValueError:
+            pass
+
+    # 3. Переименование названия товара
+    rename_m = re.search(r'(?:назови|переименуй|исправь название|название)\s*(?:как|в|на)?\s+(.+)$', clean)
+    if rename_m:
+        val = rename_m.group(1).strip()
+        val = re.sub(r'^(?:как|в|на)\s+', '', val).strip()
+        return {"action": "rename_item", "index": target_idx, "name": val}
+
+    # 4. Удаление
+    if any(w in clean for w in ["удали", "стереть", "убрать", "вычеркни"]):
+        return {"action": "delete", "index": target_idx}
+
+    # 5. Изменение категории / статьи
+    cat_m = re.search(r'(?:категорию|категория|статью|статья)\s*(?:это|в|на|как)?\s+(.+)$', clean)
+    if not cat_m:
+        cat_m = re.search(r'(?:измени|поменяй|поставь|смени|перенеси)\s*(?:на|в|как)\s+(.+)$', clean)
+    if cat_m:
+        hint = cat_m.group(1).strip()
+        hint = re.sub(r'^(?:на|в|как|категорию|статью)\s+', '', hint).strip()
+        stop_words = ["удали", "готово", "сохрани", "отмена", "назад"]
+        if hint and not any(sw in hint for sw in stop_words):
+            return {"action": "set_category", "index": target_idx, "hint": hint}
+
+    return None
+
+def _parse_compound_voice_command(user_text_lower, items_len):
+    """
+    Разбивает составную фразу на несколько клауз по знакам препинания и союзам.
+    Пример: 'У первой измени сумму на 600, у второй название на обед, а у третьей категорию на быт.'
+    """
+    clean_text = re.sub(r'[!?«»"\'\-]+', ' ', user_text_lower).strip()
+    raw_clauses = re.split(r'[,.]+|\s+(?:а|и)\s+(?=(?:у\s+)?(?:перв|втор|трет|четверт|пят|шест|сед|сем|восьм|девят|десят|\d+))', clean_text)
+
+    actions = []
+    for cl in raw_clauses:
+        cl_clean = cl.strip()
+        if not cl_clean:
+            continue
+        parsed = _try_fast_deterministic_single_clause(cl_clean, items_len)
+        if parsed:
+            actions.append(parsed)
+
+    return actions
