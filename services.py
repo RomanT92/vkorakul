@@ -14,9 +14,10 @@ import requests
 # ====================================================================
 try:
     import pandas as pd
+    from PIL import Image
 except ImportError:
     print("Библиотеки не найдены. Запускаю автоустановку...")
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "pandas", "openpyxl"])
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "pandas", "openpyxl", "pillow"])
     print("Установка завершена! Перезапускаю скрипт...")
     os.execv(sys.executable, [sys.executable] + sys.argv)
 
@@ -80,7 +81,7 @@ def send_heartbeat():
 
 def report_module_health(module_num: int, status: str = "В строю", error_details: str = ""):
     """
-    Отправляет статус модуля (№1-26):
+    Отправляет статус модуля (№1-27):
     1. В локальную FastAPI веб-админку (/api/module_status).
     2. В Google Таблицу (если указан GOOGLE_SHEETS_URL).
     status: 'В строю', 'Требует внимания', 'Ошибка'.
@@ -121,23 +122,45 @@ def report_module_health(module_num: int, status: str = "В строю", error_d
     return {"status": "SUCCESS"}
 
 # ====================================================================
-# ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ДЛЯ РАБОТЫ С ФОТО
+# ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ДЛЯ РАБОТЫ С ФОТО (СЖАТИЕ И BASE64)
 # ====================================================================
 def get_image_base64_uri(image_url):
-    """Скачивает изображение из ВК через Python и кодирует в Base64."""
+    """
+    Скачивает изображение из ВК, оптимизирует размер (макс 1600px по длинной стороне)
+    и кодирует в Base64. Уменьшает размер с 10 МБ до ~250-350 КБ, предотвращая ошибку 413
+    и таймауты при отправке в Vision-нейросеть.
+    """
     try:
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         }
         res = requests.get(image_url, headers=headers, timeout=25)
-        if res.status_code == 200:
+        if res.status_code != 200:
+            print(f"[RECEIPT] Ошибка загрузки фото из ВК: HTTP {res.status_code}")
+            return None
+
+        # Оптимизация и ресайз через Pillow
+        try:
+            from PIL import Image
+            img = Image.open(io.BytesIO(res.content))
+            max_dim = 1600
+            if max(img.size) > max_dim:
+                img.thumbnail((max_dim, max_dim), Image.Resampling.LANCZOS)
+
+            if img.mode != "RGB":
+                img = img.convert("RGB")
+
+            buf = io.BytesIO()
+            img.save(buf, format="JPEG", quality=85, optimize=True)
+            b64_data = base64.b64encode(buf.getvalue()).decode("utf-8")
+            return f"data:image/jpeg;base64,{b64_data}"
+        except Exception as e_pil:
+            print(f"[RECEIPT] Pillow сжатие пропущено ({e_pil}), отправляем оригинал")
             b64_data = base64.b64encode(res.content).decode("utf-8")
             return f"data:image/jpeg;base64,{b64_data}"
-        else:
-            print(f"Ошибка загрузки фото из ВК: HTTP {res.status_code}")
-            return None
+
     except Exception as e:
-        print(f"Исключение при скачивании фото: {e}")
+        print(f"[RECEIPT] Исключение при скачивании фото: {e}")
         return None
 
 # ====================================================================
@@ -264,52 +287,95 @@ def transcribe_audio_with_ai(audio_url):
         return None
 
 def extract_receipt_total_with_ai(image_url):
-    try:
-        base64_uri = get_image_base64_uri(image_url)
-        if not base64_uri:
-            return None
+    """
+    Извлекает только итог чека и название магазина через мультимодальную модель.
+    Поддерживает сжатие в Base64, каскад gpt-4o -> gpt-4o-mini и прямой URL.
+    """
+    base64_uri = get_image_base64_uri(image_url)
 
-        response = ai_client.chat.completions.create(
-            model="gpt-4o",
-            temperature=0.0,
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": PROMPT_RECEIPT_TOTAL},
-                        {"type": "image_url", "image_url": {"url": base64_uri, "detail": "high"}}
-                    ]
-                }
-            ]
-        )
-        return response.choices[0].message.content.strip()
-    except Exception as e:
-        print(f"Ошибка AI при чтении итога чека: {e}")
+    image_payloads = []
+    if base64_uri:
+        image_payloads.append({"type": "image_url", "image_url": {"url": base64_uri}})
+    if image_url and str(image_url).startswith("http"):
+        image_payloads.append({"type": "image_url", "image_url": {"url": image_url}})
+
+    if not image_payloads:
+        print("[RECEIPT] Не удалось подготовить фото чека для анализа итога.")
         return None
+
+    models_to_try = ["gpt-4o", "gpt-4o-mini"]
+
+    for img_item in image_payloads:
+        for model_name in models_to_try:
+            try:
+                response = ai_client.chat.completions.create(
+                    model=model_name,
+                    temperature=0.0,
+                    messages=[
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": PROMPT_RECEIPT_TOTAL},
+                                img_item
+                            ]
+                        }
+                    ],
+                    timeout=45
+                )
+                res_text = response.choices[0].message.content
+                if res_text and res_text.strip():
+                    return res_text.strip()
+            except Exception as e:
+                print(f"[RECEIPT] Ошибка {model_name} при чтении итога чека: {e}")
+                continue
+
+    return None
 
 def extract_receipt_items_with_ai(image_url):
-    try:
-        base64_uri = get_image_base64_uri(image_url)
-        if not base64_uri:
-            return None
+    """
+    Извлекает все товары из чека построчно через Vision-модель.
+    Использует автоматический ресайз изображения, каскад моделей gpt-4o -> gpt-4o-mini
+    и запасной переход на прямой URL.
+    """
+    base64_uri = get_image_base64_uri(image_url)
 
-        response = ai_client.chat.completions.create(
-            model="gpt-4o",
-            temperature=0.0,
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": PROMPT_RECEIPT_ITEMS},
-                        {"type": "image_url", "image_url": {"url": base64_uri, "detail": "high"}}
-                    ]
-                }
-            ]
-        )
-        return response.choices[0].message.content.strip()
-    except Exception as e:
-        print(f"Ошибка AI при чтении позиций чека: {e}")
+    image_payloads = []
+    if base64_uri:
+        image_payloads.append({"type": "image_url", "image_url": {"url": base64_uri}})
+    if image_url and str(image_url).startswith("http"):
+        image_payloads.append({"type": "image_url", "image_url": {"url": image_url}})
+
+    if not image_payloads:
+        print("[RECEIPT] Не удалось подготовить фото чека для построчного разбора.")
         return None
+
+    models_to_try = ["gpt-4o", "gpt-4o-mini"]
+
+    for img_item in image_payloads:
+        for model_name in models_to_try:
+            try:
+                response = ai_client.chat.completions.create(
+                    model=model_name,
+                    temperature=0.0,
+                    messages=[
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": PROMPT_RECEIPT_ITEMS},
+                                img_item
+                            ]
+                        }
+                    ],
+                    timeout=50
+                )
+                res_text = response.choices[0].message.content
+                if res_text and res_text.strip():
+                    return res_text.strip()
+            except Exception as e:
+                print(f"[RECEIPT] Ошибка {model_name} при чтении позиций чека: {e}")
+                continue
+
+    return None
 
 def normalize_receipt_items_with_ai(raw_items_list):
     prompt = (
@@ -603,8 +669,7 @@ def parse_bank_file_with_ai(file_url, file_ext):
                 continue
 
         if not parsed_operations:
-            return {"status": "ERROR", "message": "Не удалось найти финансовые операции в файле."}
-        return {"status": "SUCCESS", "operations": parsed_operations}
+            return {"status": "ERROR", "message": "Не удалось найти финансовые операции в файле."}\n        return {"status": "SUCCESS", "operations": parsed_operations}
 
     except Exception as e:
         print(f"Критическая ошибка парсинга: {e}")
