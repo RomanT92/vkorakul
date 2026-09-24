@@ -18,6 +18,10 @@ VOICE_PHONETIC_FIXES = {
     "бокалье": "бакалея",
     "бокалея": "бакалея",
     "бакалье": "бакалея",
+    "бакалее": "бакалея",
+    "бакалею": "бакалея",
+    "полфабрикаты": "полуфабрикаты",
+    "полуфабрикатам": "полуфабрикаты",
     "фасфуд": "фастфуд",
     "фаст фуд": "фастфуд",
     "мясо рыба": "мясо и рыба",
@@ -31,6 +35,15 @@ VOICE_PHONETIC_FIXES = {
     "к пиву": "снеки"
 }
 
+def _stem_word(w: str) -> str:
+    """Обрезает падежные и грамматические окончания русских слов для устойчивого сравнения."""
+    clean = re.sub(r'[^а-яa-z0-9]', '', w.lower())
+    if len(clean) >= 6:
+        return clean[:-2]
+    elif len(clean) >= 4:
+        return clean[:-1]
+    return clean
+
 def _simplify_str(s: str) -> str:
     """Удаляет пробелы, знаки препинания и союзы для строгого сопоставления составных имен."""
     clean = re.sub(r'[\s,.\-—–/]+', '', s.lower())
@@ -38,11 +51,11 @@ def _simplify_str(s: str) -> str:
     return clean
 
 def _find_category_in_menu(menu_full, hint_text):
-    """Полноценный трехуровневый поиск по меню категорий и подкатегорий с устойчивостью к оговоркам."""
+    """Полноценный трехуровневый поиск по меню категорий и подкатегорий с устойчивостью к падежам."""
     raw_clean = hint_text.lower().strip()
-    # Применяем фонетические исправления Whisper
     clean = VOICE_PHONETIC_FIXES.get(raw_clean, raw_clean)
     clean_simple = _simplify_str(clean)
+    clean_stem = _stem_word(clean)
 
     cat_candidates = []
     sub_candidates = []
@@ -52,8 +65,9 @@ def _find_category_in_menu(menu_full, hint_text):
         for cat_name, subs in type_cats.items():
             sub_keys = list(subs.keys()) if isinstance(subs, dict) else (subs if subs else [])
             cat_simple = _simplify_str(cat_name)
+            cat_words_stems = [_stem_word(w) for w in re.split(r'[\s,.\-/]+', cat_name.lower()) if len(w) >= 3]
 
-            # 1. ТОЧНОЕ СОВПАДЕНИЕ (с учетом нормализации союзов и дефисов)
+            # 1. ТОЧНОЕ СОВПАДЕНИЕ
             if cat_name.lower() == clean or cat_simple == clean_simple:
                 matching_sub = next((s for s in sub_keys if s.lower() == clean or _simplify_str(s) == clean_simple), (sub_keys[0] if sub_keys else "Разное"))
                 return True, m_type, cat_name, matching_sub
@@ -62,7 +76,18 @@ def _find_category_in_menu(menu_full, hint_text):
                 if s_name.lower() == clean or _simplify_str(s_name) == clean_simple:
                     return True, m_type, cat_name, s_name
 
-            # 2. ЧАСТИЧНОЕ ВХОЖДЕНИЕ
+            # 2. ПОИСК ПО КОРНЯМ СЛОВ (ПАДЕЖИ РУССКОГО ЯЗЫКА: бакалее -> бакалея)
+            if len(clean_stem) >= 4:
+                for s_name in sub_keys:
+                    s_words_stems = [_stem_word(w) for w in re.split(r'[\s,.\-/]+', s_name.lower()) if len(w) >= 3]
+                    if any(clean_stem == sw or (len(clean_stem) >= 5 and clean_stem in sw) for sw in s_words_stems):
+                        return True, m_type, cat_name, s_name
+
+                if any(clean_stem == cw or (len(clean_stem) >= 5 and clean_stem in cw) for cw in cat_words_stems):
+                    matching_sub = sub_keys[0] if sub_keys else "Разное"
+                    return True, m_type, cat_name, matching_sub
+
+            # 3. ЧАСТИЧНОЕ ВХОЖДЕНИЕ
             if len(clean) >= 3:
                 if clean in cat_name.lower() or cat_name.lower() in clean or (clean_simple and clean_simple in cat_simple):
                     matching_sub = sub_keys[0] if sub_keys else "Разное"
@@ -76,9 +101,9 @@ def _find_category_in_menu(menu_full, hint_text):
             for s_name in sub_keys:
                 sub_candidates.append((s_name.lower(), m_type, cat_name, s_name))
 
-    # 3. НЕЧЕТКИЙ ПОИСК (FUZZY MATCHING) С АДАПТИВНЫМ ПОРОГОМ
+    # 4. НЕЧЕТКИЙ ПОИСК (FUZZY MATCHING) С АДАПТИВНЫМ ПОРОГОМ
     all_sub_names = [item[0] for item in sub_candidates]
-    cutoff_val = 0.58 if len(clean) >= 6 else 0.68
+    cutoff_val = 0.55 if len(clean) >= 6 else 0.65
     matches_sub = difflib.get_close_matches(clean, all_sub_names, n=1, cutoff=cutoff_val)
     if matches_sub:
         matched_str = matches_sub[0]
