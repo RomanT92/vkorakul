@@ -126,7 +126,8 @@ def _find_category_in_menu(menu_full, hint_text):
 def _apply_category_to_item(internal_uid, it, hint_text, menu_full, state):
     """
     Определяет правильную пару Категория -> Подкатегория -> Статья по подсказке пользователя.
-    Если названа только категория, подкатегория подбирается ИИ под конкретный товар, а не берется первая попавшаяся.
+    Если названа только категория, сначала ищет сам товар в БД/эталоне внутри этой категории,
+    предотвращая ложные назначения (например, 'Яйцо куриное' -> 'Овощи фрукты').
     """
     current_art_name = it.get("article") or it.get("original_item") or it.get("item") or "Операция"
     op_type = it.get("type", "Расход")
@@ -163,7 +164,7 @@ def _apply_category_to_item(internal_uid, it, hint_text, menu_full, state):
         if found_cat:
             break
 
-    # 1. ПРОВЕРКА: ПОЛЬЗОВАТЕЛЬ НАЗВАЛ КАТЕГОРИЮ ВЕРХНЕГО УРОВНЯ
+    # 1. ПРОВЕРКА: ПОЛЬЗОВАТЕЛЬ НАЗВАЛ КАТЕГОРИЮ ВЕРХНЕГО УРОВНЯ (НАПРИМЕР: «ПРОДУКТЫ», «БЫТ»)
     if not found_cat:
         for check_type in [op_type, "Расход", "Доход"]:
             type_cats = menu_full.get(check_type, {})
@@ -173,16 +174,26 @@ def _apply_category_to_item(internal_uid, it, hint_text, menu_full, state):
                     m_type = check_type
                     sub_keys = list(subs.keys()) if isinstance(subs, dict) else (subs if subs else [])
 
-                    # Подбираем подкатегорию под товар через ИИ строго внутри этой категории
-                    scoped_menu_str = f"[{m_type}]\n{c_name}: {', '.join(sub_keys)}"
-                    ai_c, ai_s = categorize_with_ai(current_art_name, scoped_menu_str, context=hint_clean)
-                    if ai_s in sub_keys:
-                        found_sub = ai_s
+                    # 1.1 ПЕРВЫМ ДЕЛОМ: проверяем товар в БД (синонимы и эталон), зная категорию!
+                    db_item_match = smart_search_item(internal_uid, current_art_name, op_type=m_type)
+                    if db_item_match.get("status") == "FOUND" and db_item_match.get("category") == c_name:
+                        found_sub = db_item_match.get("subcategory")
+                        target_art = db_item_match.get("article", current_art_name)
                     else:
+                        # 1.2 Поиск по дереву категорий внутри ветки c_name
                         c_tree, s_tree = _match_category_tree({m_type: {c_name: subs}}, m_type, current_art_name)
-                        found_sub = s_tree if s_tree else (sub_keys[0] if sub_keys else "Разное")
-
-                    target_art = _find_best_matching_article_in_sub(menu_full, m_type, found_cat, found_sub, current_art_name)
+                        if s_tree and s_tree in sub_keys:
+                            found_sub = s_tree
+                            target_art = _find_best_matching_article_in_sub(menu_full, m_type, found_cat, found_sub, current_art_name)
+                        else:
+                            # 1.3 Если товар новый — классифицируем через ИИ строго внутри c_name
+                            scoped_menu_str = f"[{m_type}]\n{c_name}: {', '.join(sub_keys)}"
+                            ai_c, ai_s = categorize_with_ai(current_art_name, scoped_menu_str, context=hint_clean)
+                            if ai_s in sub_keys:
+                                found_sub = ai_s
+                            else:
+                                found_sub = sub_keys[0] if sub_keys else "Разное"
+                            target_art = _find_best_matching_article_in_sub(menu_full, m_type, found_cat, found_sub, current_art_name)
                     break
             if found_cat:
                 break
