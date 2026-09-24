@@ -294,7 +294,7 @@ def transcribe_audio_with_ai(audio_url):
 def extract_receipt_total_with_ai(image_url):
     """
     Извлекает только итог чека и название магазина через мультимодальную модель.
-    Поддерживает сохранение детализации, каскад gpt-4o -> gpt-4o-mini и прямой URL.
+    Поддерживает сохранение детализации, каскад моделей и прямой URL.
     """
     base64_uri = get_image_base64_uri(image_url)
 
@@ -308,7 +308,12 @@ def extract_receipt_total_with_ai(image_url):
         print("[RECEIPT] Не удалось подготовить фото чека для анализа итога.")
         return None
 
-    models_to_try = ["gpt-4o", "gpt-4o-mini"]
+    models_to_try = [
+        "claude-3-5-sonnet",
+        "gemini-2.5-flash",
+        "gpt-4o",
+        "gpt-4o-mini"
+    ]
 
     for img_item in image_payloads:
         for model_name in models_to_try:
@@ -316,6 +321,7 @@ def extract_receipt_total_with_ai(image_url):
                 response = ai_client.chat.completions.create(
                     model=model_name,
                     temperature=0.0,
+                    max_tokens=2048,
                     messages=[
                         {
                             "role": "user",
@@ -339,7 +345,7 @@ def extract_receipt_total_with_ai(image_url):
 def extract_receipt_items_with_ai(image_url):
     """
     Извлекает все товары из чека построчно через Vision-модель в высоком разрешении.
-    Использует detail='high', каскад моделей gpt-4o -> gpt-4o-mini и запасной прямой URL.
+    Использует detail='high', каскад лучших Vision-моделей (Claude 3.5 Sonnet / Gemini 2.5 Flash / GPT-4o) и max_tokens=4096.
     """
     base64_uri = get_image_base64_uri(image_url)
 
@@ -353,7 +359,12 @@ def extract_receipt_items_with_ai(image_url):
         print("[RECEIPT] Не удалось подготовить фото чека для построчного разбора.")
         return None
 
-    models_to_try = ["gpt-4o", "gpt-4o-mini"]
+    models_to_try = [
+        "claude-3-5-sonnet",
+        "gemini-2.5-flash",
+        "gpt-4o",
+        "gpt-4o-mini"
+    ]
 
     for img_item in image_payloads:
         for model_name in models_to_try:
@@ -361,6 +372,7 @@ def extract_receipt_items_with_ai(image_url):
                 response = ai_client.chat.completions.create(
                     model=model_name,
                     temperature=0.0,
+                    max_tokens=4096,
                     messages=[
                         {
                             "role": "user",
@@ -370,7 +382,7 @@ def extract_receipt_items_with_ai(image_url):
                             ]
                         }
                     ],
-                    timeout=55
+                    timeout=60
                 )
                 res_text = response.choices[0].message.content
                 if res_text and res_text.strip():
