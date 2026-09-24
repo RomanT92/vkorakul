@@ -1,4 +1,22 @@
 <script>
+  let isTestingActive = false;
+
+  function updateTestButtonState(testing) {
+    isTestingActive = testing;
+    const btn = document.getElementById('triggerTestBtn');
+    if (!btn) return;
+
+    if (testing) {
+      btn.disabled = true;
+      btn.classList.add('opacity-75', 'cursor-not-allowed', 'animate-pulse');
+      btn.innerHTML = `<i class="fa-solid fa-spinner fa-spin mr-2"></i><span>Тестирование модулей...</span>`;
+    } else {
+      btn.disabled = false;
+      btn.classList.remove('opacity-75', 'cursor-not-allowed', 'animate-pulse');
+      btn.innerHTML = `<i class="fa-solid fa-play mr-2 text-indigo-400"></i><span>Запустить автотест</span>`;
+    }
+  }
+
   async function loadHealthData(isSilent = false) {
     if (!isSilent) setStatus('Опрос телеметрии...');
     try {
@@ -41,8 +59,12 @@
         document.getElementById('healthPercentage').innerText = data.readiness_percentage + '%';
         document.getElementById('healthProgressBar').style.width = data.readiness_percentage + '%';
 
+        if (typeof data.is_testing !== 'undefined') {
+          updateTestButtonState(Boolean(data.is_testing));
+        }
+
         applyHealthFilters();
-        if (!isSilent) setStatus('Готово');
+        if (!isSilent) setStatus(data.is_testing ? 'Тестирование...' : 'Готово');
       }
     } catch (err) {
       if (!isSilent) setStatus('Сбой связи');
@@ -54,6 +76,7 @@
     const statusFilter = document.getElementById('healthStatusFilter')?.value || 'ALL';
 
     const filtered = healthModulesData.filter(m => {
+
       const matchQ = !q || m.name.toLowerCase().includes(q) || m.files.toLowerCase().includes(q) || m.test_cmd.toLowerCase().includes(q);
       const matchStatus = statusFilter === 'ALL' || m.status === statusFilter;
       return matchQ && matchStatus;
@@ -117,29 +140,43 @@
   }
 
   async function triggerSelfTestBtn() {
-    if (!confirm('Запустить полный комплекс автоматического тестирования всех 26 модулей бота?')) return;
+    if (isTestingActive) return;
+    if (!confirm('Запустить полный комплекс автоматического тестирования всех модулей бота?')) return;
 
+    updateTestButtonState(true);
     setStatus('Запуск тестов...');
+
     healthModulesData.forEach(m => m.status = '⏳ Тестируется...');
     renderHealthTable(healthModulesData);
 
     try {
       const res = await fetch('/api/trigger_test', { method: 'POST' });
       const data = await res.json();
-      setStatus('Тесты запущены...');
+
+      if (data.status === 'ERROR') {
+        alert('Ошибка: ' + (data.message || 'Не удалось запустить тесты'));
+        updateTestButtonState(false);
+        setStatus('Сбой');
+        return;
+      }
+
+      setStatus('Тестирование выполняется...');
 
       let checkCount = 0;
       const fastInterval = setInterval(async () => {
         await loadHealthData(true);
         checkCount++;
+
         const stillTesting = healthModulesData.some(m => m.status.includes('Тестируется'));
-        if (checkCount >= 25 || !stillTesting) {
+        if (checkCount >= 40 || !stillTesting) {
           clearInterval(fastInterval);
-          setStatus('Готово');
+          updateTestButtonState(false);
+          setStatus('Тестирование завершено');
         }
-      }, 2000);
+      }, 1500);
     } catch (err) {
       alert('Ошибка отправки команды тестирования: ' + err.toString());
+      updateTestButtonState(false);
       setStatus('Сбой');
     }
   }
