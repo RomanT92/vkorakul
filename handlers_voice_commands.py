@@ -97,49 +97,79 @@ def _find_category_in_menu(menu_full, hint_text):
 def _apply_category_to_item(internal_uid, it, hint_text, menu_full, state):
     """
     Определяет правильную пару Категория -> Подкатегория -> Статья по подсказке пользователя:
-    1. Поиск по БД через smart_search_item (знает 'подарок', 'мясо', 'аптека', 'самозанятость')
-    2. Поиск по дереву категорий
-    3. Резерв через ИИ с валидацией
+    1. Проверка составной связки «Категория, Подкатегория» (например: «готовая еда, напитки»)
+    2. Поиск по БД через smart_search_item
+    3. Поиск по дереву категорий
+    4. Резерв через ИИ с валидацией
     """
     current_art_name = it.get("article") or it.get("original_item") or it.get("item") or "Операция"
     op_type = it.get("type", "Расход")
     found_cat, found_sub = None, None
     m_type = op_type
     target_art = current_art_name
+    hint_clean = hint_text.strip()
+
+    # 0. ПРОВЕРКА РАСЩЕПЛЕНИЯ СВЯЗКИ «Категория, Подкатегория» / «Категория -> Подкатегория»
+    compound_delims = [r'\s*->\s*', r'\s*,\s*', r'\s*-\s*', r'\s*/\s*']
+    for d_pattern in compound_delims:
+        parts = re.split(d_pattern, hint_clean)
+        if len(parts) >= 2:
+            p_cat = parts[0].strip()
+            p_sub = parts[1].strip()
+            if len(p_cat) >= 2 and len(p_sub) >= 2:
+                for check_type in [op_type, "Расход", "Доход"]:
+                    type_cats = menu_full.get(check_type, {})
+                    for c_name, subs in type_cats.items():
+                        if p_cat.lower() in c_name.lower() or c_name.lower() in p_cat.lower():
+                            sub_keys = list(subs.keys()) if isinstance(subs, dict) else (subs if subs else [])
+                            for s_name in sub_keys:
+                                if p_sub.lower() in s_name.lower() or s_name.lower() in p_sub.lower():
+                                    found_cat = c_name
+                                    found_sub = s_name
+                                    m_type = check_type
+                                    target_art = _find_best_matching_article_in_sub(menu_full, m_type, found_cat, found_sub, current_art_name)
+                                    break
+                            if found_cat:
+                                break
+                    if found_cat:
+                        break
+        if found_cat:
+            break
 
     # 1. ПРИОРИТЕТ: Поиск подсказки в базе данных
-    db_match = smart_search_item(internal_uid, hint_text, op_type=op_type)
-    if db_match.get("status") != "FOUND":
-        alt_type = "Доход" if op_type == "Расход" else "Расход"
-        alt_db = smart_search_item(internal_uid, hint_text, op_type=alt_type)
-        if alt_db.get("status") == "FOUND":
-            db_match = alt_db
-            m_type = alt_type
-        else:
-            db_match = smart_search_item(internal_uid, hint_text, op_type=None)
+    if not found_cat:
+        db_match = smart_search_item(internal_uid, hint_clean, op_type=op_type)
+        if db_match.get("status") != "FOUND":
+            alt_type = "Доход" if op_type == "Расход" else "Расход"
+            alt_db = smart_search_item(internal_uid, hint_clean, op_type=alt_type)
+            if alt_db.get("status") == "FOUND":
+                db_match = alt_db
+                m_type = alt_type
+            else:
+                db_match = smart_search_item(internal_uid, hint_clean, op_type=None)
 
-    if db_match.get("status") == "FOUND":
-        m_type = db_match.get("type", op_type)
-        found_cat = db_match["category"]
-        found_sub = db_match["subcategory"]
-        target_art = db_match.get("article") or _find_best_matching_article_in_sub(menu_full, m_type, found_cat, found_sub, current_art_name)
-    else:
-        # 2. Поиск по дереву меню
-        is_match, menu_m_type, c_name, s_name = _find_category_in_menu(menu_full, hint_text)
-        if is_match:
-            m_type = menu_m_type
-            found_cat = c_name
-            found_sub = s_name
-            target_art = _find_best_matching_article_in_sub(menu_full, m_type, found_cat, found_sub, current_art_name)
+        if db_match.get("status") == "FOUND":
+            m_type = db_match.get("type", op_type)
+            found_cat = db_match["category"]
+            found_sub = db_match["subcategory"]
+            target_art = db_match.get("article") or _find_best_matching_article_in_sub(menu_full, m_type, found_cat, found_sub, current_art_name)
         else:
-            # 3. Резерв через ИИ
-            type_menu = menu_full.get(op_type, {})
-            menu_str = f"[{op_type}]\n" + "\n".join([f"{c}: {', '.join(subs.keys() if isinstance(subs, dict) else subs)}" for c, subs in type_menu.items()])
-            ai_c, ai_s = categorize_with_ai(current_art_name, menu_str, context=hint_text)
-            v_c, v_s = _validate_ai_category_choice(menu_full, op_type, ai_c, ai_s)
-            found_cat = v_c or "Разное"
-            found_sub = v_s or "Требует проверки"
-            target_art = _find_best_matching_article_in_sub(menu_full, op_type, found_cat, found_sub, current_art_name)
+            # 2. Поиск по дереву меню
+            is_match, menu_m_type, c_name, s_name = _find_category_in_menu(menu_full, hint_clean)
+            if is_match:
+                m_type = menu_m_type
+                found_cat = c_name
+                found_sub = s_name
+                target_art = _find_best_matching_article_in_sub(menu_full, m_type, found_cat, found_sub, current_art_name)
+            else:
+                # 3. Резерв через ИИ
+                type_menu = menu_full.get(op_type, {})
+                menu_str = f"[{op_type}]\n" + "\n".join([f"{c}: {', '.join(subs.keys() if isinstance(subs, dict) else subs)}" for c, subs in type_menu.items()])
+                ai_c, ai_s = categorize_with_ai(current_art_name, menu_str, context=hint_clean)
+                v_c, v_s = _validate_ai_category_choice(menu_full, op_type, ai_c, ai_s)
+                found_cat = v_c or "Разное"
+                found_sub = v_s or "Требует проверки"
+                target_art = _find_best_matching_article_in_sub(menu_full, op_type, found_cat, found_sub, current_art_name)
 
     # Сохраняем результат
     if state == "history_view" and "id" in it:
@@ -158,7 +188,7 @@ def _apply_category_to_item(internal_uid, it, hint_text, menu_full, state):
 
     if found_cat != "Разное" and found_sub != "Требует проверки":
         learn_user_word(internal_uid, m_type, found_cat, found_sub, target_art, current_art_name)
-        learn_user_word(internal_uid, m_type, found_cat, found_sub, target_art, hint_text)
+        learn_user_word(internal_uid, m_type, found_cat, found_sub, target_art, hint_clean)
 
     return found_cat, found_sub
 
@@ -180,7 +210,6 @@ def _try_fast_deterministic_single_clause(clause_text, items_len):
         return None
 
     # 1. Создание новой статьи для конкретной операции
-    # Примеры: "у второго это настенные часы в новую статью", "перенеси в новую статью настенные часы", "в новую статью настенные часы"
 
     new_art_m = re.search(r'(?:перенеси|перенести|создай|создать|сделай|сделать|запиши)?\s*(?:в|на)?\s*нов(?:ую|ая|ой)\s*стать(?:ю|я|е)\s*(?:под\s*названием|с\s*названием|это|как)?\s*(.+)$', clean)
     if not new_art_m:
@@ -317,7 +346,7 @@ def handle_list_voice_commands(user_id, user_text, user_text_lower, state, user_
         "название", "товар", "все", "всё", "всех", "очисти", "категори", "тоже",
         "также", "перв", "втор", "трет", "четверт", "пят", "шест", "седьм", "восьм",
         "девят", "десят", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10",
-        "операци", "строк", "пункт", "корзин", "мусор", "стать", "нов"
+        "операци", "строк", "пункт", "корзин", "мусор", "стать", "нов", "по"
     ]
     if not any(t in user_text_lower for t in cmd_triggers):
         return False
@@ -334,6 +363,27 @@ def handle_list_voice_commands(user_id, user_text, user_text_lower, state, user_
 
     menu_full = get_full_menu(internal_uid)
     report_lines = []
+
+    # ====================================================================
+    # 1.1 БЫСТРЫЙ ДИАПАЗОН («С 24 ПО 28 ЭТО ГОТОВАЯ ЕДА, НАПИТКИ»)
+    # ====================================================================
+    range_match = re.search(r'(?:с|от)\s*(\d+)\s*(?:по|до|-)\s*(\d+)\s*(?:это|как)?\s*(.+)$', user_text_lower)
+    if range_match:
+        start_n = int(range_match.group(1))
+        end_n = int(range_match.group(2))
+        hint_str = range_match.group(3).strip()
+        if start_n > end_n:
+            start_n, end_n = end_n, start_n
+        target_idxs = [i - 1 for i in range(start_n, end_n + 1) if 0 <= i - 1 < len(items)]
+        if target_idxs and hint_str:
+            for idx in target_idxs:
+                it = items[idx]
+                old_n = it.get("item") or it.get("article", "Операция")
+                c, s = _apply_category_to_item(internal_uid, it, hint_str, menu_full, state)
+                report_lines.append(f"• №{idx+1} («{old_n}»): категория 📂 {c} -> {s}")
+            send_vk_message(user_id, "✅ Изменения применены:\n" + "\n".join(report_lines))
+            _refresh_screen(user_id, state, state_data)
+            return True
 
     # ====================================================================
     # 2. МУЛЬТИ-КОМАНДЫ (БЫСТРЫЙ РАЗБОР СОСТАВНЫХ ПРЕДЛОЖЕНИЙ)
