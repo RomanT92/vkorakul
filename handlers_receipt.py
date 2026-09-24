@@ -22,6 +22,7 @@ from db import (
     get_full_menu,
     learn_user_word
 )
+from handlers_tx_parser import _match_category_tree, _find_best_matching_article_in_sub
 
 def _extract_json_object(text):
     """Безопасно вырезает JSON-объект {...} из ответа нейросети."""
@@ -40,12 +41,15 @@ def _show_receipt_items(user_id, items):
     for i, item in enumerate(items):
         amt = float(item.get('amount', 0))
         total_amt += amt
-        msg += f"{i+1}. {item.get('item')} — {amt:g} руб.\n"
-        msg += f"   📂 {item.get('category', '?')} -> {item.get('subcategory', '?')}\n\n"
+        cat = item.get('category', 'Разное')
+        sub = item.get('subcategory', 'Требует проверки')
+        icon = "✅" if (cat != "Разное" and sub != "Требует проверки") else "⚠️"
+        msg += f"{i+1}. {icon} {item.get('item')} — {amt:g} руб.\n"
+        msg += f"   📂 {cat} -> {sub}\n\n"
 
     msg += f"💰 Итого по позициям: {total_amt:g} руб.\n\n"
-    msg += "👉 Если всё верно — нажмите «✅ Готово».\n"
-    msg += "👉 Если есть ошибка — отправьте НОМЕР товара, чтобы дать подсказку."
+    msg += "👉 Если всё верно — нажмите «✅ Готово» (или скажите «Записать всё»).\n"
+    msg += "👉 Чтобы изменить категорию — отправьте НОМЕР товара или скажите голосом (например: «второе это быт»)."
     send_vk_message(user_id, msg, get_receipt_review_keyboard(len(items), show_back=True))
 
 def handle_receipt(user_id, user_text, user_text_lower, state, user_states):
@@ -53,9 +57,9 @@ def handle_receipt(user_id, user_text, user_text_lower, state, user_states):
     internal_uid = get_or_create_user(user_id)
 
     # =========================================================
-    # ОБРАБОТКА «НАЗАД» В ЧЕКАХ
+    # ОБРАБОТКА «НАЗАД» И СБРОСА В ЧЕКАХ
     # =========================================================
-    if "назад" in user_text_lower:
+    if any(w in user_text_lower for w in ["назад", "отмена", "отменить"]):
         if state == "receipt_mode_select":
             del user_states[user_id]
             send_vk_message(user_id, "Главное меню.", get_main_keyboard(user_id))
@@ -76,7 +80,7 @@ def handle_receipt(user_id, user_text, user_text_lower, state, user_states):
         photo_url = user_states[user_id].get("photo_url")
 
         # --- РЕЖИМ 1: ОБЩИЙ ИТОГ ---
-        if "общий итог" in user_text_lower:
+        if any(w in user_text_lower for w in ["общий итог", "общий", "целиком", "быстро", "суммой"]):
             send_vk_message(user_id, "👀 Изучаю чек (общий итог)...", get_cancel_keyboard(show_back=True))
             reply_text = extract_receipt_total_with_ai(photo_url)
             del user_states[user_id]
@@ -146,7 +150,7 @@ def handle_receipt(user_id, user_text, user_text_lower, state, user_states):
             return True
 
         # --- РЕЖИМ 2: ПО ПОЗИЦИЯМ (ДВУХЭТАПНЫЙ БЕСШОВНЫЙ КОНВЕЙЕР) ---
-        elif "по позициям" in user_text_lower:
+        elif any(w in user_text_lower for w in ["по позициям", "позициям", "разбей", "товарам", "построчно"]):
             send_vk_message(user_id, "👀 Изучаю чек и считываю товары (GPT-4o Vision)...", get_cancel_keyboard(show_back=True))
 
             # ЭТАП 1: Чистый OCR строк и сумм
@@ -187,34 +191,62 @@ def handle_receipt(user_id, user_text, user_text_lower, state, user_states):
                         if db_match.get("status") == "FOUND":
                             final_items.append({
                                 "item": item_name,
+                                "original_item": item_name,
                                 "amount": amt,
                                 "category": db_match["category"],
                                 "subcategory": db_match["subcategory"]
                             })
                         else:
-                            # Товар неизвестен базе — добавляем в очередь на классификацию
-                            item_obj = {
-                                "item": item_name,
-                                "original_item": item_name,
-                                "amount": amt,
-                                "category": "Разное",
-                                "subcategory": "Требует проверки"
-                            }
-                            final_items.append(item_obj)
-                            unknown_items_for_ai.append(item_obj)
+                            # 2. Локальный поиск по дереву категорий пользователя
+                            c_tree, s_tree = _match_category_tree(menu_full, "Расход", item_name)
+                            if c_tree and s_tree:
+                                final_items.append({
+                                    "item": item_name,
+                                    "original_item": item_name,
+                                    "amount": amt,
+                                    "category": c_tree,
+                                    "subcategory": s_tree
+                                })
+                            else:
+                                item_obj = {
+                                    "item": item_name,
+                                    "original_item": item_name,
+                                    "amount": amt,
+                                    "category": "Разное",
+                                    "subcategory": "Требует проверки"
+                                }
+                                final_items.append(item_obj)
+                                unknown_items_for_ai.append(item_obj)
 
-                    # 2. Пакетная классификация неизвестных позиций через легкую модель
+                    # 3. Пакетная классификация неизвестных позиций через ИИ
                     if unknown_items_for_ai:
                         ai_categorized = categorize_batch_with_ai(unknown_items_for_ai, menu_str)
-                        for unk in unknown_items_for_ai:
+                        for idx_unk, unk in enumerate(unknown_items_for_ai):
+                            matched_res = None
+                            unk_norm = unk["item"].strip().lower()
+
+                            # Сначала ищем по точному/нормализованному названию
                             for res in ai_categorized:
-                                if res.get("original_item") == unk["item"]:
-                                    c = res.get("category", "Разное")
-                                    s = res.get("subcategory", "Требует проверки")
-                                    if c in exp_menu:
-                                        unk["category"] = c
-                                        unk["subcategory"] = s
+                                orig_res = str(res.get("original_item", "")).strip().lower()
+                                if orig_res == unk_norm:
+                                    matched_res = res
                                     break
+
+                            # Если по названию не сошлось — страхуем по индексу
+                            if not matched_res and idx_unk < len(ai_categorized):
+                                matched_res = ai_categorized[idx_unk]
+
+                            if matched_res:
+                                c = matched_res.get("category", "Разное")
+                                s = matched_res.get("subcategory", "Требует проверки")
+                                if c in exp_menu:
+                                    unk["category"] = c
+                                    unk["subcategory"] = s
+                                else:
+                                    c_fallback, s_fallback = _match_category_tree(menu_full, "Расход", unk["item"])
+                                    if c_fallback and s_fallback:
+                                        unk["category"] = c_fallback
+                                        unk["subcategory"] = s_fallback
 
                     if not final_items:
                         send_vk_message(user_id, "⚠️ В чеке не найдено товаров с суммами больше нуля.", get_main_keyboard(user_id))
@@ -243,7 +275,7 @@ def handle_receipt(user_id, user_text, user_text_lower, state, user_states):
     # 2. РЕВЬЮ ПОЗИЦИЙ (Кнопка "Готово" или выбор номера)
     # =========================================================
     if state == "receipt_review":
-        if "готово" in user_text_lower:
+        if any(w in user_text_lower for w in ["готово", "записать всё", "записать все", "сохранить", "подтвердить"]):
             items = user_states[user_id]["items"]
             send_vk_message(user_id, "⏳ Сохраняю товары в базу данных...", get_cancel_keyboard(show_back=False))
             success_count = 0
@@ -269,7 +301,7 @@ def handle_receipt(user_id, user_text, user_text_lower, state, user_states):
                     article=item_name,
                     amount=amount,
                     comment="Чек по позициям",
-                    original_text=item_name,
+                    original_text=item.get("original_item", item_name),
                     status=op_status
                 )
                 if ok:
