@@ -126,9 +126,9 @@ def report_module_health(module_num: int, status: str = "В строю", error_d
 # ====================================================================
 def get_image_base64_uri(image_url):
     """
-    Скачивает изображение из ВК, оптимизирует размер (макс 1600px по длинной стороне)
-    и кодирует в Base64. Уменьшает размер с 10 МБ до ~250-350 КБ, предотвращая ошибку 413
-    и таймауты при отправке в Vision-нейросеть.
+    Скачивает изображение из ВК. Сохраняет высокое разрешение по ширине
+    (до 1600px по ширине и до 4200px по высоте), предотвращая искажение мелкого
+    шрифта на длинных кассовых чеках, и кодирует в Base64.
     """
     try:
         headers = {
@@ -139,19 +139,24 @@ def get_image_base64_uri(image_url):
             print(f"[RECEIPT] Ошибка загрузки фото из ВК: HTTP {res.status_code}")
             return None
 
-        # Оптимизация и ресайз через Pillow
+        # Умное масштабирование для кассовых чеков (не сплющивать ширину!)
         try:
             from PIL import Image
             img = Image.open(io.BytesIO(res.content))
-            max_dim = 1600
-            if max(img.size) > max_dim:
-                img.thumbnail((max_dim, max_dim), Image.Resampling.LANCZOS)
+            w, h = img.size
+            max_w = 1600
+            max_h = 4200
+            scale = min(max_w / float(w), max_h / float(h), 1.0)
+            if scale < 1.0:
+                new_w = int(w * scale)
+                new_h = int(h * scale)
+                img = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
 
             if img.mode != "RGB":
                 img = img.convert("RGB")
 
             buf = io.BytesIO()
-            img.save(buf, format="JPEG", quality=85, optimize=True)
+            img.save(buf, format="JPEG", quality=88, optimize=True)
             b64_data = base64.b64encode(buf.getvalue()).decode("utf-8")
             return f"data:image/jpeg;base64,{b64_data}"
         except Exception as e_pil:
@@ -289,15 +294,15 @@ def transcribe_audio_with_ai(audio_url):
 def extract_receipt_total_with_ai(image_url):
     """
     Извлекает только итог чека и название магазина через мультимодальную модель.
-    Поддерживает сжатие в Base64, каскад gpt-4o -> gpt-4o-mini и прямой URL.
+    Поддерживает сохранение детализации, каскад gpt-4o -> gpt-4o-mini и прямой URL.
     """
     base64_uri = get_image_base64_uri(image_url)
 
     image_payloads = []
     if base64_uri:
-        image_payloads.append({"type": "image_url", "image_url": {"url": base64_uri}})
+        image_payloads.append({"type": "image_url", "image_url": {"url": base64_uri, "detail": "high"}})
     if image_url and str(image_url).startswith("http"):
-        image_payloads.append({"type": "image_url", "image_url": {"url": image_url}})
+        image_payloads.append({"type": "image_url", "image_url": {"url": image_url, "detail": "high"}})
 
     if not image_payloads:
         print("[RECEIPT] Не удалось подготовить фото чека для анализа итога.")
@@ -333,17 +338,16 @@ def extract_receipt_total_with_ai(image_url):
 
 def extract_receipt_items_with_ai(image_url):
     """
-    Извлекает все товары из чека построчно через Vision-модель.
-    Использует автоматический ресайз изображения, каскад моделей gpt-4o -> gpt-4o-mini
-    и запасной переход на прямой URL.
+    Извлекает все товары из чека построчно через Vision-модель в высоком разрешении.
+    Использует detail='high', каскад моделей gpt-4o -> gpt-4o-mini и запасной прямой URL.
     """
     base64_uri = get_image_base64_uri(image_url)
 
     image_payloads = []
     if base64_uri:
-        image_payloads.append({"type": "image_url", "image_url": {"url": base64_uri}})
+        image_payloads.append({"type": "image_url", "image_url": {"url": base64_uri, "detail": "high"}})
     if image_url and str(image_url).startswith("http"):
-        image_payloads.append({"type": "image_url", "image_url": {"url": image_url}})
+        image_payloads.append({"type": "image_url", "image_url": {"url": image_url, "detail": "high"}})
 
     if not image_payloads:
         print("[RECEIPT] Не удалось подготовить фото чека для построчного разбора.")
@@ -366,7 +370,7 @@ def extract_receipt_items_with_ai(image_url):
                             ]
                         }
                     ],
-                    timeout=50
+                    timeout=55
                 )
                 res_text = response.choices[0].message.content
                 if res_text and res_text.strip():
@@ -416,6 +420,10 @@ def normalize_receipt_items_with_ai(raw_items_list):
         return {}
 
 def categorize_batch_with_ai(items_list, menu_str):
+    """
+    Пакетная классификация списка товаров по эталонному меню.
+    Использует gpt-4o-mini для идеального соблюдения JSON и точного маппинга.
+    """
     prompt = f"Меню:\n{menu_str}\n\nОперации:\n"
     for item in items_list:
         orig = item.get('original_item') or item.get('item', '')
@@ -424,8 +432,8 @@ def categorize_batch_with_ai(items_list, menu_str):
 
     try:
         response = ai_client.chat.completions.create(
-            model="gpt-3.5-turbo",
-            temperature=0.2,
+            model="gpt-4o-mini",
+            temperature=0.0,
             messages=[
                 {"role": "system", "content": PROMPT_BATCH_CATEGORIZE},
                 {"role": "user", "content": prompt}
