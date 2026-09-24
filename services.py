@@ -669,7 +669,8 @@ def parse_bank_file_with_ai(file_url, file_ext):
                 continue
 
         if not parsed_operations:
-            return {"status": "ERROR", "message": "Не удалось найти финансовые операции в файле."}\n        return {"status": "SUCCESS", "operations": parsed_operations}
+            return {"status": "ERROR", "message": "Не удалось найти финансовые операции в файле."}
+        return {"status": "SUCCESS", "operations": parsed_operations}
 
     except Exception as e:
         print(f"Критическая ошибка парсинга: {e}")
