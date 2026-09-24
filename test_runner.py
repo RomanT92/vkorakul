@@ -230,6 +230,33 @@ def test_mod_16():
 
 # 17. Пакетная привязка категорий к списку
 def test_mod_17():
+    """
+    Проверяет связку распознавания естественной разговорной речи:
+    1. Детерминированный парсер составных фраз (без затрат токенов).
+    2. Фонетическое исправление оговорок Whisper.
+    3. Резервный ИИ-парсер списочных команд.
+    """
+    # 1. Проверка детерминированного парсера на реальной разговорной фразе
+    try:
+        from voice_parser import _parse_compound_voice_command
+        phrase = "Первое это фастфуд, второе это мясо рыба, а третье это бокалье"
+        acts = _parse_compound_voice_command(phrase.lower(), 3)
+        if len(acts) != 3:
+            return False, f"Детерминированный парсер не выделил 3 клаузы: {acts}"
+        if acts[0].get("hint") != "фастфуд" or acts[1].get("hint") != "мясо рыба":
+            return False, f"Неверно извлечены подсказки категорий: {acts}"
+    except Exception as ep:
+        return False, f"Сбой voice_parser: {ep}"
+
+    # 2. Проверка словаря фонетических исправлений Whisper в voice_matcher
+    try:
+        from voice_matcher import VOICE_PHONETIC_FIXES
+        if VOICE_PHONETIC_FIXES.get("бокалье") != "бакалея" or VOICE_PHONETIC_FIXES.get("мясо рыба") != "мясо и рыба":
+            return False, "Словарь фонетических исправлений VOICE_PHONETIC_FIXES не содержит нужных маппингов"
+    except Exception as em:
+        return False, f"Сбой voice_matcher: {em}"
+
+    # 3. Проверка ИИ парсера
     res = parse_voice_list_command_with_ai("Второе это такси, третье продукты")
     if res and res.get("action") in ["batch_set", "set_category"]:
         return True, ""
@@ -257,6 +284,7 @@ def test_mod_20():
     2. Проверка наличия и валидности системных промптов чека в config.py.
     3. Тестирование парсера JSON-ответа чека (_extract_json_object) на Markdown-разметке ИИ.
     4. Проверка интеграции обработчика чеков с базой данных (smart_search_item).
+    5. Проверка алгоритма авто-фокуса на единственной спорной позиции чека.
     """
     try:
         # 1. Проверка шлюза ИИ (бесплатный запрос к API списка моделей для валидации ключа и связи)
@@ -286,6 +314,15 @@ def test_mod_20():
         if not isinstance(test_search, dict) or "status" not in test_search:
             return False, "Сбой интеграции чека со справочником категорий БД"
 
+        # 5. Проверка логики авто-фокуса на единственной неразобранной позиции
+        sample_items = [
+            {"item": "Рыба", "amount": 99.99, "category": "Разное", "subcategory": "Требует проверки"},
+            {"item": "Кесадилья", "amount": 98.4, "category": "Готовая еда", "subcategory": "Фастфуд"}
+        ]
+        unv_idxs = [i for i, x in enumerate(sample_items) if x.get("category") == "Разное" or x.get("subcategory") == "Требует проверки"]
+        if len(unv_idxs) != 1 or unv_idxs[0] != 0:
+            return False, "Алгоритм изоляции единственной проблемной позиции чека дал сбой"
+
         return True, ""
     except json.JSONDecodeError as jde:
         return False, f"Сбой парсинга JSON чека: {jde}"
@@ -306,9 +343,17 @@ def test_mod_21():
 def test_mod_22():
     uid = get_or_create_user(TEST_VK_ID)
     unv = get_unverified_transactions(uid)
-    if isinstance(unv, list):
-        return True, ""
-    return False, f"get_unverified_transactions вернул не список: {unv}"
+    if not isinstance(unv, list):
+        return False, f"get_unverified_transactions вернул не список: {unv}"
+
+    # Создаем временную тестовую транзакцию «Требует проверки» и очищаем ее
+    test_word = "ТестТоварОчереди22"
+    save_transaction(uid, "Расход", "Разное", "Требует проверки", test_word, 100.0, "", test_word, "needs_review")
+    try:
+        delete_unverified_by_text(uid, test_word)
+    except Exception as ex:
+        return False, f"Сбой очистки нераспознанной операции: {ex}"
+    return True, ""
 
 # 23. Импорт банковских выписок (CSV/XLSX)
 def test_mod_23():
