@@ -2,6 +2,7 @@
 import os
 import sys
 import time
+import json
 import traceback
 import requests
 from datetime import datetime
@@ -250,13 +251,46 @@ def test_mod_19():
 
 # 20. Распознавание чека (общая сумма)
 def test_mod_20():
+    """
+    Экономный, но глубокий тест модуля распознавания чеков (без траты денег на тяжелый Vision):
+    1. Проверка доступности шлюза нейросети (models.list — 0 токенов / 0 руб).
+    2. Проверка наличия и валидности системных промптов чека в config.py.
+    3. Тестирование парсера JSON-ответа чека (_extract_json_object) на Markdown-разметке ИИ.
+    4. Проверка интеграции обработчика чеков с базой данных (smart_search_item).
+    """
     try:
+        # 1. Проверка шлюза ИИ (бесплатный запрос к API списка моделей для валидации ключа и связи)
+        m_list = ai_client.models.list()
+        if not m_list or not hasattr(m_list, "data"):
+            return False, "Шлюз нейросети (AI Tunnel) недоступен для чеков"
+
+        # 2. Проверка системного промпта
+        from config import PROMPT_RECEIPT_TOTAL
+        if not PROMPT_RECEIPT_TOTAL or "amount" not in PROMPT_RECEIPT_TOTAL.lower():
+            return False, "В config.py поврежден или пуст PROMPT_RECEIPT_TOTAL"
+
+        # 3. Проверка парсера JSON-ответов от Vision-модели (обработка markdown code fence ```json)
         import handlers_receipt
-        if not hasattr(handlers_receipt, "handle_receipt"):
-            return False, "handlers_receipt.py не содержит handle_receipt"
+        if not hasattr(handlers_receipt, "handle_receipt") or not hasattr(handlers_receipt, "_extract_json_object"):
+            return False, "В handlers_receipt.py отсутствуют ключевые функции парсинга"
+
+        mock_ai_output = "```json\n{\n  \"item\": \"Тестовый Супермаркет\",\n  \"amount\": 1250.50,\n  \"comment\": \"Тест\"\n}\n```"
+        extracted = handlers_receipt._extract_json_object(mock_ai_output)
+        data = json.loads(extracted)
+        if data.get("amount") != 1250.50 or data.get("item") != "Тестовый Супермаркет":
+            return False, f"Парсер ответа чека вернул некорректные данные: {data}"
+
+        # 4. Проверка готовности связки с БД
+        uid = get_or_create_user(TEST_VK_ID)
+        test_search = smart_search_item(uid, data["item"], "Расход")
+        if not isinstance(test_search, dict) or "status" not in test_search:
+            return False, "Сбой интеграции чека со справочником категорий БД"
+
+        return True, ""
+    except json.JSONDecodeError as jde:
+        return False, f"Сбой парсинга JSON чека: {jde}"
     except Exception as e:
-        return False, f"Ошибка импорта handlers_receipt.py: {e}"
-    return True, ""
+        return False, f"Сбой проверки модуля распознавания чеков: {e}"
 
 # 21. Построчный разбор кассовых чеков
 def test_mod_21():
@@ -399,4 +433,4 @@ def run_all_self_tests():
     return passed, failed, errors
 
 if __name__ == "__main__":
-    run_all_self_tests() 
+    run_all_self_tests()
