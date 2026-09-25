@@ -139,6 +139,65 @@
     document.getElementById('modalHealthError').classList.remove('hidden');
   }
 
+  function openErrorsSummaryModal() {
+    const failedModules = healthModulesData.filter(m => m.status !== 'В строю');
+    const summaryTextarea = document.getElementById('errorsSummaryText');
+    const modal = document.getElementById('modalErrorsSummary');
+    if (!summaryTextarea || !modal) return;
+
+    if (failedModules.length === 0) {
+      summaryTextarea.value = "✅ Все 27 модулей системы «Оракул» работают в штатном режиме (статус: В строю).\nОшибок и сбоев не зафиксировано.";
+    } else {
+      let report = `🚨 СВОДКА СБОЕВ СИСТЕМЫ САМОДИАГНОСТИКИ «ОРАКУЛ»\n`;
+      report += `Обнаружено проблемных модулей: ${failedModules.length} из 27\n`;
+      report += `Дата формирования: ${new Date().toLocaleString('ru-RU')}\n`;
+      report += `==================================================\n\n`;
+
+      failedModules.forEach(m => {
+        report += `[Модуль №${m.num}] ${m.name}\n`;
+        report += `• Статус: ${m.status}\n`;
+        report += `• Архитектурный слой: ${m.layer}\n`;
+        report += `• Файлы реализации: ${m.files}\n`;
+        report += `• Команда проверки: ${m.test_cmd}\n`;
+        report += `• Лог ошибки: ${m.error ? m.error.trim() : 'Трассировка не передана'}\n`;
+        report += `--------------------------------------------------\n\n`;
+      });
+
+      report += `Подсказка для чата разработки: Пожалуйста, проанализируй логи выше и сформируй решение по исправлению проблемных файлов.`;
+      summaryTextarea.value = report;
+    }
+
+    const feedback = document.getElementById('copyErrorsFeedback');
+    if (feedback) feedback.classList.add('opacity-0');
+    modal.classList.remove('hidden');
+    summaryTextarea.focus();
+    summaryTextarea.select();
+  }
+
+  async function copyErrorsSummary() {
+    const summaryTextarea = document.getElementById('errorsSummaryText');
+    const btn = document.getElementById('btnCopyErrorsAction');
+    const feedback = document.getElementById('copyErrorsFeedback');
+    if (!summaryTextarea) return;
+
+    try {
+      await navigator.clipboard.writeText(summaryTextarea.value);
+      if (feedback) feedback.classList.remove('opacity-0');
+      if (btn) {
+        const origText = btn.innerHTML;
+        btn.innerHTML = `<i class="fa-solid fa-check mr-1.5 text-emerald-300"></i><span>Скопировано!</span>`;
+        setTimeout(() => {
+          btn.innerHTML = origText;
+          if (feedback) feedback.classList.add('opacity-0');
+        }, 2500);
+      }
+    } catch (e) {
+      summaryTextarea.select();
+      document.execCommand('copy');
+      if (feedback) feedback.classList.remove('opacity-0');
+    }
+  }
+
   async function triggerSelfTestBtn() {
     if (isTestingActive) return;
     if (!confirm('Запустить полный комплекс автоматического тестирования всех модулей бота?')) return;
