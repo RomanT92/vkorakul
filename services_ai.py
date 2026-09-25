@@ -86,25 +86,33 @@ def get_image_base64_uri(image_url):
 # ФУНКЦИИ ГОЛОСОВОГО И ТЕКСТОВОГО УПРАВЛЕНИЯ СПИСКАМИ
 # ====================================================================
 def parse_voice_list_command_with_ai(user_text):
-    """Парсит составные голосовые команды к спискам операций через Gemini 2.5 Flash."""
-    try:
-        response = ai_client.chat.completions.create(
-            model="gemini-2.5-flash",
-            temperature=0.0,
-            messages=[
-                {"role": "system", "content": PROMPT_LIST_COMMAND},
-                {"role": "user", "content": user_text}
-            ]
-        )
-        text = response.choices[0].message.content.strip()
-        cleaned = _clean_json_from_markdown(text)
-        match = re.search(r'\{.*\}', cleaned, re.DOTALL)
-        if match:
-            return json.loads(match.group(0))
-        return json.loads(cleaned)
-    except Exception as e:
-        print(f"Ошибка парсинга голосовой команды списка: {e}")
-        return {"action": "unknown"}
+    """
+    Парсит составные голосовые команды к спискам операций.
+    Использует gemini-2.5-flash как приоритетную быструю модель
+    с автоматическим каскадным переходом (fallback) на gpt-4o-mini и gpt-3.5-turbo при сбоях шлюза.
+    """
+    models_to_try = ["gemini-2.5-flash", "gpt-4o-mini", "gpt-3.5-turbo"]
+    for model_name in models_to_try:
+        try:
+            response = ai_client.chat.completions.create(
+                model=model_name,
+                temperature=0.0,
+                messages=[
+                    {"role": "system", "content": PROMPT_LIST_COMMAND},
+                    {"role": "user", "content": user_text}
+                ],
+                timeout=20
+            )
+            text = response.choices[0].message.content.strip()
+            cleaned = _clean_json_from_markdown(text)
+            match = re.search(r'\{.*\}', cleaned, re.DOTALL)
+            if match:
+                return json.loads(match.group(0))
+            return json.loads(cleaned)
+        except Exception as e:
+            print(f"Ошибка парсинга голосовой команды списка ({model_name}): {type(e).__name__}: {e}")
+            continue
+    return {"action": "unknown"}
 
 parse_list_command_with_ai = parse_voice_list_command_with_ai
 
@@ -112,44 +120,58 @@ parse_list_command_with_ai = parse_voice_list_command_with_ai
 # КЛАССИФИКАЦИЯ ТРАНЗАКЦИЙ И АКТИВНЫЙ ДИАЛОГ
 # ====================================================================
 def categorize_with_ai(item, menu_str, context=""):
+    """
+    Классификация транзакции по эталонному меню с каскадом моделей (gemini-2.5-flash -> gpt-4o-mini -> gpt-3.5-turbo).
+    """
     prompt = f"Операция: {item}\n"
     if context:
         prompt += f"Подсказка пользователя: {context}\n"
     prompt += f"\nМеню:\n{menu_str}"
 
-    try:
-        response = ai_client.chat.completions.create(
-            model="gemini-2.5-flash",
-            temperature=0.0,
-            messages=[
-                {"role": "system", "content": PROMPT_CATEGORIZE},
-                {"role": "user", "content": prompt}
-            ]
-        )
-        text = response.choices[0].message.content.strip()
-        cleaned = _clean_json_from_markdown(text)
-        match = re.search(r'\{.*\}', cleaned, re.DOTALL)
-        if match:
-            data = json.loads(match.group(0))
-            return data.get("category", "UNKNOWN"), data.get("subcategory", "UNKNOWN")
-    except Exception as e:
-        print(f"Ошибка AI при категоризации: {e}")
+    models_to_try = ["gemini-2.5-flash", "gpt-4o-mini", "gpt-3.5-turbo"]
+    for model_name in models_to_try:
+        try:
+            response = ai_client.chat.completions.create(
+                model=model_name,
+                temperature=0.0,
+                messages=[
+                    {"role": "system", "content": PROMPT_CATEGORIZE},
+                    {"role": "user", "content": prompt}
+                ],
+                timeout=20
+            )
+            text = response.choices[0].message.content.strip()
+            cleaned = _clean_json_from_markdown(text)
+            match = re.search(r'\{.*\}', cleaned, re.DOTALL)
+            if match:
+                data = json.loads(match.group(0))
+                return data.get("category", "UNKNOWN"), data.get("subcategory", "UNKNOWN")
+        except Exception as e:
+            print(f"Ошибка AI при категоризации ({model_name}): {type(e).__name__}: {e}")
+            continue
     return "UNKNOWN", "UNKNOWN"
 
 def extract_transaction_with_ai(user_text):
-    try:
-        response = ai_client.chat.completions.create(
-            model="gpt-3.5-turbo",
-            temperature=0.2,
-            messages=[
-                {"role": "system", "content": PROMPT_EXTRACT},
-                {"role": "user", "content": user_text}
-            ]
-        )
-        return response.choices[0].message.content.strip()
-    except Exception as e:
-        print(f"Ошибка AI при извлечении/общении: {e}")
-        return None
+    """
+    Извлечение транзакций и свободный диалог с поддержкой каскада моделей.
+    """
+    models_to_try = ["gpt-3.5-turbo", "gpt-4o-mini", "gemini-2.5-flash"]
+    for model_name in models_to_try:
+        try:
+            response = ai_client.chat.completions.create(
+                model=model_name,
+                temperature=0.2,
+                messages=[
+                    {"role": "system", "content": PROMPT_EXTRACT},
+                    {"role": "user", "content": user_text}
+                ],
+                timeout=20
+            )
+            return response.choices[0].message.content.strip()
+        except Exception as e:
+            print(f"Ошибка AI при извлечении/общении ({model_name}): {type(e).__name__}: {e}")
+            continue
+    return None
 
 extract_operations_with_ai = extract_transaction_with_ai
 
@@ -280,6 +302,9 @@ def extract_receipt_items_with_ai(image_url):
     return None
 
 def normalize_receipt_items_with_ai(raw_items_list):
+    """
+    Нормализация сырых строк чеков в базовые существительные с каскадом моделей.
+    """
     prompt = (
         "Преврати сырые строки чеков СТРОГО в базовое существительное товара.\n"
         "УДАЛИ ВСЕ БРЕНДЫ, ВКУСЫ, СОРТА И МАГАЗИНЫ!\n"
@@ -297,31 +322,35 @@ def normalize_receipt_items_with_ai(raw_items_list):
     )
     for it in raw_items_list:
         prompt += f"- {it}\n"
-    prompt += "\nВерни СТРОГО JSON-объект в формате: {\"Сырое название\": \"Очищенное существительное\"}"
+    prompt += '\nВерни СТРОГО JSON-объект в формате: {"Сырое название": "Очищенное существительное"}'
 
-    try:
-        response = ai_client.chat.completions.create(
-            model="gemini-2.5-flash",
-            temperature=0.0,
-            messages=[
-                {"role": "system", "content": "Ты нормализатор товаров в базовые существительные. Отвечай только валидным JSON."},
-                {"role": "user", "content": prompt}
-            ]
-        )
-        text = response.choices[0].message.content.strip()
-        cleaned = _clean_json_from_markdown(text)
-        match = re.search(r'\{.*\}', cleaned, re.DOTALL)
-        if match:
-            return json.loads(match.group(0))
-        return json.loads(cleaned)
-    except Exception as e:
-        print(f"Ошибка нормализации брендов: {e}")
-        return {}
+    models_to_try = ["gemini-2.5-flash", "gpt-4o-mini", "gpt-3.5-turbo"]
+    for model_name in models_to_try:
+        try:
+            response = ai_client.chat.completions.create(
+                model=model_name,
+                temperature=0.0,
+                messages=[
+                    {"role": "system", "content": "Ты нормализатор товаров в базовые существительные. Отвечай только валидным JSON."},
+                    {"role": "user", "content": prompt}
+                ],
+                timeout=25
+            )
+            text = response.choices[0].message.content.strip()
+            cleaned = _clean_json_from_markdown(text)
+            match = re.search(r'\{.*\}', cleaned, re.DOTALL)
+            if match:
+                return json.loads(match.group(0))
+            return json.loads(cleaned)
+        except Exception as e:
+            print(f"Ошибка нормализации брендов ({model_name}): {type(e).__name__}: {e}")
+            continue
+    return {}
 
 def categorize_batch_with_ai(items_list, menu_str):
     """
     Пакетная классификация списка товаров по эталонному меню.
-    Использует gemini-2.5-flash для идеального соблюдения JSON и точного маппинга.
+    Использует каскад моделей (gemini-2.5-flash, gpt-4o-mini) для идеального соблюдения JSON и точного маппинга.
     """
     prompt = f"Меню:\n{menu_str}\n\nОперации:\n"
     for item in items_list:
@@ -329,21 +358,25 @@ def categorize_batch_with_ai(items_list, menu_str):
         amt = item.get('amount', 0)
         prompt += f"- {orig} ({amt} руб.)\n"
 
-    try:
-        response = ai_client.chat.completions.create(
-            model="gemini-2.5-flash",
-            temperature=0.0,
-            messages=[
-                {"role": "system", "content": PROMPT_BATCH_CATEGORIZE},
-                {"role": "user", "content": prompt}
-            ]
-        )
-        text = response.choices[0].message.content.strip()
-        cleaned = _clean_json_from_markdown(text)
-        match = re.search(r'\[.*\]', cleaned, re.DOTALL)
-        if match:
-            return json.loads(match.group(0))
-        return json.loads(cleaned)
-    except Exception as e:
-        print(f"Ошибка AI при пакетной категоризации: {e}")
-        return []
+    models_to_try = ["gemini-2.5-flash", "gpt-4o-mini"]
+    for model_name in models_to_try:
+        try:
+            response = ai_client.chat.completions.create(
+                model=model_name,
+                temperature=0.0,
+                messages=[
+                    {"role": "system", "content": PROMPT_BATCH_CATEGORIZE},
+                    {"role": "user", "content": prompt}
+                ],
+                timeout=30
+            )
+            text = response.choices[0].message.content.strip()
+            cleaned = _clean_json_from_markdown(text)
+            match = re.search(r'\[.*\]', cleaned, re.DOTALL)
+            if match:
+                return json.loads(match.group(0))
+            return json.loads(cleaned)
+        except Exception as e:
+            print(f"Ошибка AI при пакетной категоризации ({model_name}): {type(e).__name__}: {e}")
+            continue
+    return []
