@@ -305,21 +305,32 @@ def handle_list_voice_commands(user_id, user_text, user_text_lower, state, user_
             _refresh_screen(user_id, state, state_data)
             return True
 
-    # 3.4 RENAME ITEM
+    # 3.4 RENAME ITEM ИЛИ ПОДСКАЗКА КАТЕГОРИИ
     if action in ["rename_item", "rename_item_and_amount"]:
         new_name = (parsed_cmd.get("name") or parsed_cmd.get("new_name") or "").strip()
         new_amount = float(parsed_cmd.get("amount", 0)) if action == "rename_item_and_amount" else None
 
-        is_menu_match, m_type, c_name, s_name = _find_category_in_menu(menu_full, new_name)
-        if is_menu_match and not any(w in user_text_lower for w in ["назови", "переименуй", "название"]):
-            if valid_indices:
+        # Проверяем, действительно ли пользователь хотел ПЕРЕИМЕНОВАТЬ товар из чека
+        is_rename_intent = any(w in user_text_lower for w in ["назови", "переименуй", "название", "исправь название", "вместо"])
+
+        # Если явного желания переименовывать не было — трактуем как подсказку категории/статьи!
+        if not is_rename_intent:
+            if valid_indices and new_name:
                 for idx in valid_indices:
-                    _apply_category_to_item(internal_uid, items[idx], new_name, menu_full, state)
-                indices_str = ", ".join([f"№{i+1}" for i in valid_indices])
-                send_vk_message(user_id, f"✅ Позиции {indices_str} обновлены:\n📂 {c_name} -> {s_name}")
+                    cat, sub = _apply_category_to_item(internal_uid, items[idx], new_name, menu_full, state)
+                    old_n = items[idx].get("item") or items[idx].get("article", "Операция")
+                    report_lines.append(f"• №{idx+1} («{old_n}»): категория 📂 {cat} -> {sub}")
+                if new_amount:
+                    idx = valid_indices[0]
+                    items[idx]["amount"] = new_amount
+                    if state == "history_view" and "id" in items[idx]:
+                        update_transaction_amount(internal_uid, items[idx]["id"], new_amount)
+                    report_lines.append(f"• №{idx+1}: сумма изменена на {new_amount:g} руб.")
+                send_vk_message(user_id, "✅ Изменения применены:\n" + "\n".join(report_lines))
                 _refresh_screen(user_id, state, state_data)
                 return True
 
+        # Только если БЫЛ явный приказ на переименование ("назови", "переименуй"):
         if valid_indices and new_name:
             idx = valid_indices[0]
             it = items[idx]
