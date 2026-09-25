@@ -26,7 +26,7 @@ def _parse_token_to_number(token: str):
         if val > 0:
             return val
 
-    t_lower = token.lower().strip()
+    t_lower = re.sub(r'[^a-zA-Zа-яА-Я0-9ёЁ\-]', '', token.lower().strip())
     for prefix, num in SORTED_ORDINALS:
         if t_lower.startswith(prefix):
             return num
@@ -34,7 +34,7 @@ def _parse_token_to_number(token: str):
 
 def _try_fast_deterministic_single_clause(clause_text, items_len):
     """
-    Разбор одной клаузы (например: 'семнадцатое это готовая еда' или 'во-первых создай новую статью Лепёшки') за 1 мс.
+    Разбор одной клаузы (например: 'семнадцатое это готовая еда' или 'первое измени название болгарка') за 1 мс.
     """
     clean = clause_text.strip()
     target_idx = None
@@ -51,7 +51,7 @@ def _try_fast_deterministic_single_clause(clause_text, items_len):
     if target_idx is None or not (0 <= target_idx < items_len):
         return None
 
-    # 1. Создание новой / отдельной статьи для конкретной операции (включая формы «во-первых, создай новую статью X», «для первой сделай отдельную статью X», «выдели в статью X»)
+    # 1. Создание новой / отдельной статьи для конкретной операции
     new_art_m = re.search(
 
         r'(?:перенеси|перенести|создай|создать|сделай|сделать|запиши|добавь|выдели)?\s*(?:в|на)?\s*(?:нов(?:ую|ая|ой)|отдельн(?:ую|ая|ой)|сво(?:ю|я|ей))?\s*стать(?:ю|я|е)\s*(?:под\s*названием|с\s*названием|это|как)?\s*(.+)$',
@@ -72,7 +72,7 @@ def _try_fast_deterministic_single_clause(clause_text, items_len):
         )
     if new_art_m:
         val_art = new_art_m.group(1).strip()
-        val_art = re.sub(r'^(?:в|на|под\s*названием|это|как)\s+', '', val_art, flags=re.IGNORECASE).strip()
+        val_art = re.sub(r'^(?:в|на|под\s*названием|это|как)\s+', '', val_art, flags=re.IGNORECASE).strip().strip('.,;!')
         val_art = re.sub(r'\bна\s+стенн', 'настенн', val_art, flags=re.IGNORECASE).strip()
         if val_art and not any(sw in val_art for sw in ["удали", "отмена", "назад", "сумм"]):
             return {"action": "create_article", "index": target_idx, "name": val_art}
@@ -87,12 +87,17 @@ def _try_fast_deterministic_single_clause(clause_text, items_len):
         except ValueError:
             pass
 
-    # 3. Переименование названия товара
-    rename_m = re.search(r'(?:назови|переименуй|исправь название|название)\s*(?:как|в|на)?\s+(.+)$', clean)
+    # 3. Переименование названия товара (включая "измени название", "поменяй название", "название на X")
+    rename_m = re.search(
+        r'(?:назови|переименуй|исправь название|измени название|поменяй название|смени название|название)\s*(?:как|в|на|это)?\s+(.+)$',
+        clean,
+        flags=re.IGNORECASE
+    )
     if rename_m:
         val = rename_m.group(1).strip()
-        val = re.sub(r'^(?:как|в|на)\s+', '', val).strip()
-        return {"action": "rename_item", "index": target_idx, "name": val}
+        val = re.sub(r'^(?:как|в|на|это)\s+', '', val, flags=re.IGNORECASE).strip().strip('.,;!')
+        if val and not any(sw in val for sw in ["удали", "отмена", "назад", "сумм", "категори"]):
+            return {"action": "rename_item", "index": target_idx, "name": val}
 
     # 4. Удаление
     if any(w in clean for w in ["удали", "стереть", "убрать", "вычеркни"]):
@@ -100,9 +105,9 @@ def _try_fast_deterministic_single_clause(clause_text, items_len):
 
     # 5. Изменение категории / статьи
     # 5.1. Явные команды с ключевыми словами
-    cat_m = re.search(r'(?:категорию|категория|подкатегорию|подкатегория)\s*(?:это|в|на|как)?\s+(.+)$', clean)
+    cat_m = re.search(r'(?:категорию|категория|подкатегорию|подкатегория)\s*(?:это|в|на|как)?\s+(.+)$', clean, flags=re.IGNORECASE)
     if not cat_m:
-        cat_m = re.search(r'(?:измени|поменяй|поставь|смени|перенеси)\s*(?:на|в|как)\s+(.+)$', clean)
+        cat_m = re.search(r'(?:измени|поменяй|поставь|смени|перенеси)\s*(?:на|в|как)\s+(.+)$', clean, flags=re.IGNORECASE)
 
     # 5.2. Естественные разговорные формы («семнадцатое это подарочная карта», «первое это фастфуд», «для первой фастфуд»)
     if not cat_m and matched_token:
@@ -113,8 +118,8 @@ def _try_fast_deterministic_single_clause(clause_text, items_len):
 
     if cat_m:
         hint = cat_m.group(1).strip()
-        hint = re.sub(r'^(?:на|в|как|категорию|подкатегорию|это)\s+', '', hint, flags=re.IGNORECASE).strip()
-        stop_words = ["удали", "готово", "сохрани", "отмена", "назад", "сумма", "руб", "стать", "созда", "сдела", "отдельн"]
+        hint = re.sub(r'^(?:на|в|как|категорию|подкатегорию|это)\s+', '', hint, flags=re.IGNORECASE).strip().strip('.,;!')
+        stop_words = ["удали", "готово", "сохрани", "отмена", "назад", "сумма", "руб", "стать", "созда", "сдела", "отдельн", "название", "переименуй"]
         if hint and not any(sw in hint for sw in stop_words):
             return {"action": "set_category", "index": target_idx, "hint": hint}
 
@@ -122,12 +127,18 @@ def _try_fast_deterministic_single_clause(clause_text, items_len):
 
 def _parse_compound_voice_command(user_text_lower, items_len):
     """
-    Разбивает составную фразу на несколько клауз по знакам препинания и союзам.
-    Пример: 'Первое это фастфуд, семнадцатое это карта, а третье это бакалея'
+    Разбивает составную фразу на несколько клауз.
+    Запятые и союзы делят строку ТОЛЬКО если далее следует порядковое числительное следующей операции.
     """
-    clean_text = re.sub(r'[!?«»"\'\-]+', ' ', user_text_lower).strip()
+    clean_text = re.sub(r'[!?«»"\'\-]+', ' ', user_text_lower).strip().rstrip('.,')
+    ordinal_lookahead = (
+        r'(?=(?:у\s+|для\s+|по\s+)?'
+        r'(?:во-перв|перв|во-втор|втор|в-трет|трет|четверт|пят|шест|сед|сем|восьм|девят|десят|'
+        r'одиннадцат|двенадцат|тринадцат|четырнадцат|пятнадцат|шестнадцат|семнадцат|восемнадцат|девятнадцат|двадцат|\d+))'
+    )
+
     raw_clauses = re.split(
-        r'[,.]+|\s+(?:а|и)\s+(?=(?:у\s+|для\s+|по\s+)?(?:во-перв|перв|во-втор|втор|в-трет|трет|четверт|пят|шест|сед|сем|восьм|девят|десят|одиннадцат|двенадцат|тринадцат|четырнадцат|пятнадцат|шестнадцат|семнадцат|восемнадцат|девятнадцат|двадцат|\d+))',
+        r'[,.]*\s+(?:а|и)\s+' + ordinal_lookahead + r'|[,.]+\s*' + ordinal_lookahead,
         clean_text
     )
 
