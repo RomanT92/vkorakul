@@ -16,7 +16,7 @@
 
     <div class="bg-slate-800 p-4 rounded-xl border border-slate-700 shadow-sm">
       <p class="text-xs text-slate-400 font-semibold uppercase">Всего функций</p>
-      <h3 id="healthTotalMods" class="text-2xl font-bold text-white mt-1">19</h3>
+      <h3 id="healthTotalMods" class="text-2xl font-bold text-white mt-1">27</h3>
       <p class="text-[11px] text-slate-500 mt-1">Архитектурных узлов</p>
     </div>
 
@@ -58,8 +58,11 @@
     </div>
 
     <div class="flex items-center gap-2">
-      <button onclick="triggerSelfTestBtn()" class="bg-indigo-600 hover:bg-indigo-500 text-white px-3.5 py-2 rounded-lg text-xs font-semibold flex items-center shadow transition">
-        <i class="fa-solid fa-flask-vial mr-1.5"></i> 🧪 Запустить полный автотест
+      <button onclick="triggerSelfTestBtn()" id="triggerTestBtn" class="bg-indigo-600 hover:bg-indigo-500 text-white px-3.5 py-2 rounded-lg text-xs font-semibold flex items-center shadow transition">
+        <i class="fa-solid fa-flask-vial mr-1.5"></i> <span>🧪 Запустить полный автотест</span>
+      </button>
+      <button onclick="openErrorsSummaryModal()" id="btnErrorsSummary" class="bg-slate-700 hover:bg-slate-600 text-rose-300 border border-rose-500/30 px-3.5 py-2 rounded-lg text-xs font-semibold flex items-center shadow transition" title="Открыть текстовую сводку ошибок для копирования">
+        <i class="fa-solid fa-clipboard-list mr-1.5 text-rose-400"></i> <span>Сводка ошибок</span>
       </button>
       <button onclick="loadHealthData()" class="p-2 bg-slate-700 hover:bg-slate-600 text-slate-300 rounded-lg text-xs transition" title="Обновить статус">
         <i class="fa-solid fa-arrows-rotate"></i>
@@ -67,7 +70,7 @@
     </div>
   </div>
 
-  <!-- ТАБЛИЦА 19 МОДУЛЕЙ -->
+  <!-- ТАБЛИЦА 27 МОДУЛЕЙ -->
   <div class="bg-slate-800 rounded-xl border border-slate-700 overflow-hidden shadow">
     <div class="overflow-x-auto">
       <table class="w-full text-left text-sm text-slate-300">
@@ -93,7 +96,7 @@
 
 </div>
 
-<!-- МОДАЛЬНОЕ ОКНО ПРОСМОТРА ОШИБКИ -->
+<!-- МОДАЛЬНОЕ ОКНО ПРОСМОТРА ОДИНОЧНОЙ ОШИБКИ -->
 <div id="modalHealthError" class="fixed inset-0 bg-slate-950/70 backdrop-blur-xs z-50 hidden flex items-center justify-center p-4">
   <div class="bg-slate-800 border border-slate-700 rounded-2xl max-w-lg w-full p-6 shadow-2xl space-y-4 text-slate-200">
     <div class="flex items-center justify-between border-b border-slate-700 pb-3">
@@ -112,6 +115,34 @@
     </div>
     <div class="flex items-center justify-end pt-3 border-t border-slate-700">
       <button onclick="closeModal('modalHealthError')" class="px-4 py-2 text-sm bg-slate-700 hover:bg-slate-600 text-white rounded-lg">Закрыть</button>
+    </div>
+  </div>
+</div>
+
+<!-- МОДАЛЬНОЕ ОКНО СВОДКИ ВСЕХ ОШИБОК (ДЛЯ КОПИРОВАНИЯ В ЧАТ) -->
+<div id="modalErrorsSummary" class="fixed inset-0 bg-slate-950/70 backdrop-blur-xs z-50 hidden flex items-center justify-center p-4">
+  <div class="bg-slate-800 border border-slate-700 rounded-2xl max-w-2xl w-full p-6 shadow-2xl space-y-4 text-slate-200">
+    <div class="flex items-center justify-between border-b border-slate-700 pb-3">
+      <div>
+        <h3 class="font-bold text-white text-base flex items-center gap-2">
+          <i class="fa-solid fa-clipboard-list text-rose-400"></i>
+          <span>Сводка ошибок тестирования</span>
+        </h3>
+        <p class="text-xs text-slate-400 mt-0.5">Скопируйте этот текст и отправьте в чат для анализа и исправления</p>
+      </div>
+      <button onclick="closeModal('modalErrorsSummary')" class="text-slate-400 hover:text-white"><i class="fa-solid fa-xmark text-lg"></i></button>
+    </div>
+    <div>
+      <textarea id="errorsSummaryText" readonly onclick="this.select()" class="w-full h-72 font-mono text-xs text-slate-200 bg-slate-900 p-3 rounded-lg border border-slate-700 focus:outline-none focus:border-indigo-500 resize-none whitespace-pre select-all leading-relaxed"></textarea>
+    </div>
+    <div class="flex items-center justify-between pt-3 border-t border-slate-700">
+      <span id="copyErrorsFeedback" class="text-xs text-emerald-400 font-semibold opacity-0 transition-opacity">Скопировано в буфер обмена!</span>
+      <div class="flex items-center space-x-2">
+        <button onclick="closeModal('modalErrorsSummary')" class="px-4 py-2 text-sm text-slate-400 hover:text-white">Закрыть</button>
+        <button onclick="copyErrorsSummary()" id="btnCopyErrorsAction" class="px-4 py-2 text-sm bg-indigo-600 hover:bg-indigo-500 text-white font-semibold rounded-lg shadow flex items-center transition">
+          <i class="fa-solid fa-copy mr-1.5"></i> <span>Скопировать сводку</span>
+        </button>
+      </div>
     </div>
   </div>
 </div>
