@@ -13,10 +13,16 @@ from db import get_or_create_user, get_full_menu
 
 from handlers_structure_create import handle_structure_create
 from handlers_structure_manage import handle_structure_manage
+from handlers_structure_nlp import handle_structure_nlp_disambiguate
 
 def handle_structure(user_id, user_text, user_text_lower, state, user_states):
     """Единый диспетчер меню 'Категории и статьи' и логика «Назад»."""
     internal_uid = get_or_create_user(user_id)
+
+    # 0. ОБРАБОТКА РАЗРЕШЕНИЯ НЕОДНОЗНАЧНОСТИ NLP
+    if state == "structure_nlp_disambiguate":
+        if handle_structure_nlp_disambiguate(user_id, internal_uid, user_text, user_text_lower, state, user_states):
+            return True
 
     # 1. ОБРАБОТКА НАВИГАЦИИ «НАЗАД» ДЛЯ ВСЕХ ПОДШАГОВ
     if "назад" in user_text_lower:
@@ -31,7 +37,7 @@ def handle_structure(user_id, user_text, user_text_lower, state, user_states):
             return True
         elif state == "create_cat_subname":
             user_states[user_id]["state"] = "create_cat_name"
-            send_vk_message(user_id, f"Введите название категории заново:", get_cancel_keyboard(show_back=True))
+            send_vk_message(user_id, "Введите название категории заново:", get_cancel_keyboard(show_back=True))
             return True
         elif state == "create_sub_catselect":
             user_states[user_id]["state"] = "create_sub_type"
