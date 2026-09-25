@@ -24,6 +24,17 @@ from config import (
 # ====================================================================
 ai_client = OpenAI(api_key=AI_TUNNEL_KEY, base_url=AI_BASE_URL)
 
+def _clean_json_from_markdown(text: str) -> str:
+    """Очищает ответ нейросети от markdown-блоков ```json ... ``` и пробелов."""
+    if not text:
+        return ""
+    cleaned = text.strip()
+    # Удаляем открывающий блок ```json или ```
+    cleaned = re.sub(r'^```(?:json)?\s*', '', cleaned, flags=re.IGNORECASE)
+    # Удаляем закрывающий блок ```
+    cleaned = re.sub(r'\s*```$', '', cleaned)
+    return cleaned.strip()
+
 # ====================================================================
 # ОБРАБОТКА ИЗОБРАЖЕНИЙ (КАЧЕСТВЕННЫЙ РЕСАЙЗ ДЛЯ ЧЕКОВ РФ)
 # ====================================================================
@@ -86,10 +97,11 @@ def parse_voice_list_command_with_ai(user_text):
             ]
         )
         text = response.choices[0].message.content.strip()
-        match = re.search(r'\{.*\}', text, re.DOTALL)
+        cleaned = _clean_json_from_markdown(text)
+        match = re.search(r'\{.*\}', cleaned, re.DOTALL)
         if match:
             return json.loads(match.group(0))
-        return json.loads(text)
+        return json.loads(cleaned)
     except Exception as e:
         print(f"Ошибка парсинга голосовой команды списка: {e}")
         return {"action": "unknown"}
@@ -115,7 +127,8 @@ def categorize_with_ai(item, menu_str, context=""):
             ]
         )
         text = response.choices[0].message.content.strip()
-        match = re.search(r'\{.*\}', text, re.DOTALL)
+        cleaned = _clean_json_from_markdown(text)
+        match = re.search(r'\{.*\}', cleaned, re.DOTALL)
         if match:
             data = json.loads(match.group(0))
             return data.get("category", "UNKNOWN"), data.get("subcategory", "UNKNOWN")
@@ -296,10 +309,11 @@ def normalize_receipt_items_with_ai(raw_items_list):
             ]
         )
         text = response.choices[0].message.content.strip()
-        match = re.search(r'\{.*\}', text, re.DOTALL)
+        cleaned = _clean_json_from_markdown(text)
+        match = re.search(r'\{.*\}', cleaned, re.DOTALL)
         if match:
             return json.loads(match.group(0))
-        return json.loads(text)
+        return json.loads(cleaned)
     except Exception as e:
         print(f"Ошибка нормализации брендов: {e}")
         return {}
@@ -325,10 +339,11 @@ def categorize_batch_with_ai(items_list, menu_str):
             ]
         )
         text = response.choices[0].message.content.strip()
-        match = re.search(r'\[.*\]', text, re.DOTALL)
+        cleaned = _clean_json_from_markdown(text)
+        match = re.search(r'\[.*\]', cleaned, re.DOTALL)
         if match:
             return json.loads(match.group(0))
-        return json.loads(text)
+        return json.loads(cleaned)
     except Exception as e:
         print(f"Ошибка AI при пакетной категоризации: {e}")
         return []
