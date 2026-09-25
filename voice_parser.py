@@ -2,38 +2,50 @@
 import re
 
 ORDINAL_MAP = {
-    "во-перв": 1, "перв": 1, "один": 1, "1": 1,
-    "во-втор": 2, "втор": 2, "два": 2, "2": 2,
-    "в-трет": 3, "трет": 3, "три": 3, "3": 3,
-    "четверт": 4, "четыр": 4, "4": 4,
-    "пят": 5, "5": 5,
-    "шест": 6, "6": 6,
-    "сед": 7, "сем": 7, "7": 7,
-    "восьм": 8, "8": 8,
-    "девят": 9, "9": 9,
-    "десят": 10, "10": 10,
-    "одиннадцат": 11, "11": 11,
-    "двенадцат": 12, "12": 12,
-    "тринадцат": 13, "13": 13,
-    "четырнадцат": 14, "14": 14,
-    "пятнадцат": 15, "15": 15,
+    "одиннадцат": 11, "двенадцат": 12, "тринадцат": 13,
+    "четырнадцат": 14, "пятнадцат": 15, "шестнадцат": 16,
+    "семнадцат": 17, "восемнадцат": 18, "девятнадцат": 19,
+    "двадцат": 20, "тридцат": 30, "сороков": 40, "пятидесят": 50,
+    "во-перв": 1, "перв": 1, "один": 1,
+    "во-втор": 2, "втор": 2, "два": 2,
+    "в-трет": 3, "трет": 3, "три": 3,
+    "четверт": 4, "четыр": 4,
+    "пят": 5, "шест": 6, "сед": 7, "сем": 7,
+    "восьм": 8, "девят": 9, "десят": 10,
     "последн": -1
 }
 
+# Сортировка ключей от длинных к коротким гарантирует, что "семнадцат" проверяется раньше "сем"
+SORTED_ORDINALS = sorted(ORDINAL_MAP.items(), key=lambda x: len(x[0]), reverse=True)
+
+def _parse_token_to_number(token: str):
+    """Извлекает числовое значение из токена: цифры (17, 17-е, №17) или порядковые слова."""
+    clean_num = re.sub(r'[^0-9]', '', token)
+    if clean_num.isdigit():
+        val = int(clean_num)
+        if val > 0:
+            return val
+
+    t_lower = token.lower().strip()
+    for prefix, num in SORTED_ORDINALS:
+        if t_lower.startswith(prefix):
+            return num
+    return None
+
 def _try_fast_deterministic_single_clause(clause_text, items_len):
     """
-    Разбор одной клаузы (например: 'первое это фастфуд' или 'во-первых создай новую статью Лепёшки') за 1 мс.
+    Разбор одной клаузы (например: 'семнадцатое это готовая еда' или 'во-первых создай новую статью Лепёшки') за 1 мс.
     """
     clean = clause_text.strip()
     target_idx = None
     matched_token = None
-    for token in clean.split():
-        for prefix, num in ORDINAL_MAP.items():
-            if token.startswith(prefix):
-                target_idx = (items_len - 1) if num == -1 else (num - 1)
-                matched_token = token
-                break
-        if target_idx is not None:
+
+    tokens = clean.split()
+    for token in tokens:
+        num = _parse_token_to_number(token)
+        if num is not None:
+            target_idx = (items_len - 1) if num == -1 else (num - 1)
+            matched_token = token
             break
 
     if target_idx is None or not (0 <= target_idx < items_len):
@@ -73,12 +85,12 @@ def _try_fast_deterministic_single_clause(clause_text, items_len):
         return {"action": "delete", "index": target_idx}
 
     # 5. Изменение категории / статьи
-    # 5.1. Явные команды с ключевыми словами (исключая «новую статью», которая уже обработана в шаге 1)
+    # 5.1. Явные команды с ключевыми словами
     cat_m = re.search(r'(?:категорию|категория|подкатегорию|подкатегория)\s*(?:это|в|на|как)?\s+(.+)$', clean)
     if not cat_m:
         cat_m = re.search(r'(?:измени|поменяй|поставь|смени|перенеси)\s*(?:на|в|как)\s+(.+)$', clean)
-    
-    # 5.2. Естественные разговорные формы («первое это фастфуд», «второе мясо рыба», «а третье это бокалье», «1 - еда»)
+
+    # 5.2. Естественные разговорные формы («семнадцатое это подарочная карта», «первое это фастфуд»)
     if not cat_m and matched_token:
         rest = re.sub(r'^(?:а\s+|и\s+|у\s+)?' + re.escape(matched_token) + r'[:\s\-]+', '', clean).strip()
         rest = re.sub(r'^(?:это|в|на|как)\s+', '', rest).strip()
@@ -97,10 +109,13 @@ def _try_fast_deterministic_single_clause(clause_text, items_len):
 def _parse_compound_voice_command(user_text_lower, items_len):
     """
     Разбивает составную фразу на несколько клауз по знакам препинания и союзам.
-    Пример: 'Первое это фастфуд, второе это мясо рыба, а третье это бакалея'
+    Пример: 'Первое это фастфуд, семнадцатое это карта, а третье это бакалея'
     """
     clean_text = re.sub(r'[!?«»"\'\-]+', ' ', user_text_lower).strip()
-    raw_clauses = re.split(r'[,.]+|\s+(?:а|и)\s+(?=(?:у\s+)?(?:во-перв|перв|во-втор|втор|в-трет|трет|четверт|пят|шест|сед|сем|восьм|девят|десят|\d+))', clean_text)
+    raw_clauses = re.split(
+        r'[,.]+|\s+(?:а|и)\s+(?=(?:у\s+)?(?:во-перв|перв|во-втор|втор|в-трет|трет|четверт|пят|шест|сед|сем|восьм|девят|десят|одиннадцат|двенадцат|тринадцат|четырнадцат|пятнадцат|шестнадцат|семнадцат|восемнадцат|девятнадцат|двадцат|\d+))',
+        clean_text
+    )
 
     actions = []
     for cl in raw_clauses:
