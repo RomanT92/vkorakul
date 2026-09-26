@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+import re
 from keyboards import (
     get_main_keyboard,
     get_yes_no_keyboard,
@@ -15,10 +16,101 @@ from db import (
 )
 from handlers_queue_batch import _validate_ai_category, _find_matching_article
 
+def _process_user_hint(user_id, internal_uid, raw_hint_text, user_states, MAX_ATTEMPTS):
+    """
+    Универсальная обработка подсказки пользователя (текстом или голосом):
+    1. Проверка совпадения по личному и глобальному каталогам (smart_search_item).
+    2. Если нет в каталоге — классификация через AI с учетом подсказки.
+    """
+    user_states[user_id]["attempts"] += 1
+    payload = user_states[user_id]["payload"]
+    raw_lower = raw_hint_text.lower().strip()
+
+    if "доход" in raw_lower or "приход" in raw_lower:
+        payload["type"] = "Доход"
+    elif "расход" in raw_lower or "трата" in raw_lower:
+        payload["type"] = "Расход"
+
+    op_type = payload.get("type", "Расход")
+
+    # Очистка вводных слов для точного сопоставления с каталогом
+    clean_hint = re.sub(
+        r'^(?:нет|не|неверно|не-а)?[\s,;:\-]+',
+        '',
+        raw_hint_text,
+        flags=re.IGNORECASE
+    ).strip()
+    clean_hint = re.sub(
+
+        r'^(?:это|в|на|к|для|отнеси\s+в|относится\s+к|категория|статья)\s+',
+        '',
+        clean_hint,
+        flags=re.IGNORECASE
+    ).strip().strip('.,;!?')
+
+    if not clean_hint:
+        clean_hint = raw_hint_text.strip().strip('.,;!?')
+
+    # 1. Поиск по каталогам
+    check_res = smart_search_item(internal_uid, clean_hint, op_type=op_type)
+    if check_res.get("status") != "FOUND":
+        check_res = smart_search_item(internal_uid, clean_hint, op_type=None)
+
+    if check_res.get("status") == "FOUND":
+        user_states[user_id]["state"] = "confirm_category"
+        user_states[user_id]["ai_cat"] = check_res.get("category")
+        user_states[user_id]["ai_sub"] = check_res.get("subcategory")
+        user_states[user_id]["canonical_art"] = check_res.get("article", payload["item"])
+        if check_res.get("type"):
+            payload["type"] = check_res["type"]
+        send_vk_message(
+            user_id,
+            f"Ага! «{clean_hint}» — это статья «{check_res.get('article')}»:\n"
+            f"📂 {check_res.get('category')} -> {check_res.get('subcategory')}\n\n"
+            f"Привязать «{payload['item']}» как синоним?",
+            get_yes_no_keyboard(show_back=True, show_promote_article=True)
+        )
+        return True
+
+    # 2. Фоллбэк на классификатор AI с контекстом подсказки
+    send_vk_message(user_id, "🧠 Думаю...")
+    menu_full = get_full_menu(internal_uid)
+    type_menu = menu_full.get(op_type, {})
+    menu_str = f"[{op_type}]\n" + "\n".join([f"{c}: {', '.join(subs.keys() if isinstance(subs, dict) else subs)}" for c, subs in type_menu.items()])
+
+    raw_c, raw_s = categorize_with_ai(payload["item"], menu_str, context=clean_hint)
+    v_c, v_s = _validate_ai_category(menu_full, op_type, raw_c, raw_s)
+
+    if v_c and v_s and v_s != "Требует проверки":
+        canon_art = _find_matching_article(menu_full, op_type, v_c, v_s, payload["item"])
+        user_states[user_id]["state"] = "confirm_category"
+        user_states[user_id]["ai_cat"] = v_c
+        user_states[user_id]["ai_sub"] = v_s
+        user_states[user_id]["canonical_art"] = canon_art
+
+        if canon_art.lower() != payload["item"].lower():
+            prompt_msg = f"Ага! «{payload['item']}» относится к:\n📂 {v_c} -> {v_s} (статья: «{canon_art}»)\n\nПривязать как синоним к «{canon_art}»?"
+        else:
+            prompt_msg = f"Ага! «{payload['item']}» относится к:\n📂 {v_c} -> {v_s}\n\nСоздать статью «{payload['item'].capitalize()}»?"
+
+        send_vk_message(user_id, prompt_msg, get_yes_no_keyboard(show_back=True, show_promote_article=(canon_art.lower() != payload["item"].lower())))
+    else:
+        if user_states[user_id]["attempts"] < MAX_ATTEMPTS:
+            send_vk_message(
+                user_id,
+                f"Всё равно не могу сообразить 🤔 (Попытка {user_states[user_id]['attempts']} из {MAX_ATTEMPTS})\n"
+                f"Попробуй назвать точную категорию из твоего меню?",
+                get_cancel_keyboard(show_back=True)
+            )
+        else:
+            user_states[user_id]["state"] = "tx_manual_type"
+            send_vk_message(user_id, "🤷‍♂️ Я сдаюсь. Давайте выберем вручную!\n\nЭто Расход или Доход?", type_keyboard(show_back=True))
+    return True
+
 def handle_learning_flow(user_id, internal_uid, user_text, user_text_lower, state, user_states, MAX_ATTEMPTS):
     """Интерактивный цикл подтверждения, сбора подсказок и ручной выбор дерева."""
 
-    # 1. ПОДТВЕРЖДЕНИЕ "ДА / НЕТ"
+    # 1. ПОДТВЕРЖДЕНИЕ "ДА / НЕТ" ИЛИ ПРЯМАЯ ПОДСКАЗКА ГОЛОСОМ
     if state == "confirm_category":
         payload = user_states[user_id]["payload"]
         cat = user_states[user_id]["ai_cat"]
@@ -29,14 +121,26 @@ def handle_learning_flow(user_id, internal_uid, user_text, user_text_lower, stat
         comment = payload.get("comment", "")
         canon_art = user_states[user_id].get("canonical_art") or item_name.capitalize()
 
-        if any(t in user_text_lower for t in ["сделать отдельной статьей", "сделать отдельной статьёй", "отдельной статьей", "отдельная статья"]):
+        # 1.1. Создание отдельной статьи (кнопкой или голосом, например: «сделай отдельную статью болгарка»)
+        create_art_match = re.search(
+            r'(?:сделай|сделать|создай|создать|выдели|отдельн(?:ая|ой|ую)|нов(?:ая|ой|ую))\s*(?:отдельн(?:ой|ую|ая)|нов(?:ой|ую|ая))?\s*стать(?:ей|ёй|я|ю|е)(?:\s*(?:под\s*названием|с\s*названием|это|как)?\s*(.+))?',
+            user_text_lower
+        )
+        if create_art_match or any(t in user_text_lower for t in ["сделать отдельной статьей", "сделать отдельной статьёй", "отдельной статьей", "отдельная статья"]):
+            custom_art_name = None
+            if create_art_match and create_art_match.group(1):
+                raw_c_name = create_art_match.group(1).strip().strip('.,;!')
+                if raw_c_name:
+                    custom_art_name = raw_c_name.capitalize()
+            final_article_name = custom_art_name or item_name.capitalize()
+
             send_vk_message(user_id, "⏳ Создаю новую статью и записываю операцию...")
             save_transaction(
                 user_id=internal_uid,
                 op_type=op_type,
                 category=cat,
                 subcategory=sub,
-                article=item_name.capitalize(),
+                article=final_article_name,
                 amount=amount,
                 comment=comment,
                 original_text=item_name,
@@ -47,14 +151,21 @@ def handle_learning_flow(user_id, internal_uid, user_text, user_text_lower, stat
                 op_type=op_type,
                 category=cat,
                 subcategory=sub,
-                article=item_name.capitalize(),
+                article=final_article_name,
                 synonym=item_name
             )
-            send_vk_message(user_id, f"✅ Создана новая статья «{item_name.capitalize()}» в подкатегории «{sub}»!\nОперация записана.", get_main_keyboard(user_id))
+            send_vk_message(
+                user_id,
+                f"✅ Создана новая статья «{final_article_name}» в подкатегории «{sub}»!\nОперация записана.",
+                get_main_keyboard(user_id)
+            )
             del user_states[user_id]
             return True
 
-        if any(w in user_text_lower for w in ["да", "верно", "ага", "давай", "ок", "yes", "+"]):
+        # 1.2. Однозначное согласие («Да», «Верно», «Ок», «Сохрани»)
+        tokens = [w.strip() for w in re.split(r'[\s,.;!?]+', user_text_lower) if w.strip()]
+        is_pure_yes = len(tokens) <= 3 and any(w in tokens for w in ["да", "верно", "ага", "давай", "ок", "yes", "+", "правильно", "сохрани", "сохранить", "готово"])
+        if is_pure_yes and not any(w in tokens for w in ["нет", "не", "неверно", "но", "вместо"]):
             send_vk_message(user_id, "⏳ Запоминаю и записываю в базу...")
             save_transaction(
                 user_id=internal_uid,
@@ -84,7 +195,9 @@ def handle_learning_flow(user_id, internal_uid, user_text, user_text_lower, stat
             del user_states[user_id]
             return True
 
-        elif any(w in user_text_lower for w in ["нет", "неверно", "не", "no", "-"]):
+        # 1.3. Однозначный отказ без подсказки («Нет», «Неверно», «Не-а»)
+        is_pure_no = len(tokens) <= 2 and any(w in tokens for w in ["нет", "неверно", "не", "no", "-", "не-а"])
+        if is_pure_no:
             if user_states[user_id]["attempts"] < MAX_ATTEMPTS:
                 user_states[user_id]["state"] = "provide_context"
                 user_states[user_id]["context_history"] = ""
@@ -98,68 +211,13 @@ def handle_learning_flow(user_id, internal_uid, user_text, user_text_lower, stat
                 user_states[user_id]["state"] = "tx_manual_type"
                 send_vk_message(user_id, "🤷‍♂️ Я сдаюсь. Давайте выберем вручную!\n\nЭто Расход или Доход?", type_keyboard(show_back=True))
             return True
-        else:
-            send_vk_message(user_id, "Пожалуйста, ответьте «✅ Да», «❌ Нет» или нажмите «📄 Сделать отдельной статьёй».", get_yes_no_keyboard(show_back=True, show_promote_article=True))
-            return True
 
-    # 2. ПОДСКАЗКА ОТ ПОЛЬЗОВАТЕЛЯ
+        # 1.4. Прямая подсказка голосом или текстом («это инструмент», «нет, это авто», «мебель»)
+        return _process_user_hint(user_id, internal_uid, user_text, user_states, MAX_ATTEMPTS)
+
+    # 2. ПОДСКАЗКА ОТ ПОЛЬЗОВАТЕЛЯ (ИЗ РЕЖИМА provide_context)
     if state == "provide_context":
-        user_states[user_id]["attempts"] += 1
-        payload = user_states[user_id]["payload"]
-        if "доход" in user_text_lower or "приход" in user_text_lower:
-            payload["type"] = "Доход"
-        elif "расход" in user_text_lower or "трата" in user_text_lower:
-            payload["type"] = "Расход"
-
-        op_type = payload.get("type", "Расход")
-        check_res = smart_search_item(internal_uid, user_text, op_type=op_type)
-        if check_res.get("status") != "FOUND":
-            check_res = smart_search_item(internal_uid, user_text, op_type=None)
-
-        if check_res.get("status") == "FOUND":
-            user_states[user_id]["state"] = "confirm_category"
-            user_states[user_id]["ai_cat"] = check_res.get("category")
-            user_states[user_id]["ai_sub"] = check_res.get("subcategory")
-            user_states[user_id]["canonical_art"] = check_res.get("article", payload["item"])
-            if check_res.get("type"):
-                payload["type"] = check_res["type"]
-            send_vk_message(
-                user_id,
-                f"Ага! «{user_text}» — это статья «{check_res.get('article')}»:\n"
-                f"📂 {check_res.get('category')} -> {check_res.get('subcategory')}\n\n"
-                f"Привязать «{payload['item']}» как синоним?",
-                get_yes_no_keyboard(show_back=True, show_promote_article=True)
-            )
-            return True
-
-        send_vk_message(user_id, "🧠 Думаю...")
-        menu_full = get_full_menu(internal_uid)
-        type_menu = menu_full.get(op_type, {})
-        menu_str = f"[{op_type}]\n" + "\n".join([f"{c}: {', '.join(subs.keys() if isinstance(subs, dict) else subs)}" for c, subs in type_menu.items()])
-
-        raw_c, raw_s = categorize_with_ai(payload["item"], menu_str, context=user_text)
-        v_c, v_s = _validate_ai_category(menu_full, op_type, raw_c, raw_s)
-
-        if v_c and v_s and v_s != "Требует проверки":
-            canon_art = _find_matching_article(menu_full, op_type, v_c, v_s, payload["item"])
-            user_states[user_id]["state"] = "confirm_category"
-            user_states[user_id]["ai_cat"] = v_c
-            user_states[user_id]["ai_sub"] = v_s
-            user_states[user_id]["canonical_art"] = canon_art
-
-            if canon_art.lower() != payload["item"].lower():
-                prompt_msg = f"Ага! «{payload['item']}» относится к:\n📂 {v_c} -> {v_s} (статья: «{canon_art}»)\n\nПривязать как синоним к «{canon_art}»?"
-            else:
-                prompt_msg = f"Ага! «{payload['item']}» относится к:\n📂 {v_c} -> {v_s}\n\nСоздать статью «{payload['item'].capitalize()}»?"
-
-            send_vk_message(user_id, prompt_msg, get_yes_no_keyboard(show_back=True, show_promote_article=(canon_art.lower() != payload["item"].lower())))
-        else:
-            if user_states[user_id]["attempts"] < MAX_ATTEMPTS:
-                send_vk_message(user_id, f"Всё равно не могу сообразить 🤔 (Попытка {user_states[user_id]['attempts']} из {MAX_ATTEMPTS})\nПопробуй назвать точную категорию из твоего меню?", get_cancel_keyboard(show_back=True))
-            else:
-                user_states[user_id]["state"] = "tx_manual_type"
-                send_vk_message(user_id, "🤷‍♂️ Я сдаюсь. Давайте выберем вручную!\n\nЭто Расход или Доход?", type_keyboard(show_back=True))
-        return True
+        return _process_user_hint(user_id, internal_uid, user_text, user_states, MAX_ATTEMPTS)
 
     # 3. ИНТЕРАКТИВНЫЙ РУЧНОЙ ВЫБОР
     if state == "tx_manual_type":
