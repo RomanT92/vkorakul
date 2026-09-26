@@ -2,7 +2,6 @@
   let isTestingActive = false;
 
   function updateTestButtonState(testing) {
-    isTestingActive = testing;
     const btn = document.getElementById('triggerTestBtn');
     if (!btn) return;
 
@@ -146,10 +145,10 @@
     if (!summaryTextarea || !modal) return;
 
     if (failedModules.length === 0) {
-      summaryTextarea.value = "✅ Все 27 модулей системы «Оракул» работают в штатном режиме (статус: В строю).\nОшибок и сбоев не зафиксировано.";
+      summaryTextarea.value = "✅ Все 28 модулей системы «Оракул» работают в штатном режиме (статус: В строю).\nОшибок и сбоев не зафиксировано.";
     } else {
       let report = `🚨 СВОДКА СБОЕВ СИСТЕМЫ САМОДИАГНОСТИКИ «ОРАКУЛ»\n`;
-      report += `Обнаружено проблемных модулей: ${failedModules.length} из 27\n`;
+      report += `Обнаружено проблемных модулей: ${failedModules.length} из 28\n`;
       report += `Дата формирования: ${new Date().toLocaleString('ru-RU')}\n`;
       report += `==================================================\n\n`;
 
