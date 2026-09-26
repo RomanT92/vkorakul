@@ -61,7 +61,7 @@ TEST_VK_ID = 999999999
 
 def run_test_module(mod_num: int, name: str, test_func):
     """Выполняет тест, замеряет время и отправляет статус в дашборд."""
-    print(f"[{mod_num:02d}/27] Тестирую: {name}...", end=" ", flush=True)
+    print(f"[{mod_num:02d}/28] Тестирую: {name}...", end=" ", flush=True)
     start_t = time.time()
     try:
         ok, err_msg = test_func()
@@ -82,7 +82,7 @@ def run_test_module(mod_num: int, name: str, test_func):
         return False, err
 
 # ====================================================================
-# ТЕСТОВЫЕ КЕЙСЫ ДЛЯ КАЖДОГО ИЗ 27 МОДУЛЕЙ
+# ТЕСТОВЫЕ КЕЙСЫ ДЛЯ КАЖДОГО ИЗ 28 МОДУЛЕЙ
 # ====================================================================
 
 # 1. Авторизация и профиль пользователя
@@ -418,8 +418,60 @@ def test_mod_27():
         return True, ""
     return False, f"Сбой переноса в новую статью: ok={ok_edit}, tx_art={updated_tx.get('article') if updated_tx else None}"
 
+# 28. Список покупок и плановые расходы
+def test_mod_28():
+    """
+    Проверяет модуль списка покупок и плановых расходов:
+    1. Парсинг составных фраз с суммами (_extract_planned_items_from_text).
+    2. Добавление запланированных позиций в БД (add_planned_items).
+    3. Чтение активного списка (get_active_planned_items).
+    4. Отметка покупки / вычеркивание (mark_item_bought_by_id).
+    5. Полная очистка списка покупок (clear_all_planned_items).
+    """
+    try:
+        from handlers_planned import (
+            _extract_planned_items_from_text,
+            add_planned_items,
+            get_active_planned_items,
+            mark_item_bought_by_id,
+            clear_all_planned_items
+        )
+
+        # 1. Проверка синтаксического парсера
+        parsed = _extract_planned_items_from_text("Надо купить болгарку за 4500 и диски 300")
+        if len(parsed) < 2 or parsed[0].get("amount") != 4500.0:
+            return False, f"Парсер списка покупок вернул некорректные данные: {parsed}"
+
+        # 2. Проверка работы с базой данных
+        uid = get_or_create_user(TEST_VK_ID)
+        clear_all_planned_items(uid)
+
+        test_items = [
+            {"item": "ТестМолоко28", "amount": 89.0},
+            {"item": "ТестХлеб28", "amount": 45.0}
+        ]
+        ok_add = add_planned_items(uid, test_items)
+        if not ok_add:
+            return False, "add_planned_items не смог сохранить покупки в БД"
+
+        active = get_active_planned_items(uid)
+        if not active or len(active) < 2:
+            return False, f"get_active_planned_items не вернул добавленные товары: {active}"
+
+        # 3. Проверка отметки о покупке
+        item_id = active[0]["id"]
+        bought = mark_item_bought_by_id(uid, item_id)
+        if not bought or bought.get("item") != "ТестМолоко28":
+            return False, f"mark_item_bought_by_id дал сбой: {bought}"
+
+        # 4. Очистка тестовых данных
+        clear_all_planned_items(uid)
+        return True, ""
+    except Exception as e:
+        return False, f"Сбой проверки модуля списка покупок: {e}"
+
 # ====================================================================
-# ГЛАВНЫЙ РЕЕСТР ПРОГОНА 27 ТЕСТОВ
+# ГЛАВНЫЙ РЕЕСТР ПРОГОНА 28 ТЕСТОВ
 # ====================================================================
 TESTS_REGISTRY = [
     (1, "Авторизация и профиль пользователя", test_mod_01),
@@ -449,12 +501,13 @@ TESTS_REGISTRY = [
     (25, "Управление структурой (CRUD статей)", test_mod_25),
     (26, "Сторожевой таймер и панель контроля (Watchdog)", test_mod_26),
     (27, "Создание новой статьи голосом при правке транзакций", test_mod_27),
+    (28, "Список покупок и плановые расходы", test_mod_28),
 ]
 
 def run_all_self_tests():
-    """Запускает полный аудит всех 27 функциональных узлов."""
+    """Запускает полный аудит всех 28 функциональных узлов."""
     print("=" * 65)
-    print("🚀 СТАРТ СКВОЗНОГО АУДИТА СИСТЕМЫ «ОРАКУЛ» (27 МОДУЛЕЙ)")
+    print("🚀 СТАРТ СКВОЗНОГО АУДИТА СИСТЕМЫ «ОРАКУЛ» (28 МОДУЛЕЙ)")
     print(f"⏰ Время запуска: {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}")
     print("=" * 65)
 
