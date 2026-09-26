@@ -322,6 +322,14 @@ for event in longpoll.listen():
         except Exception as e_rcpt:
             report_module_health(11, "Требует внимания", str(e_rcpt))
 
+        # Шаг 4.5: Запланированные покупки (список покупок, отметка купленного)
+        try:
+            from handlers_planned import handle_planned_purchases
+            if handle_planned_purchases(user_id, internal_uid, user_text, user_text_lower, state, user_states):
+                continue
+        except Exception as e_plan:
+            print(f"Ошибка модуля запланированных покупок: {e_plan}")
+
         # Шаг 5: Быстрый ввод, история, текстовый CRUD (Модули №2, 4, 5, 9)
         try:
             if handle_transaction(user_id, user_text, state, user_states):
