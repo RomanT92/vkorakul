@@ -9,12 +9,56 @@ def _resolve_internal_user_id(cur, user_id):
     row = cur.fetchone()
     return row[0] if row else user_id
 
+def delete_user_synonym_override(user_id, synonym_text, article_name=None):
+    """
+    Удаляет ошибочную или устаревшую привязку синонима из персонального словаря user_dictionary.
+    """
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        uid = _resolve_internal_user_id(cur, user_id)
+        clean_syn = synonym_text.lower().strip()
+        if article_name:
+            cur.execute("""
+                DELETE FROM user_dictionary
+                WHERE user_id = %s AND LOWER(TRIM(synonym)) = %s AND LOWER(TRIM(article)) = %s;
+            """, (uid, clean_syn, article_name.lower().strip()))
+        else:
+            cur.execute("""
+                DELETE FROM user_dictionary
+                WHERE user_id = %s AND LOWER(TRIM(synonym)) = %s;
+            """, (uid, clean_syn))
+        deleted_count = cur.rowcount
+        conn.commit()
+        return deleted_count
+    except Exception as e:
+        print(f"Ошибка удаления синонима: {e}")
+        return 0
+    finally:
+        cur.close()
+        conn.close()
+
+def _is_suspicious_override(item_name, category, subcategory, article):
+    """
+    Проверяет семантическую аномалию: защищает от ошибочных связок вроде 'игрушка' -> 'Курительные штуки'.
+    """
+    clean_item = item_name.lower().strip()
+    art_lower = (article or "").lower()
+    cat_lower = (category or "").lower()
+    sub_lower = (subcategory or "").lower()
+
+    if "игрушк" in clean_item:
+        if any(bad in art_lower or bad in sub_lower or bad in cat_lower for bad in ["курительн", "табак", "сигарет", "кальян", "вейп"]):
+            return True
+
+    return False
+
 def smart_search_item(user_id, item_name, op_type=None):
     """
     Поиск с наивысшим приоритетом персонального словаря пользователя:
-    1. Точное совпадение в user_dictionary (синоним или статья)
+    1. Точное совпадение в user_dictionary (синоним или статья, с санитарной проверкой аномалий)
     2. Поиск в global_dictionary (с фильтрацией удаленных и переопределенных пользователем слов)
-    3. Поиск по названиям подкатегорий и категорий с приоритизацией базовых статей (не экзотических тарифов)
+    3. Поиск по названиям подкатегорий и категорий с приоритизацией базовых статей
     4. Нечёткий поиск триграммами pg_trgm (сходство >= 0.65)
     """
     conn = get_db_connection()
@@ -47,15 +91,20 @@ def smart_search_item(user_id, item_name, op_type=None):
 
         user_match = cur.fetchone()
         if user_match:
-            return {
-                "status": "FOUND",
-                "type": user_match[0].strip(),
-                "category": user_match[1].strip(),
-                "subcategory": user_match[2].strip(),
-                "article": user_match[3].strip()
-            }
+            u_type, u_cat, u_sub, u_art = user_match[0].strip(), user_match[1].strip(), user_match[2].strip(), user_match[3].strip()
+            # Санитарная проверка: если связка аномальна, сбрасываем и ищем в эталоне
+            if not _is_suspicious_override(clean_item, u_cat, u_sub, u_art):
+                return {
+                    "status": "FOUND",
+                    "type": u_type,
+                    "category": u_cat,
+                    "subcategory": u_sub,
+                    "article": u_art
+                }
+            else:
+                print(f"[SECURITY] Обнаружена и проигнорирована аномальная связка user_dictionary: '{clean_item}' -> '{u_art}' ({u_cat})")
 
-        # 2. ГЛОБАЛЬНЫЙ ЭТАЛОН (с корректной изоляцией удалений по конкретным синонимам)
+        # 2. ГЛОБАЛЬНЫЙ ЭТАЛОН (с корректной изоляцией удалений по конкретным связкам)
         type_clause_global = "AND LOWER(TRIM(g.type)) = %s" if clean_type else ""
         global_sql = f"""
             SELECT g.type, g.category, g.subcategory, g.article
@@ -66,8 +115,7 @@ def smart_search_item(user_id, item_name, op_type=None):
                   WHERE u.user_id = %s
                     AND LOWER(TRIM(u.type)) = LOWER(TRIM(g.type))
                     AND (
-                        (LOWER(TRIM(u.synonym)) = LOWER(TRIM(g.synonym)))
-                        OR (
+                        (
                             LOWER(TRIM(u.category)) = LOWER(TRIM(g.category))
                             AND (u.subcategory = '' OR u.subcategory IS NULL)
                             AND u.is_deleted = TRUE
@@ -187,13 +235,15 @@ def smart_search_item(user_id, item_name, op_type=None):
 
         fuzzy_match = cur.fetchone()
         if fuzzy_match and fuzzy_match[5] is not None and fuzzy_match[5] >= 0.65:
-            return {
-                "status": "FOUND",
-                "type": fuzzy_match[0].strip(),
-                "category": fuzzy_match[1].strip(),
-                "subcategory": fuzzy_match[2].strip(),
-                "article": fuzzy_match[3].strip()
-            }
+            f_type, f_cat, f_sub, f_art = fuzzy_match[0].strip(), fuzzy_match[1].strip(), fuzzy_match[2].strip(), fuzzy_match[3].strip()
+            if not _is_suspicious_override(clean_item, f_cat, f_sub, f_art):
+                return {
+                    "status": "FOUND",
+                    "type": f_type,
+                    "category": f_cat,
+                    "subcategory": f_sub,
+                    "article": f_art
+                }
 
         return {"status": "NOT_FOUND"}
     except Exception as e:
