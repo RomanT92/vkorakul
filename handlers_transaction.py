@@ -116,7 +116,7 @@ def _try_parse_multiple_transactions(text):
                 try:
                     amt_val = float(raw_amt)
                     if amt_val > 0 and len(raw_name) >= 2:
-                        parsed_items.append({"item": raw_name, "amount": amt_val})
+                        parsed_items.append({"item": raw_name, "amount": amt_val, "comment": ""})
                 except ValueError:
                     pass
 
@@ -149,7 +149,8 @@ def handle_transaction(user_id, user_text, state, user_states):
         for op in fast_multi:
             cur_item = op["item"]
             amt = op["amount"]
-            op_t, _ = detect_operation_type(user_text, "Расход", cur_item)
+            comm = op.get("comment", "")
+            op_t, _ = detect_operation_type(user_text, "Расход", cur_item, comm)
             s_res = smart_search_item(internal_uid, cur_item, op_type=op_t)
             if s_res["status"] != "FOUND":
                 s_res = smart_search_item(internal_uid, cur_item, op_type=None)
@@ -159,7 +160,7 @@ def handle_transaction(user_id, user_text, state, user_states):
                 c, s, a = s_res["category"], s_res["subcategory"], s_res.get("article", cur_item.capitalize())
                 processed_items.append({
                     "item": cur_item, "article": a, "amount": amt, "type": final_t,
-                    "category": c, "subcategory": s, "comment": "", "is_known": True
+                    "category": c, "subcategory": s, "comment": comm, "is_known": True
                 })
             else:
                 type_menu = menu_full.get(op_t, {})
@@ -171,21 +172,22 @@ def handle_transaction(user_id, user_text, state, user_states):
                 fa = _find_best_matching_article_in_sub(menu_full, op_t, fc, fs, cur_item)
                 processed_items.append({
                     "item": cur_item, "article": fa, "amount": amt, "type": op_t,
-                    "category": fc, "subcategory": fs, "comment": "", "is_known": (fs != "Требует проверки")
+                    "category": fc, "subcategory": fs, "comment": comm, "is_known": (fs != "Требует проверки")
                 })
 
         user_states[user_id] = {"state": "multi_tx_review", "items": processed_items, "menu": menu_full}
         _show_multi_tx_items(user_id, processed_items, show_apply_all=False)
         return True
 
-    # 4. FAST-PATH: Одиночная запись "Кофе 250" за 1 мс
+    # 4. FAST-PATH: Одиночная запись "Кофе 250", "1700 игрушка Марку" за 1 мс
     fast_parsed = _try_fast_single_transaction_parse(user_text)
     if fast_parsed:
         if user_id in user_states:
             del user_states[user_id]
         f_item = fast_parsed["item"]
         f_amt = fast_parsed["amount"]
-        f_op_type, _ = detect_operation_type(user_text, "Расход", f_item)
+        f_comment = fast_parsed.get("comment", "")
+        f_op_type, _ = detect_operation_type(user_text, "Расход", f_item, f_comment)
 
         db_res = smart_search_item(internal_uid, f_item, op_type=f_op_type)
         if db_res.get("status") != "FOUND":
@@ -196,11 +198,12 @@ def handle_transaction(user_id, user_text, state, user_states):
             cat, sub = db_res["category"], db_res["subcategory"]
             canonical_art = db_res.get("article") or f_item.capitalize()
 
-            save_transaction(internal_uid, final_type, cat, sub, canonical_art, f_amt, "", f_item, 'verified')
+            save_transaction(internal_uid, final_type, cat, sub, canonical_art, f_amt, f_comment, f_item, 'verified')
             learn_user_word(internal_uid, final_type, cat, sub, canonical_art, f_item)
 
             syn_info = f" (статья: «{canonical_art}»)" if canonical_art.lower() != f_item.lower() else ""
-            send_vk_message(user_id, f"✅ Успешно записано! ({final_type})\n📂 {cat} -> {sub}{syn_info}\n💰 {f_amt:g} руб.", get_main_keyboard(user_id))
+            comm_info = f"\n📝 Комментарий: {f_comment}" if f_comment else ""
+            send_vk_message(user_id, f"✅ Успешно записано! ({final_type})\n📂 {cat} -> {sub}{syn_info}\n💰 {f_amt:g} руб.{comm_info}", get_main_keyboard(user_id))
             return True
         else:
             menu_full = get_full_menu(internal_uid)
@@ -213,19 +216,20 @@ def handle_transaction(user_id, user_text, state, user_states):
                 matched_art = _find_best_matching_article_in_sub(menu_full, f_op_type, v_c, v_s, f_item)
                 user_states[user_id] = {
                     "state": "confirm_category",
-                    "payload": {"item": f_item, "article": matched_art, "amount": f_amt, "type": f_op_type, "category": v_c, "subcategory": v_s, "comment": ""},
+                    "payload": {"item": f_item, "article": matched_art, "amount": f_amt, "type": f_op_type, "category": v_c, "subcategory": v_s, "comment": f_comment},
                     "menu": menu_full,
                     "ai_cat": v_c,
                     "ai_sub": v_s,
                     "canonical_art": matched_art,
                     "attempts": 1
                 }
-                c_text = f"🤖 Думаю, «{f_item}» относится к:\n📂 {v_c} -> {v_s} (статья: «{matched_art}»)\n💰 {f_amt:g} руб.\n\nПривязать как синоним к «{matched_art}»?" if matched_art.lower() != f_item.lower() else f"🤖 Думаю, «{f_item}» относится к:\n📂 {v_c} -> {v_s}\n💰 {f_amt:g} руб.\n\nСоздать статью «{f_item.capitalize()}»?"
+                comm_note = f" (📝 {f_comment})" if f_comment else ""
+                c_text = f"🤖 Думаю, «{f_item}» относится к:\n📂 {v_c} -> {v_s} (статья: «{matched_art}»)\n💰 {f_amt:g} руб.{comm_note}\n\nПривязать как синоним к «{matched_art}»?" if matched_art.lower() != f_item.lower() else f"🤖 Думаю, «{f_item}» относится к:\n📂 {v_c} -> {v_s}\n💰 {f_amt:g} руб.{comm_note}\n\nСоздать статью «{f_item.capitalize()}»?"
                 send_vk_message(user_id, c_text, get_yes_no_keyboard(show_back=True, show_promote_article=(matched_art.lower() != f_item.lower())))
             else:
                 user_states[user_id] = {
                     "state": "provide_context",
-                    "payload": {"item": f_item, "article": f_item.capitalize(), "amount": f_amt, "type": f_op_type, "category": "Разное", "subcategory": "Требует проверки", "comment": ""},
+                    "payload": {"item": f_item, "article": f_item.capitalize(), "amount": f_amt, "type": f_op_type, "category": "Разное", "subcategory": "Требует проверки", "comment": f_comment},
                     "menu": menu_full,
                     "attempts": 1
                 }
@@ -305,14 +309,15 @@ def handle_transaction(user_id, user_text, state, user_states):
             if amt <= 0 and not re.search(r'\d+', user_text):
                 continue
             cur_item = op.get("item", "").strip() or clean_fallback_item(user_text)
-            op_t, is_inc = detect_operation_type(user_text, op.get("type", "Расход"), cur_item)
+            comm = op.get("comment", "")
+            op_t, is_inc = detect_operation_type(user_text, op.get("type", "Расход"), cur_item, comm)
 
             s_res = smart_search_item(internal_uid, cur_item, op_type=op_t)
             if s_res["status"] == "FOUND":
                 processed_items.append({
                     "item": cur_item, "article": s_res.get("article", cur_item),
                     "amount": amt, "type": op_t, "category": s_res["category"],
-                    "subcategory": s_res["subcategory"], "comment": "", "is_known": True
+                    "subcategory": s_res["subcategory"], "comment": comm, "is_known": True
                 })
             else:
                 type_menu = menu_full.get(op_t, {})
@@ -324,15 +329,16 @@ def handle_transaction(user_id, user_text, state, user_states):
                 art = _find_best_matching_article_in_sub(menu_full, op_t, final_c, final_s, cur_item)
                 processed_items.append({
                     "item": cur_item, "article": art, "amount": amt, "type": op_t,
-                    "category": final_c, "subcategory": final_s, "comment": "", "is_known": (final_s != "Требует проверки")
+                    "category": final_c, "subcategory": final_s, "comment": comm, "is_known": (final_s != "Требует проверки")
                 })
 
         if len(processed_items) == 1:
             it = processed_items[0]
             if it["is_known"]:
-                save_transaction(internal_uid, it["type"], it["category"], it["subcategory"], it["article"], it["amount"], "", it["item"], 'verified')
+                save_transaction(internal_uid, it["type"], it["category"], it["subcategory"], it["article"], it["amount"], it.get("comment", ""), it["item"], 'verified')
                 learn_user_word(internal_uid, it["type"], it["category"], it["subcategory"], it["article"], it["item"])
-                send_vk_message(user_id, f"✅ Успешно записано! ({it['type']})\n📂 {it['category']} -> {it['subcategory']}\n💰 {it['amount']:g} руб.", get_main_keyboard(user_id))
+                comm_note = f"\n📝 Комментарий: {it['comment']}" if it.get("comment") else ""
+                send_vk_message(user_id, f"✅ Успешно записано! ({it['type']})\n📂 {it['category']} -> {it['subcategory']}\n💰 {it['amount']:g} руб.{comm_note}", get_main_keyboard(user_id))
                 return True
             else:
                 user_states[user_id] = {
