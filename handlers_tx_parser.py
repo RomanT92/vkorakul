@@ -11,6 +11,41 @@ INCOME_KEYWORDS = [
     "перевели", "перевод мне"
 ]
 
+COMMON_RECIPIENT_PATTERNS = [
+    r'\b(?:для|на)\s+([а-яёa-z]+)',
+
+    r'\b(марку|роме|кате|маме|папе|жене|мужу|сыну|дочке|детям|ребенку|бабушке|дедушке|коту|собаке|другу|брату|сестре)\b'
+]
+
+def extract_recipient_and_clean_item(raw_text):
+    """
+    Отсекает адресатов/имена (например, 'игрушка Марку' -> item='игрушка', comment='Марку')
+    для обеспечения чистого поиска по базе товаров и синонимов.
+    """
+    clean_item = raw_text.strip()
+    extracted_comment = ""
+
+    # 1. Поиск предложных конструкций: 'для Марка', 'для мамы'
+    m_prep = re.search(r'\b(?:для|на)\s+([а-яёa-z0-9\-]+)\b', clean_item, flags=re.IGNORECASE)
+    if m_prep:
+        extracted_comment = m_prep.group(0).strip().capitalize()
+        clean_item = (clean_item[:m_prep.start()] + clean_item[m_prep.end():]).strip()
+
+    # 2. Поиск дательного падежа популярных имен и родственников: 'Марку', 'Кате', 'жене'
+    if not extracted_comment:
+        m_dat = re.search(
+            r'\b(марку|роме|родиону|кате|екатерине|маме|папе|жене|мужу|сыну|дочке|детям|реб[её]нку|бабушке|дедушке|коту|собаке|другу|брату|сестре)\b',
+            clean_item,
+            flags=re.IGNORECASE
+        )
+        if m_dat:
+            matched_word = m_dat.group(1).strip()
+            extracted_comment = matched_word.capitalize()
+            clean_item = (clean_item[:m_dat.start()] + clean_item[m_dat.end():]).strip()
+
+    clean_item = re.sub(r'\s+', ' ', clean_item).strip(' ,;:-')
+    return (clean_item if clean_item else raw_text), extracted_comment
+
 def detect_operation_type(user_text="", raw_type="Расход", item_name="", comment=""):
     """
     Определяет тип операции (Расход или Доход) по контексту текста, ключевым словам или явному типу.
@@ -39,7 +74,8 @@ def clean_fallback_item(user_text):
 
 def _try_fast_single_transaction_parse(user_text):
     """
-    Детерминированный разбор простых фраз типа 'Шиномонтаж 2600', 'такси 450' без вызова ИИ.
+    Детерминированный разбор простых фраз типа 'Шиномонтаж 2600', '1700 игрушка Марку' без вызова ИИ.
+    Автоматически выделяет адресатов в comment.
     """
     text = user_text.strip()
     match_end = re.search(r'^(.*?)\s+(\d+(?:[.,]\d+)?)\s*(?:руб|р)?$', text, re.IGNORECASE)
@@ -59,7 +95,13 @@ def _try_fast_single_transaction_parse(user_text):
         try:
             amt = float(raw_amount)
             if amt > 0 and len(raw_item) >= 2 and not any(ch in raw_item for ch in [',', ';', '\n']):
-                return {"item": raw_item, "amount": amt}
+                clean_title, comment = extract_recipient_and_clean_item(raw_item)
+                return {
+                    "item": clean_title,
+                    "raw_item": raw_item,
+                    "amount": amt,
+                    "comment": comment
+                }
         except ValueError:
             pass
     return None
@@ -125,7 +167,7 @@ def _find_best_matching_article_in_sub(menu_full, op_type, cat, sub, user_word):
     """
     Безопасный поиск статьи в подкатегории:
     - Сначала ищет точное совпадение со статьей из базы.
-    - Затем нечеткое совпадение с высоким порогом.
+    - Затем нечеткое совпадение с высоким порогом (>= 0.70).
     - Если в подкатегории есть статья с таким же названием, как подкатегория (например 'Рестораны' в 'Рестораны'),
       выбирает её вместо выдумывания несуществующей статьи.
     - В крайнем случае выбирает 'Другое <подкатегория>' или базовую каноническую статью подкатегории.
@@ -147,15 +189,14 @@ def _find_best_matching_article_in_sub(menu_full, op_type, cat, sub, user_word):
         if (len(clean_w) >= 4 and clean_w in art_l) or (len(art_l) >= 4 and art_l in clean_w):
             return art
 
-    # 3. Триграммное / difflib совпадение
-    matches = difflib.get_close_matches(clean_w, [a.lower() for a in sub_articles], n=1, cutoff=0.72)
+    # 3. Триграммное / difflib совпадение с порогом 0.70
+    matches = difflib.get_close_matches(clean_w, [a.lower() for a in sub_articles], n=1, cutoff=0.70)
     if matches:
         for art in sub_articles:
             if art.lower() == matches[0]:
                 return art
 
-    # 4. Если точного совпадения нет — привязываем к существующей базовой статье подкатегории!
-    # Ищем статью, совпадающую с подкатегорией (например sub='Рестораны' -> art='Рестораны')
+    # 4. Если точного совпадения нет — привязываем к существующей базовой статье подкатегории
     same_as_sub = next((a for a in sub_articles if a.lower() == sub.lower()), None)
     if same_as_sub:
         return same_as_sub
