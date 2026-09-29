@@ -135,8 +135,7 @@ for event in longpoll.listen():
             internal_uid = get_or_create_user(user_id)
             report_module_health(1, "В строю")
         except Exception as e_user:
-            report_module_health(1, "Требует внимания", str(e_user))\
-
+            report_module_health(1, "Требует внимания", str(e_user))
             continue
 
         # ==============================================================
@@ -224,7 +223,7 @@ for event in longpoll.listen():
                         if att['type'] == 'doc':
                             doc = att['doc']
                             ext = doc.get('ext', '').lower()
-                            if ext in ['csv', 'xlsx', 'xls']:\
+                            if ext in ['csv', 'xlsx', 'xls']:
                                 doc_url = doc['url']
                                 doc_ext = f'.{ext}'
                                 break
