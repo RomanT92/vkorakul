@@ -44,6 +44,7 @@ from admin.admin_server import app as admin_app
 user_states = {}
 MAX_ATTEMPTS = 3
 TEST_INTERVAL_HOURS = 4  # Интервал автотестов (каждые 4 часа)
+_is_testing_in_progress = False
 
 # ====================================================================
 # ВЕБ-СЕРВЕР АДМИНКИ (FASTAPI НА BOTHOST)
@@ -62,34 +63,38 @@ admin_thread.start()
 # ====================================================================
 # АВТОНОМНЫЙ СТОРОЖЕВОЙ ПОТОК (HEARTBEAT И АВТОТЕСТЫ)
 # ====================================================================
-def background_health_monitor():
-    """
-    Фоновый сторожевой демон:
-    1. Каждые 30 секунд шлет пинг активности (Heartbeat) в админку.
-    2. Если оператор в админке нажал «Запустить автотест» — немедленно инициирует аудит.
-    3. При старте и каждые 4 часа запускает плановый сквозной аудит.
-    """
-    time.sleep(2)
-    
-    # Если при старте модуль чеков сломан — сразу фиксируем ошибку в админке
-    if not RECEIPT_AVAILABLE:
-        report_module_health(10, "Ошибка", "Синтаксическая ошибка или сбой импорта в handlers_receipt.py")
-        report_module_health(11, "Ошибка", "handlers_receipt.py не загружен")
-        report_module_health(12, "Ошибка", "handlers_receipt.py не загружен")
+def _run_tests_async():
+    """Неблокирующий асинхронный запуск сквозных тестов в отдельном потоке."""
+    global _is_testing_in_progress
+    if _is_testing_in_progress:
+        return
+    _is_testing_in_progress = True
+    try:
+        from test_runner import run_all_self_tests
+        print("\n[АВТОТЕСТ] Фоновый прогон функциональных модулей системы...")
+        run_all_self_tests()
+    except Exception as e:
+        print(f"[АВТОТЕСТ] Ошибка при фоновом аудите: {e}")
+    finally:
+        _is_testing_in_progress = False
 
+def heartbeat_worker():
+    """
+    Изолированный поток пинга активности:
+    Каждые 25 секунд шлет Heartbeat в админку. Не блокируется тестами!
+    """
+    time.sleep(1)
     # Первый пинг связи сразу при запуске бота
     send_heartbeat()
 
-    # Стартовый аудит всех 19 модулей
-    try:
-        from test_runner import run_all_self_tests
-        print("\n[АВТОТЕСТ] Стартовый прогон всех 19 модулей системы...")
-        run_all_self_tests()
-    except Exception as e:
-        print(f"[АВТОТЕСТ] Ошибка при стартовом аудите: {e}")
+    if not RECEIPT_AVAILABLE:
+        report_module_health(20, "Ошибка", "Синтаксическая ошибка или сбой импорта в handlers_receipt.py")
+
+    # Стартовый аудит запускаем в отдельном потоке, чтобы не тормозить отправку пингов
+    threading.Thread(target=_run_tests_async, daemon=True).start()
 
     last_full_audit = time.time()
-    
+
     while True:
         try:
             # 1. Сигнал жизнедеятельности в админку
@@ -97,25 +102,23 @@ def background_health_monitor():
 
             # 2. Проверка: запросил ли оператор автотест через веб-интерфейс
             if isinstance(hb_res, dict) and hb_res.get("run_tests") is True:
-                print("\n[АВТОТЕСТ] Получен ручной триггер тестирования из веб-админки! Запуск...")
-                from test_runner import run_all_self_tests
-                run_all_self_tests()
+                print("\n[АВТОТЕСТ] Получен ручной триггер тестирования из веб-админки! Запуск в фоне...")
+                threading.Thread(target=_run_tests_async, daemon=True).start()
                 last_full_audit = time.time()
 
             # 3. Плановый аудит каждые 4 часа
             elif time.time() - last_full_audit >= (TEST_INTERVAL_HOURS * 3600):
                 print(f"\n[АВТОТЕСТ] Плановый запуск сквозного аудита (каждые {TEST_INTERVAL_HOURS} ч)...")
-                from test_runner import run_all_self_tests
-                run_all_self_tests()
+                threading.Thread(target=_run_tests_async, daemon=True).start()
                 last_full_audit = time.time()
 
         except Exception as e:
-            print(f"[WATCHDOG] Ошибка в сторожевом потоке: {e}")
+            print(f"[WATCHDOG] Ошибка в сторожевом потоке пинга: {e}")
 
-        time.sleep(30)  # Пинг каждые 30 секунд для сверхбыстрого контроля связи
+        time.sleep(25)  # Пинг каждые 25 секунд для непрерывного ONLINE-статуса
 
 # Запуск сторожевого потока
-monitor_thread = threading.Thread(target=background_health_monitor, daemon=True)
+monitor_thread = threading.Thread(target=heartbeat_worker, daemon=True)
 monitor_thread.start()
 
 # ====================================================================
@@ -132,11 +135,12 @@ for event in longpoll.listen():
             internal_uid = get_or_create_user(user_id)
             report_module_health(1, "В строю")
         except Exception as e_user:
-            report_module_health(1, "Требует внимания", str(e_user))
+            report_module_health(1, "Требует внимания", str(e_user))\
+
             continue
 
         # ==============================================================
-        # 1. ПЕРЕХВАТ ГОЛОСОВОГО СООБЩЕНИЯ (МОДУЛЬ №3)
+        # 1. ПЕРЕХВАТ ГОЛОСОВОГО СООБЩЕНИЯ (МОДУЛЬ №9)
         # ==============================================================
         if not user_text and event.attachments:
             is_voice = any(
@@ -157,23 +161,23 @@ for event in longpoll.listen():
                         if transcribed_text:
                             user_text = transcribed_text
                             send_vk_message(user_id, f'📝 Распознано: «{user_text}»')
-                            report_module_health(3, "В строю")
+                            report_module_health(9, "В строю")
                         else:
-                            report_module_health(3, "Требует внимания", "Whisper вернул пустой текст")
+                            report_module_health(9, "Требует внимания", "Whisper вернул пустой текст")
                             send_vk_message(user_id, '❌ Не удалось распознать речь. Попробуйте текстом.')
                             continue
                     else:
-                        report_module_health(3, "Требует внимания", "Не найдена ссылка на .ogg от VK")
+                        report_module_health(9, "Требует внимания", "Не найдена ссылка на .ogg от VK")
                         send_vk_message(user_id, '❌ Не удалось получить аудиофайл от ВК.')
                         continue
                 except Exception as e:
-                    report_module_health(3, "Требует внимания", str(e))
+                    report_module_health(9, "Требует внимания", str(e))
                     print(f'Ошибка при обработке голосового: {e}')
                     send_vk_message(user_id, '❌ Произошла ошибка при загрузке голосового сообщения.')
                     continue
 
         # ==============================================================
-        # 1.5 ПЕРЕХВАТ ФОТОГРАФИИ ЧЕКА (МОДУЛЬ №10)
+        # 1.5 ПЕРЕХВАТ ФОТОГРАФИИ ЧЕКА (МОДУЛЬ №20)
         # ==============================================================
         if not user_text and event.attachments:
             is_photo = any(val == 'photo' for val in event.attachments.values())
@@ -194,18 +198,18 @@ for event in longpoll.listen():
                             'photo_url': photo_url,
                         }
                         send_vk_message(user_id, '👀 Вижу чек. Как его записать?', get_receipt_mode_keyboard())
-                        report_module_health(10, "В строю")
+                        report_module_health(20, "В строю")
                     else:
-                        report_module_health(10, "Требует внимания", "Не удалось извлечь URL фотографии чека")
+                        report_module_health(20, "Требует внимания", "Не удалось извлечь URL фотографии чека")
                         send_vk_message(user_id, '❌ Не удалось получить ссылку на фото.')
                 except Exception as e:
-                    report_module_health(10, "Требует внимания", str(e))
+                    report_module_health(20, "Требует внимания", str(e))
                     print(f'Ошибка при обработке фото: {e}')
                     send_vk_message(user_id, '❌ Произошла ошибка при загрузке фотографии.')
                 continue
 
         # ==============================================================
-        # 1.6 ПЕРЕХВАТ ВЫПИСОК CSV / XLSX / XLS (МОДУЛЬ №15)
+        # 1.6 ПЕРЕХВАТ ВЫПИСОК CSV / XLSX / XLS (МОДУЛЬ №23)
         # ==============================================================
         if not user_text and event.attachments:
             is_doc = any(val == 'doc' for val in event.attachments.values())
@@ -220,7 +224,7 @@ for event in longpoll.listen():
                         if att['type'] == 'doc':
                             doc = att['doc']
                             ext = doc.get('ext', '').lower()
-                            if ext in ['csv', 'xlsx', 'xls']:
+                            if ext in ['csv', 'xlsx', 'xls']:\
                                 doc_url = doc['url']
                                 doc_ext = f'.{ext}'
                                 break
@@ -229,7 +233,7 @@ for event in longpoll.listen():
                         if parse_result.get('status') == 'SUCCESS':
                             operations = parse_result.get('operations', [])
                             if not operations:
-                                report_module_health(15, "Требует внимания", "В файле не найдено операций с суммами > 0")
+                                report_module_health(23, "Требует внимания", "В файле не найдено операций с суммами > 0")
                                 send_vk_message(
                                     user_id,
                                     '⚠️ Файл прочитан, но в нем не найдено финансовых операций с суммами больше 0.\n'
@@ -253,14 +257,14 @@ for event in longpoll.listen():
                             else:
                                 report_msg += f'\n\n📥 Нажмите кнопку «Разобрать операции ({stats["needs_review"]})», чтобы распределить их пакетами по 7 штук!'
                                 send_vk_message(user_id, report_msg, get_main_keyboard(user_id))
-                            report_module_health(15, "В строю")
+                            report_module_health(23, "В строю")
                         else:
-                            report_module_health(15, "Требует внимания", parse_result.get('message', 'Ошибка парсинга'))
+                            report_module_health(23, "Требует внимания", parse_result.get('message', 'Ошибка парсинга'))
                             send_vk_message(user_id, f'❌ Не удалось разобрать файл: {parse_result.get("message")}', get_main_keyboard(user_id))
                     else:
                         send_vk_message(user_id, '⚠️ Пожалуйста, отправьте файл в формате .CSV, .XLSX или .XLS')
                 except Exception as e:
-                    report_module_health(15, "Требует внимания", str(e))
+                    report_module_health(23, "Требует внимания", str(e))
                     print(f'Ошибка при обработке документа: {e}')
                     send_vk_message(user_id, '❌ Произошла ошибка при загрузке файла.')
                 continue
@@ -281,62 +285,61 @@ for event in longpoll.listen():
         # ==============================================================
         # 3. МАРШРУТИЗАЦИЯ (STATE MACHINE / РОУТЕР)
         # ==============================================================
-        # Шаг 0: Голосовые команды управления списками (Модули №6, 7, 8)
+        # Шаг 0: Голосовые команды управления списками (Модули №17, 18, 19)
         try:
             if handle_list_voice_commands(user_id, user_text, user_text_lower, state, user_states):
                 continue
         except Exception as e_voice_cmd:
-            report_module_health(6, "Требует внимания", str(e_voice_cmd))
+            report_module_health(17, "Требует внимания", str(e_voice_cmd))
 
-        # Шаг 1: Базовые команды, автотесты и навигация (Модули №17, 19)
+        # Шаг 1: Базовые команды и навигация (Модуль №4)
         try:
             if handle_base_commands(user_id, user_text_lower, state, user_states):
-                report_module_health(19, "В строю")
+                report_module_health(4, "В строю")
                 continue
         except Exception as e_base:
-            report_module_health(19, "Требует внимания", str(e_base))
+            report_module_health(4, "Требует внимания", str(e_base))
 
-        # Шаг 2: Управление структурой категорий и статей (Модуль №16)
+        # Шаг 2: Управление структурой категорий и статей (Модуль №25)
         try:
             if handle_structure(user_id, user_text, user_text_lower, state, user_states):
-                report_module_health(16, "В строю")
+                report_module_health(25, "В строю")
                 continue
         except Exception as e_struct:
-            report_module_health(16, "Требует внимания", str(e_struct))
+            report_module_health(25, "Требует внимания", str(e_struct))
 
-        # Шаг 3: Очередь разбора и обучение (Модули №13, 14)
+        # Шаг 3: Очередь разбора и обучение (Модуль №22)
         try:
             if handle_queue_and_learning(user_id, user_text, user_text_lower, state, user_states, MAX_ATTEMPTS):
-                report_module_health(13, "В строю")
-                report_module_health(14, "В строю")
+                report_module_health(22, "В строю")
                 continue
         except Exception as e_queue:
-            report_module_health(13, "Требует внимания", str(e_queue))
+            report_module_health(22, "Требует внимания", str(e_queue))
 
-        # Шаг 4: Обработка чеков (Модули №10, 11, 12)
+        # Шаг 4: Обработка чеков (Модули №20, 21)
         try:
             if handle_receipt(user_id, user_text, user_text_lower, state, user_states):
-                report_module_health(11, "В строю")
-                report_module_health(12, "В строю")
+                report_module_health(20, "В строю")
+                report_module_health(21, "В строю")
                 continue
         except Exception as e_rcpt:
-            report_module_health(11, "Требует внимания", str(e_rcpt))
+            report_module_health(20, "Требует внимания", str(e_rcpt))
 
-        # Шаг 4.5: Запланированные покупки (список покупок, отметка купленного)
+        # Шаг 4.5: Запланированные покупки (список покупок, отметка купленного) (Модуль №28)
         try:
             from handlers_planned import handle_planned_purchases
             if handle_planned_purchases(user_id, internal_uid, user_text, user_text_lower, state, user_states):
+                report_module_health(28, "В строю")
                 continue
         except Exception as e_plan:
-            print(f"Ошибка модуля запланированных покупок: {e_plan}")
+            report_module_health(28, "Требует внимания", str(e_plan))
 
-        # Шаг 5: Быстрый ввод, история, текстовый CRUD (Модули №2, 4, 5, 9)
+        # Шаг 5: Быстрый ввод, история, текстовый CRUD (Модули №6, 7, 24)
         try:
             if handle_transaction(user_id, user_text, state, user_states):
-                report_module_health(2, "В строю")
                 continue
         except Exception as e_tx:
-            report_module_health(2, "Требует внимания", str(e_tx))
+            print(f"Ошибка в handle_transaction: {e_tx}")
 
         # Фоллбэк
         send_vk_message(user_id, '⚠️ Неверный ввод. Пожалуйста, выберите вариант из меню.\nДля выхода нажмите «🚫 Отмена».', get_main_keyboard(user_id))
