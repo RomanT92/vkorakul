@@ -126,9 +126,25 @@ def handle_transaction(user_id, user_text, state, user_states):
     user_text_lower = user_text.lower().strip()
     internal_uid = get_or_create_user(user_id)
 
-    # 1. Просмотр/правка истории
+    # 1. Просмотр/правка истории конкретных операций
     if handle_history_and_edits(user_id, internal_uid, user_text, user_text_lower, state, user_states):
         return True
+
+    # 1.5. ПРИОРИТЕТ УПРАВЛЕНИЯ СТРУКТУРОЙ ДЕРЕВА (Перенос статьи/подкатегории)
+    # Если команда управляет статьей или подкатегорией и не касается операций
+    is_structure_explicit = any(
+        kw in user_text_lower for kw in [
+            "перенеси статью", "перенести статью", "перенеси подкатегорию", "перенести подкатегорию",
+            "перенеси категорию", "перенести категорию", "создай статью", "создать статью",
+            "удали статью", "удалить статью", "переименуй статью", "переименовать статью"
+        ]
+    )
+    if is_structure_explicit and state == "":
+        reply_text = extract_transaction_with_ai(user_text)
+        if reply_text:
+            parsed_data = _extract_json_data(reply_text)
+            if parsed_data and handle_structure_nlp_action(user_id, internal_uid, parsed_data, user_states, user_text=user_text):
+                return True
 
     # 2. Назад в массовом вводе
     if "назад" in user_text_lower:
@@ -266,22 +282,23 @@ def handle_transaction(user_id, user_text, state, user_states):
     parsed_data = _extract_json_data(reply_text)
     if parsed_data:
         # 6.1 Управление структурой
-        if handle_structure_nlp_action(user_id, internal_uid, parsed_data, user_states):
+        if handle_structure_nlp_action(user_id, internal_uid, parsed_data, user_states, user_text=user_text):
             return True
 
         action = parsed_data.get("action")
 
-        # 6.2 Редактирование операции через ИИ
+        # 6.2 Редактирование конкретной операции через ИИ (только если явно указано edit_tx с целью)
         if action == "edit_tx":
             target = parsed_data.get("target", "last")
-            if target == "last":
+            if target == "last" and any(tx_w in user_text_lower for tx_w in ["последн", "предпоследн", "операци", "трат"]):
                 return apply_edit_to_last_transaction(
                     user_id=user_id,
                     internal_uid=internal_uid,
                     new_category_hint=parsed_data.get("new_category_hint"),
                     new_amount=parsed_data.get("new_amount"),
                     new_item_name=parsed_data.get("new_item_name"),
-                    new_type=parsed_data.get("new_type")
+                    new_type=parsed_data.get("new_type"),
+                    new_article_name=parsed_data.get("new_article_name")
                 )
 
         # 6.3 Просмотр истории
