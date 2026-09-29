@@ -97,6 +97,19 @@ def get_yes_no_keyboard(show_back=True, show_promote_article=False):
         keyboard.add_button('🚫 Отмена', color=VkKeyboardColor.NEGATIVE)
     return keyboard
 
+def get_smart_move_confirm_keyboard(show_back=True):
+    """Клавиатура подтверждения умного распознавания переноса"""
+    keyboard = VkKeyboard(one_time=False)
+    keyboard.add_button('✅ Да, перенести', color=VkKeyboardColor.POSITIVE)
+    keyboard.add_line()
+    keyboard.add_button('❌ Нет', color=VkKeyboardColor.NEGATIVE)
+    keyboard.add_button('🖐 Перенести вручную', color=VkKeyboardColor.PRIMARY)
+    keyboard.add_line()
+    if show_back:
+        keyboard.add_button('🔙 Назад', color=VkKeyboardColor.NEGATIVE)
+        keyboard.add_button('🚫 Отмена', color=VkKeyboardColor.NEGATIVE)
+    return keyboard
+
 def type_keyboard(show_back=True):
     """Выбор типа транзакции"""
     keyboard = VkKeyboard(one_time=False)
