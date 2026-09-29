@@ -189,7 +189,7 @@ async def get_system_health():
     last_hb = SYSTEM_HEALTH_STATE["last_heartbeat"]
     diff_sec = int(now - last_hb) if last_hb > 0 else 999999
     
-    timeout_threshold = 75
+    timeout_threshold = 120  # Запас времени на сетевые задержки и фоновые задачи
     is_online = (last_hb > 0) and (diff_sec <= timeout_threshold)
 
     total_modules = len(MODULES_REGISTRY)
