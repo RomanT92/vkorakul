@@ -188,7 +188,7 @@ while True:
                 # 1.5 ПЕРЕХВАТ ФОТОГРАФИИ ЧЕКА (МОДУЛЬ №20)
                 # ==============================================================
                 if not user_text and event.attachments:
-                    is_photo = any(val == 'photo' for val in event.attachments.values())\
+                    is_photo = any(val == 'photo' for val in event.attachments.values())
                     if is_photo:
                         try:
                             msg_data = vk.messages.getById(message_ids=event.message_id)['items'][0]
@@ -232,7 +232,7 @@ while True:
                                 if att['type'] == 'doc':
                                     doc = att['doc']
                                     ext = doc.get('ext', '').lower()
-                                    if ext in ['csv', 'xlsx', 'xls']:\
+                                    if ext in ['csv', 'xlsx', 'xls']:
                                         doc_url = doc['url']
                                         doc_ext = f'.{ext}'
                                         break
