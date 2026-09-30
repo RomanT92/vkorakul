@@ -60,7 +60,8 @@ def apply_edit_to_last_transaction(user_id, internal_uid, new_category_hint=None
 
     # 2. Создание новой статьи на лету и перенос транзакции
     if new_article_name:
-        clean_new_art = new_article_name.strip().capitalize()
+        raw_art = new_article_name.strip()
+        clean_new_art = raw_art[0].upper() + raw_art[1:] if raw_art else "Новая статья"
         cat = last_tx["category"]
         sub = last_tx["subcategory"]
         op_t = new_type or last_tx["type"]
