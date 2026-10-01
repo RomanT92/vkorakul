@@ -46,12 +46,15 @@ def _stem_word(w: str) -> str:
 
 def _simplify_str(s: str) -> str:
     """Удаляет пробелы, знаки препинания и союзы для строгого сопоставления составных имен."""
-    clean = re.sub(r'[\s,.\-—–/]+', '', s.lower())
+    clean = re.sub(r'[\s,.\\-—–/]+', '', s.lower())
     clean = re.sub(r'\b(?:и|а|в|с)\b', '', clean)
     return clean
 
 def _find_category_in_menu(menu_full, hint_text):
-    """Полноценный трехуровневый поиск по меню категорий и подкатегорий с устойчивостью к падежам."""
+    """
+    Полноценный поиск по меню категорий и подкатегорий с защитой от двусмысленности.
+    ПРАВИЛО: слово 'другое' никогда не считается категорией верхнего уровня!
+    """
     raw_clean = hint_text.lower().strip()
     clean = VOICE_PHONETIC_FIXES.get(raw_clean, raw_clean)
     clean_simple = _simplify_str(clean)
@@ -65,7 +68,7 @@ def _find_category_in_menu(menu_full, hint_text):
         for cat_name, subs in type_cats.items():
             sub_keys = list(subs.keys()) if isinstance(subs, dict) else (subs if subs else [])
             cat_simple = _simplify_str(cat_name)
-            cat_words_stems = [_stem_word(w) for w in re.split(r'[\s,.\-/]+', cat_name.lower()) if len(w) >= 3]
+            cat_words_stems = [_stem_word(w) for w in re.split(r'[\s,.\\-/]+', cat_name.lower()) if len(w) >= 3]
 
             # 1. ТОЧНОЕ СОВПАДЕНИЕ
             if cat_name.lower() == clean or cat_simple == clean_simple:
@@ -76,10 +79,10 @@ def _find_category_in_menu(menu_full, hint_text):
                 if s_name.lower() == clean or _simplify_str(s_name) == clean_simple:
                     return True, m_type, cat_name, s_name
 
-            # 2. ПОИСК ПО КОРНЯМ СЛОВ (ПАДЕЖИ РУССКОГО ЯЗЫКА: бакалее -> бакалея)
+            # 2. ПОИСК ПО КОРНЯМ СЛОВ
             if len(clean_stem) >= 4:
                 for s_name in sub_keys:
-                    s_words_stems = [_stem_word(w) for w in re.split(r'[\s,.\-/]+', s_name.lower()) if len(w) >= 3]
+                    s_words_stems = [_stem_word(w) for w in re.split(r'[\s,.\\-/]+', s_name.lower()) if len(w) >= 3]
                     if any(clean_stem == sw or (len(clean_stem) >= 5 and clean_stem in sw) for sw in s_words_stems):
                         return True, m_type, cat_name, s_name
 
@@ -101,7 +104,7 @@ def _find_category_in_menu(menu_full, hint_text):
             for s_name in sub_keys:
                 sub_candidates.append((s_name.lower(), m_type, cat_name, s_name))
 
-    # 4. НЕЧЕТКИЙ ПОИСК (FUZZY MATCHING) С АДАПТИВНЫМ ПОРОГОМ
+    # 4. НЕЧЕТКИЙ ПОИСК
     all_sub_names = [item[0] for item in sub_candidates]
     cutoff_val = 0.55 if len(clean) >= 6 else 0.65
     matches_sub = difflib.get_close_matches(clean, all_sub_names, n=1, cutoff=cutoff_val)
@@ -126,45 +129,72 @@ def _find_category_in_menu(menu_full, hint_text):
 def _apply_category_to_item(internal_uid, it, hint_text, menu_full, state):
     """
     Определяет правильную пару Категория -> Подкатегория -> Статья по подсказке пользователя.
-    Если названа только категория, сначала ищет сам товар в БД/эталоне внутри этой категории,
-    предотвращая ложные назначения (например, 'Яйцо куриное' -> 'Овощи фрукты').
+    Всегда использует ИСХОДНОЕ наименование товара пользователя (original_item),
+    чтобы исключить искажение контекста при последовательных правках.
     """
-    current_art_name = it.get("article") or it.get("original_item") or it.get("item") or "Операция"
+    current_art_name = it.get("original_item") or it.get("item") or it.get("article") or "Операция"
     op_type = it.get("type", "Расход")
     found_cat, found_sub = None, None
     m_type = op_type
     target_art = current_art_name
     hint_clean = hint_text.strip()
+
+    hint_clean = re.sub(r'^(?:это|в|на|к|подкатегория|категория)\s+', '', hint_clean, flags=re.IGNORECASE).strip()
     hint_clean = VOICE_PHONETIC_FIXES.get(hint_clean.lower(), hint_clean)
 
-    # 0. ПРОВЕРКА РАСЩЕПЛЕНИЯ СВЯЗКИ «Категория, Подкатегория» / «Категория -> Подкатегория»
-    compound_delims = [r'\s*->\s*', r'\s*,\s*', r'\s*-\s*', r'\s*/\s*']
-    for d_pattern in compound_delims:
-        parts = re.split(d_pattern, hint_clean)
-        if len(parts) >= 2:
-            p_cat = parts[0].strip()
-            p_sub = parts[1].strip()
-            if len(p_cat) >= 2 and len(p_sub) >= 2:
-                for check_type in [op_type, "Расход", "Доход"]:
-                    type_cats = menu_full.get(check_type, {})
-                    for c_name, subs in type_cats.items():
-                        if p_cat.lower() in c_name.lower() or c_name.lower() in p_cat.lower():
-                            sub_keys = list(subs.keys()) if isinstance(subs, dict) else (subs if subs else [])
-                            for s_name in sub_keys:
-                                if p_sub.lower() in s_name.lower() or s_name.lower() in p_sub.lower():
-                                    found_cat = c_name
-                                    found_sub = s_name
-                                    m_type = check_type
-                                    target_art = _find_best_matching_article_in_sub(menu_full, m_type, found_cat, found_sub, current_art_name)
-                                    break
-                            if found_cat:
-                                break
-                    if found_cat:
-                        break
+    # 0. ИНТЕЛЛЕКТУАЛЬНЫЙ РАЗБОР СОСТАВНОЙ ФРАЗЫ («это другое готовая еда», «готовая еда другое»)
+    # Ищем родительскую категорию верхнего уровня (исключая 'разное', если названа тематическая папка)
+    for check_type in [op_type, "Расход", "Доход"]:
+        type_cats = menu_full.get(check_type, {})
+        for c_name, subs in type_cats.items():
+            if c_name.lower() in hint_clean.lower():
+                found_cat = c_name
+                m_type = check_type
+                sub_keys = list(subs.keys()) if isinstance(subs, dict) else (subs if subs else [])
+                remainder = re.sub(re.escape(c_name), '', hint_clean, flags=re.IGNORECASE).strip(' ,;:-')
+                if "друг" in remainder.lower():
+                    # Явный запрос подкатегории «Другое» внутри этой категории
+                    matched_other = next((s for s in sub_keys if "друг" in s.lower()), None)
+                    found_sub = matched_other or (sub_keys[0] if sub_keys else "Другое")
+                elif remainder:
+                    matched_sub = next((s for s in sub_keys if remainder.lower() in s.lower() or s.lower() in remainder.lower()), None)
+                    found_sub = matched_sub or (sub_keys[0] if sub_keys else "Разное")
+                else:
+                    found_sub = sub_keys[0] if sub_keys else "Разное"
+
+                target_art = _find_best_matching_article_in_sub(menu_full, m_type, found_cat, found_sub, current_art_name)
+                break
         if found_cat:
             break
 
-    # 1. ПРОВЕРКА: ПОЛЬЗОВАТЕЛЬ НАЗВАЛ КАТЕГОРИЮ ВЕРХНЕГО УРОВНЯ (НАПРИМЕР: «ПРОДУКТЫ», «БЫТ»)
+    # 0.1 РАСЩЕПЛЕНИЕ СВЯЗКИ ЧЕРЕЗ РАЗДЕЛИТЕЛИ («Категория, Подкатегория» / «Категория -> Подкатегория»)
+    if not found_cat:
+        compound_delims = [r'\s*->\s*', r'\s*,\s*', r'\s*-\s*', r'\s*/\s*']
+        for d_pattern in compound_delims:
+            parts = re.split(d_pattern, hint_clean)
+            if len(parts) >= 2:
+                p_cat, p_sub = parts[0].strip(), parts[1].strip()
+                if len(p_cat) >= 2 and len(p_sub) >= 2:
+                    for check_type in [op_type, "Расход", "Доход"]:
+                        type_cats = menu_full.get(check_type, {})
+                        for c_name, subs in type_cats.items():
+                            if p_cat.lower() in c_name.lower() or c_name.lower() in p_cat.lower():
+                                sub_keys = list(subs.keys()) if isinstance(subs, dict) else (subs if subs else [])
+                                for s_name in sub_keys:
+                                    if p_sub.lower() in s_name.lower() or s_name.lower() in p_sub.lower():
+                                        found_cat = c_name
+                                        found_sub = s_name
+                                        m_type = check_type
+                                        target_art = _find_best_matching_article_in_sub(menu_full, m_type, found_cat, found_sub, current_art_name)
+                                        break
+                                if found_cat:
+                                    break
+                        if found_cat:
+                            break
+            if found_cat:
+                break
+
+    # 1. ПРОВЕРКА НАЗВАНИЯ КАТЕГОРИИ ВЕРХНЕГО УРОВНЯ («ПРОДУКТЫ», «БЫТ», «РАЗНОЕ»)
     if not found_cat:
         for check_type in [op_type, "Расход", "Доход"]:
             type_cats = menu_full.get(check_type, {})
@@ -174,19 +204,16 @@ def _apply_category_to_item(internal_uid, it, hint_text, menu_full, state):
                     m_type = check_type
                     sub_keys = list(subs.keys()) if isinstance(subs, dict) else (subs if subs else [])
 
-                    # 1.1 ПЕРВЫМ ДЕЛОМ: проверяем товар в БД (синонимы и эталон), зная категорию!
                     db_item_match = smart_search_item(internal_uid, current_art_name, op_type=m_type)
                     if db_item_match.get("status") == "FOUND" and db_item_match.get("category") == c_name:
                         found_sub = db_item_match.get("subcategory")
                         target_art = db_item_match.get("article", current_art_name)
                     else:
-                        # 1.2 Поиск по дереву категорий внутри ветки c_name
                         c_tree, s_tree = _match_category_tree({m_type: {c_name: subs}}, m_type, current_art_name)
                         if s_tree and s_tree in sub_keys:
                             found_sub = s_tree
                             target_art = _find_best_matching_article_in_sub(menu_full, m_type, found_cat, found_sub, current_art_name)
                         else:
-                            # 1.3 Если товар новый — классифицируем через ИИ строго внутри c_name
                             scoped_menu_str = f"[{m_type}]\n{c_name}: {', '.join(sub_keys)}"
                             ai_c, ai_s = categorize_with_ai(current_art_name, scoped_menu_str, context=hint_clean)
                             if ai_s in sub_keys:
@@ -232,6 +259,11 @@ def _apply_category_to_item(internal_uid, it, hint_text, menu_full, state):
                 found_cat = v_c or "Разное"
                 found_sub = v_s or "Требует проверки"
                 target_art = _find_best_matching_article_in_sub(menu_full, op_type, found_cat, found_sub, current_art_name)
+
+    # Защита от аномальной подстановки табачных статей для еды
+    if any(food_w in current_art_name.lower() for food_w in ["полоска", "булочка", "пирож", "хлеб", "еда", "выпечк"]):
+        if any(bad_w in target_art.lower() for bad_w in ["курительн", "табак", "сигарет"]):
+            target_art = current_art_name.capitalize()
 
     # Сохраняем результат
     if state == "history_view" and "id" in it:
