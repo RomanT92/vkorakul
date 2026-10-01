@@ -104,7 +104,6 @@ def _process_next_batch(user_id, user_states):
     batch = filtered_queue[:BATCH_SIZE]
     state_data["queue"] = filtered_queue[BATCH_SIZE:]
     menu = state_data["menu"]
-    menu_str = "\n".join([f"{c}: {', '.join(subs)}" for c, subs in menu.items()])
 
     state_data.pop("last_category", None)
     state_data.pop("last_subcategory", None)
@@ -112,8 +111,9 @@ def _process_next_batch(user_id, user_states):
     state_data.pop("last_edit_idx", None)
 
     send_vk_message(user_id, f"🧠 Анализирую {len(batch)} операций...", get_cancel_keyboard(show_back=False))
-    ai_results = categorize_batch_with_ai(batch, menu_str)
     menu_full = get_full_menu(internal_uid)
+    menu_str = "\n".join([f"{c}: {', '.join(subs.keys() if isinstance(subs, dict) else subs)}" for c, subs in menu_full.get("Расход", {}).items()])
+    ai_results = categorize_batch_with_ai(batch, menu_str)
 
     for item in batch:
         raw_c, raw_s = "Разное", "Требует проверки"
@@ -143,8 +143,12 @@ def handle_queue_batch(user_id, internal_uid, user_text, user_text_lower, state,
             _process_next_batch(user_id, user_states)
             return True
 
+        # Очистка текста от эмодзи и спецсимволов для 100% надежного распознавания кнопок
+        clean_no_emoji = re.sub(r'[^\w\s]', '', user_text_lower).strip()
+
+        # 1. СОХРАНЕНИЕ ПАКЕТА (кнопка с эмодзи 💾 Сохранить пакет, голос или текст)
         save_triggers = ["сохранить пакет", "сохрани пакет", "сохранить", "готово", "сохрани"]
-        if any(trig == user_text_lower or user_text_lower.startswith("сохранить") for trig in save_triggers):
+        if any(trig in clean_no_emoji for trig in save_triggers):
             send_vk_message(user_id, "⏳ Сохраняю и обновляю базу...", get_cancel_keyboard(show_back=False))
             saved_count = 0
             for item in batch:
@@ -153,7 +157,7 @@ def handle_queue_batch(user_id, internal_uid, user_text, user_text_lower, state,
                         user_id=internal_uid,
                         original_item=item["original_item"],
                         op_type=item.get("type", "Расход"),
-                        category=item.get("category", "Другое"),
+                        category=item.get("category", "Разное"),
                         subcategory=item.get("subcategory", "Другое")
                     )
                     saved_count += 1
@@ -161,12 +165,13 @@ def handle_queue_batch(user_id, internal_uid, user_text, user_text_lower, state,
             _process_next_batch(user_id, user_states)
             return True
 
+        # 2. МУСОРНЫЕ ОПЕРАЦИИ
         all_trash_triggers = [
             "все эти операции в мусор", "все в мусор", "всё в мусор", "в мусор всё",
             "в мусор все", "это всё мусор", "это все мусор", "в корзину все", "в корзину всё",
             "удали всё", "удали все", "стереть всё", "очисти пакет", "всё в корзину", "все в корзину"
         ]
-        if any(trig in user_text_lower for trig in all_trash_triggers):
+        if any(trig in clean_no_emoji for trig in all_trash_triggers):
             user_states[user_id]["state"] = "confirm_delete_all_batch_trash"
             send_vk_message(
                 user_id,
@@ -176,7 +181,7 @@ def handle_queue_batch(user_id, internal_uid, user_text, user_text_lower, state,
             )
             return True
 
-        if "удалить мусор" in user_text_lower or "удали мусор" in user_text_lower:
+        if "удалить мусор" in clean_no_emoji or "удали мусор" in clean_no_emoji:
             user_states[user_id]["state"] = "queue_select_trash_numbers"
             send_vk_message(
                 user_id,
@@ -185,7 +190,7 @@ def handle_queue_batch(user_id, internal_uid, user_text, user_text_lower, state,
             )
             return True
 
-        if any(w in user_text_lower for w in ["удали", "мусор", "исключи", "выкинь", "убери"]):
+        if any(w in clean_no_emoji for w in ["удали", "мусор", "исключи", "выкинь", "убери"]):
             raw_nums = re.findall(r'\d+', user_text)
             del_indices = [int(n) - 1 for n in raw_nums if 0 <= int(n) - 1 < len(batch)]
             if del_indices:
@@ -206,7 +211,8 @@ def handle_queue_batch(user_id, internal_uid, user_text, user_text_lower, state,
                     _show_batch_items(user_id, batch, len(state_data["queue"]), show_apply_all=False)
                 return True
 
-        elif any(phrase in user_text_lower for phrase in ["применить для всех", "применить ко всем"]):
+        # 3. ПРИМЕНИТЬ ДЛЯ ВСЕХ ОСТАВШИХСЯ
+        elif any(phrase in clean_no_emoji for phrase in ["применить для всех", "применить ко всем", "применить"]):
             last_cat = state_data.get("last_category")
             last_sub = state_data.get("last_subcategory")
             last_art = state_data.get("last_article")
@@ -232,6 +238,7 @@ def handle_queue_batch(user_id, internal_uid, user_text, user_text_lower, state,
             _show_batch_items(user_id, batch, len(state_data["queue"]), show_apply_all=True)
             return True
 
+        # 4. ВЫБОР НОМЕРА ОПЕРАЦИИ КЛИКОМ ИЛИ ЧИСЛОМ
         elif user_text.isdigit():
             idx = int(user_text) - 1
             if 0 <= idx < len(batch):
@@ -251,7 +258,8 @@ def handle_queue_batch(user_id, internal_uid, user_text, user_text_lower, state,
                 return True
 
     if state == "confirm_delete_all_batch_trash":
-        if any(w in user_text_lower for w in ["да", "верно", "ага", "yes", "+", "в мусор", "удалить"]):
+        clean_w = re.sub(r'[^\w\s]', '', user_text_lower).strip()
+        if any(w in clean_w for w in ["да", "верно", "ага", "yes", "в мусор", "удалить"]):
             state_data = user_states[user_id]
             batch = state_data["current_batch"]
             total_del = 0
@@ -261,19 +269,20 @@ def handle_queue_batch(user_id, internal_uid, user_text, user_text_lower, state,
             state_data["current_batch"] = []
             _process_next_batch(user_id, user_states)
             return True
-        elif any(w in user_text_lower for w in ["нет", "отмена", "не", "назад"]):
+        elif any(w in clean_w for w in ["нет", "отмена", "не", "назад"]):
             user_states[user_id]["state"] = "queue_batch_review"
             send_vk_message(user_id, "Удаление отменено.")
             _show_batch_items(user_id, user_states[user_id]["current_batch"], len(user_states[user_id]["queue"]), show_apply_all=False)
             return True
 
     if state == "queue_item_action_select":
+        clean_w = re.sub(r'[^\w\s]', '', user_text_lower).strip()
         state_data = user_states[user_id]
         idx = state_data["edit_idx"]
         batch = state_data["current_batch"]
         sel_item = batch[idx]
 
-        if "категори" in user_text_lower or "изменить" in user_text_lower:
+        if "категори" in clean_w or "изменить" in clean_w:
             state_data["state"] = "queue_batch_edit_hint"
             send_vk_message(
                 user_id,
@@ -281,7 +290,7 @@ def handle_queue_batch(user_id, internal_uid, user_text, user_text_lower, state,
                 get_cancel_keyboard(show_back=True)
             )
             return True
-        elif "мусор" in user_text_lower or "удалить" in user_text_lower:
+        elif "мусор" in clean_w or "удалить" in clean_w:
             batch.pop(idx)
             cnt = delete_unverified_by_text(internal_uid, sel_item["original_item"], sel_item.get("type"))
             send_vk_message(user_id, f"🗑 «{sel_item['original_item']}» удалено ({cnt} транзакций стерто из базы) и занесено в Чёрный список!")
@@ -291,7 +300,7 @@ def handle_queue_batch(user_id, internal_uid, user_text, user_text_lower, state,
                 state_data["state"] = "queue_batch_review"
                 _show_batch_items(user_id, batch, len(state_data["queue"]), show_apply_all=False)
             return True
-        elif "пропустить" in user_text_lower:
+        elif "пропустить" in clean_w:
             batch.pop(idx)
             skip_unverified_by_text(internal_uid, sel_item["original_item"])
             send_vk_message(user_id, f"⏩ Позиция «{sel_item['original_item']}» пропущена.")
@@ -331,7 +340,7 @@ def handle_queue_batch(user_id, internal_uid, user_text, user_text_lower, state,
         idx = state_data["edit_idx"]
         batch = state_data["current_batch"]
         sel_item = batch[idx]
-        from handlers_voice_commands import _apply_category_to_item
+        from voice_matcher import _apply_category_to_item
 
         menu_full = get_full_menu(internal_uid)
         found_cat, found_sub = _apply_category_to_item(internal_uid, sel_item, user_text, menu_full, state)
