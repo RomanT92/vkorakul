@@ -214,12 +214,20 @@ def handle_planned_purchases(user_id, internal_uid, user_text, user_text_lower, 
     Автономный перехватчик списка покупок.
     Возвращает True, если запрос обработан этим модулем, иначе False.
     """
-    # 1. Запрос отображения списка покупок
+    # 1. Запрос отображения списка покупок (максимально гибкий охват естественной речи)
+    clean_text = re.sub(r'[^\w\s]', '', user_text_lower).strip()
     view_triggers = [
-        "что купить", "список покупок", "список покупок.", "мои покупки",
-        "план покупок", "покупки", "покажи покупки", "открой покупки"
+        "что купить", "список покупок", "покажи список покупок", "показать список покупок",
+        "открой список покупок", "выведи список покупок", "мои покупки", "план покупок",
+        "покупки", "покажи покупки", "открой покупки", "выведи покупки", "что нужно купить",
+        "что надо купить", "глянуть покупки", "посмотреть покупки", "список того что купить"
     ]
-    if user_text_lower in view_triggers or user_text_lower.startswith("что купить"):
+    is_view_cmd = (
+        clean_text in view_triggers
+        or any(clean_text.startswith(tr) for tr in ["что купить", "список покупок", "покажи список покупок", "выведи список покупок", "показать список"])
+        or ("список" in clean_text and "покуп" in clean_text)
+    )
+    if is_view_cmd:
         items = get_active_planned_items(internal_uid)
         if not items:
             send_vk_message(
@@ -370,7 +378,7 @@ def handle_planned_purchases(user_id, internal_uid, user_text, user_text_lower, 
             for it in parsed_items:
                 amt_str = f" (~{it['amount']:g} ₽)" if it.get("amount") else ""
                 msg += f"• {it['item']}{amt_str}\n"
-            msg += "\nПосмотреть весь список: «Что купить»."
+            msg += "\nПосмотреть весь список: «Что купить» или «Покажи список покупок»."
             send_vk_message(user_id, msg, get_main_keyboard(user_id))
             return True
 
