@@ -70,6 +70,12 @@ ORDINAL_WORDS_MAP = {
     "последн": -1
 }
 
+PLANNED_PHONETIC_FIXES = {
+    "сверххохланд": "сыр хохланд",
+    "сверх хохланд": "сыр хохланд",
+    "сырхохланд": "сыр хохланд"
+}
+
 def _parse_ordinal_token(token: str):
     """Преобразует порядковое слово или цифру в номер позиции (1-based)."""
     digits = re.sub(r'[^0-9]', '', token)
@@ -239,11 +245,28 @@ def clear_all_planned_items(user_id):
 # ====================================================================
 # СИНТАКСИЧЕСКИЙ РАЗБОР ВВОДА ПОКУПОК
 # ====================================================================
-def _extract_planned_items_from_text(raw_text):
-    """Разбирает фразу ввода покупок на отдельные позиции с опциональной суммой."""
-    clean = re.sub(
+def _clean_item_string(raw_item: str) -> str:
+    """Удаляет мусорные служебные слова ('нужно купить', 'купить', 'взять') из названия товара."""
+    it = raw_item.strip()
+    it = re.sub(
 
-        r'^(?:надо\s+|нужно\s+|не\s+забыть\s+|запиши\s+в\s+(?:список\s+)?покупок[:\s]*|в\s+список\s+покупок[:\s]*|список\s+покупок[:\s]*|купить|покупки[:\s]*)\s*',
+        r'^(?:надо\s+(?:бы\s+)?купить|нужно\s+купить|можно\s+купить|хочу\s+купить|не\s+забыть\s+купить|планирую\s+купить|стоит\s+купить|купить|надо\s+взять|нужно\s+взять|взять)\s+',
+        '',
+        it,
+        flags=re.IGNORECASE
+    ).strip()
+    for phonetic_k, phonetic_v in PLANNED_PHONETIC_FIXES.items():
+        if phonetic_k in it.lower():
+            it = re.sub(re.escape(phonetic_k), phonetic_v, it, flags=re.IGNORECASE)
+    return it.strip()
+
+def _extract_planned_items_from_text(raw_text):
+    """
+    Разбирает составную фразу ввода покупок любой длины.
+    Пример: 'Можно купить пену для бритья, зубную пасту, туалетную бумагу, сверххохланд.'
+    """
+    clean = re.sub(
+        r'^(?:можно\s+купить|надо\s+(?:бы\s+)?купить|нужно\s+купить|не\s+забыть\s+купить|хочу\s+купить|планирую\s+купить|стоит\s+купить|запиши\s+в\s+(?:список\s+)?покупок[:\s]*|в\s+список\s+покупок[:\s]*|список\s+покупок[:\s]*|купить|покупки[:\s]*|надо\s+взять|нужно\s+взять|взять)\s*',
         '',
         raw_text,
         flags=re.IGNORECASE
@@ -252,7 +275,7 @@ def _extract_planned_items_from_text(raw_text):
     if not clean:
         return []
 
-    parts = re.split(r'[,;]+|\s+и\s+', clean)
+    parts = re.split(r'[,;\n]+|\s+и\s+', clean)
     items = []
     for p in parts:
         p_clean = p.strip().strip('.,;!?')
@@ -269,8 +292,9 @@ def _extract_planned_items_from_text(raw_text):
             except ValueError:
                 pass
         
-        if item_title:
-            items.append({"item": item_title.capitalize(), "amount": amount})
+        cleaned_title = _clean_item_string(item_title)
+        if cleaned_title and len(cleaned_title) >= 2:
+            items.append({"item": cleaned_title.capitalize(), "amount": amount})
     return items
 
 # ====================================================================
@@ -300,7 +324,7 @@ def handle_planned_purchases(user_id, internal_uid, user_text, user_text_lower, 
                 "🛒 Твой список покупок пуст!\n\n"
                 "Чтобы добавить, просто скажи или напиши:\n"
                 "👉 «Купить молоко, хлеб и кофе»\n"
-                "👉 «Надо купить болгарку за 4500»",
+                "👉 «Можно купить пену для бритья, сыр хохланд»",
                 get_main_keyboard(user_id)
             )
             return True
@@ -423,9 +447,11 @@ def handle_planned_purchases(user_id, internal_uid, user_text, user_text_lower, 
                 )
                 return True
 
-    # 5. Добавление новых запланированных покупок голосом или текстом
+    # 5. Добавление новых запланированных покупок голосом или текстом (одиночных или списком)
     add_triggers = [
         "купить", "надо купить", "нужно купить", "не забыть купить",
+        "можно купить", "надо бы купить", "хочу купить", "планирую купить",
+        "стоит купить", "надо взять", "нужно взять", "взять",
         "запиши в покупки", "запиши в список покупок", "в список покупок"
     ]
     is_add_cmd = any(user_text_lower.startswith(tr) for tr in add_triggers)
