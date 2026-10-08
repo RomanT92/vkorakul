@@ -73,7 +73,9 @@ ORDINAL_WORDS_MAP = {
 PLANNED_PHONETIC_FIXES = {
     "сверххохланд": "сыр хохланд",
     "сверх хохланд": "сыр хохланд",
-    "сырхохланд": "сыр хохланд"
+    "сырхохланд": "сыр хохланд",
+    "дубную пасту": "зубную пасту",
+    "дубная паста": "зубная паста"
 }
 
 def _parse_ordinal_token(token: str):
@@ -249,11 +251,14 @@ def _clean_item_string(raw_item: str) -> str:
     it = raw_item.strip()
     it = re.sub(
 
-        r'^(?:надо\s+(?:бы\s+)?купить|нужно\s+купить|можно\s+купить|хочу\s+купить|не\s+забыть\s+купить|планирую\s+купить|стоит\s+купить|купить|надо\s+взять|нужно\s+взять|взять)\s+',
+        r'^(?:добавь\s+(?:в\s+список\s+покупок\s+)?|добавить\s+(?:в\s+список\s+покупок\s+)?|надо\s+(?:бы\s+)?купить|нужно\s+купить|можно\s+купить|хочу\s+купить|не\s+забыть\s+купить|планирую\s+купить|стоит\s+купить|купить|надо\s+взять|нужно\s+взять|взять)\s+',
         '',
         it,
         flags=re.IGNORECASE
     ).strip()
+    it = re.sub(r'\s+в\s+список\s+покупок$', '', it, flags=re.IGNORECASE).strip()
+    it = re.sub(r'[\s,]+(?:и\s+)?(?:и\s+)?вс[её]$', '', it, flags=re.IGNORECASE).strip()
+
     for phonetic_k, phonetic_v in PLANNED_PHONETIC_FIXES.items():
         if phonetic_k in it.lower():
             it = re.sub(re.escape(phonetic_k), phonetic_v, it, flags=re.IGNORECASE)
@@ -262,12 +267,25 @@ def _clean_item_string(raw_item: str) -> str:
 def _extract_planned_items_from_text(raw_text):
     """
     Разбирает составную фразу ввода покупок любой длины.
-    Пример: 'Можно купить пену для бритья, зубную пасту, туалетную бумагу, сверххохланд.'
+    Примеры:
+    - 'Добавь в список покупок зубную пасту и... и всё.'
+    - 'Добавь зубную пасту в список покупок.'
+    - 'Можно купить пену для бритья, зубную пасту, туалетную бумагу.'
     """
+    clean = raw_text.strip()
+    # Отрезаем фразы завершения речи в конце
+    clean = re.sub(r'[\s,]+(?:и\s+)?(?:и\s+)?вс[её][.!?]*$', '', clean, flags=re.IGNORECASE).strip()
+    clean = re.sub(r'\s+в\s+список\s+покупок[.!?]*$', '', clean, flags=re.IGNORECASE).strip()
+
     clean = re.sub(
-        r'^(?:можно\s+купить|надо\s+(?:бы\s+)?купить|нужно\s+купить|не\s+забыть\s+купить|хочу\s+купить|планирую\s+купить|стоит\s+купить|запиши\s+в\s+(?:список\s+)?покупок[:\s]*|в\s+список\s+покупок[:\s]*|список\s+покупок[:\s]*|купить|покупки[:\s]*|надо\s+взять|нужно\s+взять|взять)\s*',
+        r'^(?:добавь\s+(?:в\s+список\s+покупок[:\s]*)?|добавить\s+(?:в\s+список\s+покупок[:\s]*)?|'
+        r'занеси\s+(?:в\s+список\s+покупок[:\s]*)?|внеси\s+(?:в\s+список\s+покупок[:\s]*)?|'
+        r'можно\s+купить|надо\s+(?:бы\s+)?купить|нужно\s+купить|не\s+забыть\s+купить|'
+        r'хочу\s+купить|планирую\s+купить|стоит\s+купить|запиши\s+в\s+(?:список\s+)?покупок[:\s]*|'
+        r'в\s+список\s+покупок[:\s]*|список\s+покупок[:\s]*|купить|покупки[:\s]*|'
+        r'надо\s+взять|нужно\s+взять|взять)\s*',
         '',
-        raw_text,
+        clean,
         flags=re.IGNORECASE
     ).strip()
 
@@ -278,7 +296,7 @@ def _extract_planned_items_from_text(raw_text):
     items = []
     for p in parts:
         p_clean = p.strip().strip('.,;!?')
-        if not p_clean:
+        if not p_clean or p_clean.lower() in ["всё", "все"]:
             continue
         amt_m = re.search(r'(?:за\s+)?(\d+(?:[.,]\d+)?)\s*(?:руб|рублей|р)?$', p_clean, flags=re.IGNORECASE)
         amount = None
@@ -292,7 +310,7 @@ def _extract_planned_items_from_text(raw_text):
                 pass
         
         cleaned_title = _clean_item_string(item_title)
-        if cleaned_title and len(cleaned_title) >= 2:
+        if cleaned_title and len(cleaned_title) >= 2 and cleaned_title.lower() not in ["всё", "все"]:
             items.append({"item": cleaned_title.capitalize(), "amount": amount})
     return items
 
@@ -307,19 +325,31 @@ def handle_planned_purchases(user_id, internal_uid, user_text, user_text_lower, 
     if "операци" in clean_text:
         return False
 
-    # 1. Запрос отображения списка покупок
+    # 0.1 ОПРЕДЕЛЯЕМ ЯВНЫЕ ГЛАГОЛЫ ДОБАВЛЕНИЯ
+    add_triggers = [
+        "добавь", "добавить", "занеси", "внеси",
+        "купить", "надо купить", "нужно купить", "не забыть купить",
+        "можно купить", "надо бы купить", "хочу купить", "планирую купить",
+        "стоит купить", "надо взять", "нужно взять", "взять",
+        "запиши в покупки", "запиши в список покупок", "в список покупок"
+    ]
+    is_add_cmd = any(user_text_lower.startswith(tr) or f" {tr} " in f" {user_text_lower} " for tr in [
+        "добавь", "добавить", "занеси", "внеси", "купить", "взять"
+    ]) or any(user_text_lower.startswith(tr) for tr in add_triggers)
+
+    # 1. Запрос отображения списка покупок (ТОЛЬКО ЕСЛИ НЕТ ГЛАГОЛА ДОБАВЛЕНИЯ)
     view_triggers = [
         "что купить", "список покупок", "покажи список покупок", "показать список покупок",
         "открой список покупок", "выведи список покупок", "мои покупки", "план покупок",
         "покупки", "покажи покупки", "открой покупки", "выведи покупки", "что нужно купить",
         "что надо купить", "глянуть покупки", "посмотреть покупки", "список того что купить"
     ]
-    is_view_cmd = (
+    is_pure_view = (
         clean_text in view_triggers
-        or any(clean_text.startswith(tr) for tr in ["что купить", "список покупок", "покажи список покупок", "выведи список покупок", "показать список"])
-        or ("список" in clean_text and "покуп" in clean_text)
+        or any(clean_text.startswith(tr) for tr in ["что купить", "покажи список покупок", "выведи список покупок", "показать список", "открой список покупок"])
+        or (clean_text in ["список покупок", "список покупок.", "план покупок"])
     )
-    if is_view_cmd:
+    if is_pure_view and not is_add_cmd:
         items = get_active_planned_items(internal_uid)
         if not items:
             send_vk_message(
@@ -327,7 +357,7 @@ def handle_planned_purchases(user_id, internal_uid, user_text, user_text_lower, 
                 "🛒 Твой список покупок пуст!\n\n"
                 "Чтобы добавить, просто скажи или напиши:\n"
                 "👉 «Купить молоко, хлеб и кофе»\n"
-                "👉 «Можно купить пену для бритья, сыр хохланд»",
+                "👉 «Добавь в список покупок зубную пасту»",
                 get_main_keyboard(user_id)
             )
             return True
@@ -370,7 +400,7 @@ def handle_planned_purchases(user_id, internal_uid, user_text, user_text_lower, 
             except ValueError:
                 pass
 
-        # 2.1 Проверка по номеру: цифрой (2) или словом ("второе", "первое")
+        # Проверка по номеру: цифрой (2) или словом ("второе", "первое")
         parsed_target_num = _parse_ordinal_token(cmd_target) if cmd_target else None
         if parsed_target_num is not None and items:
             idx = (len(items) - 1) if parsed_target_num == -1 else (parsed_target_num - 1)
@@ -436,7 +466,7 @@ def handle_planned_purchases(user_id, internal_uid, user_text, user_text_lower, 
         send_vk_message(user_id, f"🗑 Список покупок очищен (удалено позиций: {count}).", get_main_keyboard(user_id))
         return True
 
-    # 4. Удаление / вычеркивание одиночных или составных позиций из списка покупок
+    # 4. Удаление / вычеркивание позиций из списка покупок
     del_prefixes = ["вычеркни", "удали", "убери", "сотри", "исключи"]
     is_del_cmd = any(user_text_lower.startswith(pfx) for pfx in del_prefixes)
     if is_del_cmd:
@@ -458,13 +488,6 @@ def handle_planned_purchases(user_id, internal_uid, user_text, user_text_lower, 
                 return True
 
     # 5. Добавление новых запланированных покупок голосом или текстом
-    add_triggers = [
-        "купить", "надо купить", "нужно купить", "не забыть купить",
-        "можно купить", "надо бы купить", "хочу купить", "планирую купить",
-        "стоит купить", "надо взять", "нужно взять", "взять",
-        "запиши в покупки", "запиши в список покупок", "в список покупок"
-    ]
-    is_add_cmd = any(user_text_lower.startswith(tr) for tr in add_triggers)
     if is_add_cmd:
         parsed_items = _extract_planned_items_from_text(user_text)
         if parsed_items:
