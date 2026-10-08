@@ -88,7 +88,14 @@ PROMPT_EXTRACT = """
     {"action": "smart_move", "item": "Канцелярия", "to_cat": "Быт"}
   - "перенеси статью Коврик в мебель" ->
     {"action": "smart_move", "item": "Коврик", "to_sub": "Мебель"}
-- Создать: {"action": "start_interactive", "operation": "create_article", "item": "Имя"}
+- Создать:
+  1. Создать статью: {"action": "start_interactive", "operation": "create_article", "item": "Имя"}
+     Пример: "создай статью Сверла" -> {"action": "start_interactive", "operation": "create_article", "item": "Сверла"}
+  2. Создать подкатегорию: {"action": "start_interactive", "operation": "create_subcategory", "item": "Имя", "category": "Имя категории или null", "type": "Расход" | "Доход" | null}
+     Пример: "создай подкатегорию Поклейка обоев" -> {"action": "start_interactive", "operation": "create_subcategory", "item": "Поклейка обоев"}
+     Пример: "создай новую подкатегорию в категории самозанятость(расход) и назови её Поклейка обоев" -> {"action": "start_interactive", "operation": "create_subcategory", "item": "Поклейка обоев", "category": "Самозанятость", "type": "Расход"}
+  3. Создать категорию: {"action": "start_interactive", "operation": "create_category", "item": "Имя", "type": "Расход" | "Доход" | null}
+     Пример: "создай категорию Строительство" -> {"action": "start_interactive", "operation": "create_category", "item": "Строительство"}
 
 РЕЖИМ 6: ОБЩЕНИЕ
 Если это просто приветствие, вопрос или совет без сумм денег — ответь ОБЫЧНЫМ ТЕКСТОМ (без JSON).
