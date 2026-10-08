@@ -29,7 +29,8 @@ from handlers_tx_parser import (
     clean_fallback_item,
     _try_fast_single_transaction_parse,
     _validate_ai_category_choice,
-    _find_best_matching_article_in_sub
+    _find_best_matching_article_in_sub,
+    resolve_category_from_hint_or_menu
 )
 
 def _extract_json_data(text):
@@ -172,7 +173,18 @@ def handle_transaction(user_id, user_text, state, user_states):
             cur_item = op["item"]
             amt = op["amount"]
             comm = op.get("comment", "")
+            cat_hint = op.get("category_hint", "")
             op_t, _ = detect_operation_type(user_text, "Расход", cur_item, comm)
+
+            # Проверяем подсказку категории из синтаксиса
+            h_cat, h_sub, h_art = resolve_category_from_hint_or_menu(menu_full, op_t, cur_item, cat_hint)
+            if h_cat and h_sub:
+                processed_items.append({
+                    "item": cur_item, "article": h_art, "amount": amt, "type": op_t,
+                    "category": h_cat, "subcategory": h_sub, "comment": comm, "is_known": True
+                })
+                continue
+
             s_res = smart_search_item(internal_uid, cur_item, op_type=op_t)
             if s_res["status"] != "FOUND":
                 s_res = smart_search_item(internal_uid, cur_item, op_type=None)
@@ -201,7 +213,7 @@ def handle_transaction(user_id, user_text, state, user_states):
         _show_multi_tx_items(user_id, processed_items, show_apply_all=False)
         return True
 
-    # 4. FAST-PATH: Одиночная запись "Кофе 250", "1700 игрушка Марку" за 1 мс
+    # 4. FAST-PATH: Одиночная запись "Кофе 250", "250 расход на самозанятость поклейка обоев уголки" за 1 мс
     fast_parsed = _try_fast_single_transaction_parse(user_text)
     if fast_parsed:
         if user_id in user_states:
@@ -209,8 +221,29 @@ def handle_transaction(user_id, user_text, state, user_states):
         f_item = fast_parsed["item"]
         f_amt = fast_parsed["amount"]
         f_comment = fast_parsed.get("comment", "")
+        f_cat_hint = fast_parsed.get("category_hint", "")
         f_op_type, _ = detect_operation_type(user_text, "Расход", f_item, f_comment)
 
+        menu_full = get_full_menu(internal_uid)
+
+        # 4.1 Если пользователь явно передал категорию/подкатегорию в синтаксисе
+        if f_cat_hint:
+            h_cat, h_sub, h_art = resolve_category_from_hint_or_menu(menu_full, f_op_type, f_item, f_cat_hint)
+            if not h_cat:
+                h_cat, h_sub, h_art = resolve_category_from_hint_or_menu(menu_full, "Доход" if f_op_type == "Расход" else "Расход", f_item, f_cat_hint)
+                if h_cat:
+                    f_op_type = "Доход" if f_op_type == "Расход" else "Расход"
+
+            if h_cat and h_sub:
+                save_transaction(internal_uid, f_op_type, h_cat, h_sub, h_art, f_amt, f_comment, f_item, 'verified')
+                learn_user_word(internal_uid, f_op_type, h_cat, h_sub, h_art, f_item)
+
+                syn_info = f" (статья: «{h_art}»)" if h_art.lower() != f_item.lower() else ""
+                comm_info = f"\n📝 Комментарий: {f_comment}" if f_comment else ""
+                send_vk_message(user_id, f"✅ Успешно записано! ({f_op_type})\n📂 {h_cat} -> {h_sub}{syn_info}\n💰 {f_amt:g} руб.{comm_info}", get_main_keyboard(user_id))
+                return True
+
+        # 4.2 Поиск по личному словарю
         db_res = smart_search_item(internal_uid, f_item, op_type=f_op_type)
         if db_res.get("status") != "FOUND":
             db_res = smart_search_item(internal_uid, f_item, op_type=None)
@@ -228,7 +261,6 @@ def handle_transaction(user_id, user_text, state, user_states):
             send_vk_message(user_id, f"✅ Успешно записано! ({final_type})\n📂 {cat} -> {sub}{syn_info}\n💰 {f_amt:g} руб.{comm_info}", get_main_keyboard(user_id))
             return True
         else:
-            menu_full = get_full_menu(internal_uid)
             type_menu = menu_full.get(f_op_type, {})
             menu_str = f"[{f_op_type}]\n" + "\n".join([f"{c}: {', '.join(subs.keys() if isinstance(subs, dict) else subs)}" for c, subs in type_menu.items()])
             raw_c, raw_s = categorize_with_ai(f_item, menu_str)
