@@ -37,7 +37,7 @@ def _format_history_response(user_id, hist_data, title="📜 История ва
 
     msg += f"Всего расходов: {hist_data.get('total_expense', 0):g} ₽\n"
     msg += f"Всего доходов: {hist_data.get('total_income', 0):g} ₽\n\n"
-    msg += "💡 Чтобы изменить или удалить операцию — отправьте её НОМЕР из списка."
+    msg += "💡 Чтобы изменить или удалить операцию — отправьте её НОМЕР из списка (или скажите, например: «Удали 10 операцию»)."
 
     send_vk_message(user_id, msg, get_numbered_keyboard(len(items), show_back=True))
 
@@ -112,7 +112,6 @@ def handle_history_and_edits(user_id, internal_uid, user_text, user_text_lower, 
     # ==============================================================
     # 0.1 Список покупок отдаем строго в handlers_planned.py
     if any(pk in user_text_lower for pk in ["список покупок", "план покупок", "что купить", "купить", "покупки"]):
-        # Исключение: если явно запрошена история прошлых покупок
         if not any(past_kw in user_text_lower for past_kw in ["последние покупки", "прошлые покупки", "история покупок"]):
             return False
 
@@ -121,6 +120,26 @@ def handle_history_and_edits(user_id, internal_uid, user_text, user_text_lower, 
     if any(re.search(r'\b' + re.escape(w) + r'\b', user_text_lower) for w in structure_entity_words):
         if not any(tx_kw in user_text_lower for tx_kw in ["последн", "предпоследн", "этой операци", "эту операци", "данной операци"]):
             return False
+
+    # ==============================================================
+    # 0.3 МАССОВОЕ УДАЛЕНИЕ ВСЕХ ОПЕРАЦИЙ («Удали все операции»)
+    # ==============================================================
+    delete_all_triggers = [
+        "удали все операции", "удалить все операции", "удали все транзакции", "удалить все транзакции",
+        "стереть все операции", "сотри все операции", "очисти историю", "очистить историю",
+        "удали все траты", "удалить все траты", "удали все расходы", "удалить все расходы"
+    ]
+    clean_no_punct = re.sub(r'[^\w\s]', '', user_text_lower).strip()
+    if any(trig in clean_no_punct for trig in delete_all_triggers):
+        deleted_count = delete_all_user_transactions(internal_uid)
+        send_vk_message(
+            user_id,
+            f"🗑 Все операции успешно удалены (всего очищено: {deleted_count} шт.)!\nЖурнал транзакций пуст.",
+            get_main_keyboard(user_id)
+        )
+        if user_id in user_states:
+            del user_states[user_id]
+        return True
 
     # ==============================================================
     # 1. ПРАВКА ПОСЛЕДНЕЙ ОПЕРАЦИИ (СТРОГО ПРИ НАЛИЧИИ СЛОВА "ПОСЛЕДН...")
@@ -189,7 +208,7 @@ def handle_history_and_edits(user_id, internal_uid, user_text, user_text_lower, 
         return True
 
     # ==============================================================
-    # 3. ИНТЕРАКТИВНОЕ РЕДАКТИРОВАНИЕ ОПЕРАЦИИ ИЗ СПИСКА
+    # 3. ИНТЕРАКТИВНОЕ РЕДАКТИРОВАНИЕ/УДАЛЕНИЕ ОПЕРАЦИИ ИЗ СПИСКА
     # ==============================================================
     if state == "history_view":
         if any(w in user_text_lower for w in ["отмена", "назад"]):
@@ -197,21 +216,44 @@ def handle_history_and_edits(user_id, internal_uid, user_text, user_text_lower, 
             send_vk_message(user_id, "Главное меню.", get_main_keyboard(user_id))
             return True
 
-        if user_text.isdigit():
-            idx = int(user_text) - 1
-            items = user_states[user_id].get("history_items", [])
-            if 0 <= idx < len(items):
-                sel_item = items[idx]
-                user_states[user_id]["state"] = "tx_action_select"
-                user_states[user_id]["selected_tx"] = sel_item
-                msg = (
-                    f"Выбрана операция:\n"
-                    f"📌 {sel_item['article']} — {sel_item['amount']:g} ₽\n"
-                    f"📂 {sel_item['category']} -> {sel_item['subcategory']}\n\n"
-                    f"Что вы хотите сделать?"
-                )
-                send_vk_message(user_id, msg, get_tx_action_keyboard())
+        items = user_states[user_id].get("history_items", [])
+        
+        # Извлекаем номер операции: цифрами ("10", "удали 10 операцию") или словами ("десятая", "первая")
+        from voice_parser import _parse_token_to_number
+        idx = None
+        for tok in user_text_lower.split():
+            num_val = _parse_ordinal_token_simple(tok) or _parse_token_to_number(tok)
+            if num_val is not None:
+                idx = (len(items) - 1) if num_val == -1 else (num_val - 1)
+                break
+
+        if idx is not None and 0 <= idx < len(items):
+            sel_item = items[idx]
+            
+            # Если команда была прямо на удаление («удали 10 операцию», «удалить десятую»)
+            if any(w in user_text_lower for w in ["удали", "удалить", "стереть", "сотри", "вычеркни"]):
+                if delete_transaction_by_id(internal_uid, sel_item["id"]):
+                    send_vk_message(
+                        user_id,
+                        f"🗑 Операция №{idx+1} («{sel_item['article']}» — {sel_item['amount']:g} ₽) успешно удалена!",
+                        get_main_keyboard(user_id)
+                    )
+                else:
+                    send_vk_message(user_id, "❌ Не удалось удалить операцию.", get_main_keyboard(user_id))
+                del user_states[user_id]
                 return True
+
+            # Иначе открываем выбор действия для этой операции
+            user_states[user_id]["state"] = "tx_action_select"
+            user_states[user_id]["selected_tx"] = sel_item
+            msg = (
+                f"Выбрана операция №{idx+1}:\n"
+                f"📌 {sel_item['article']} — {sel_item['amount']:g} ₽\n"
+                f"📂 {sel_item['category']} -> {sel_item['subcategory']}\n\n"
+                f"Что вы хотите сделать?"
+            )
+            send_vk_message(user_id, msg, get_tx_action_keyboard())
+            return True
 
     if state == "tx_action_select":
         sel_item = user_states[user_id].get("selected_tx")
@@ -272,3 +314,9 @@ def handle_history_and_edits(user_id, internal_uid, user_text, user_text_lower, 
             return True
 
     return False
+
+def _parse_ordinal_token_simple(token: str):
+    clean = re.sub(r'[^0-9]', '', token)
+    if clean.isdigit() and int(clean) > 0:
+        return int(clean)
+    return None
