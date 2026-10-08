@@ -79,7 +79,7 @@ def extract_recipient_and_clean_item(raw_text):
         category_hint = prep_body
         clean_item = actual_item
 
-    # 5. Поиск предложных конструкций в конце: 'уголки для ремонта', 'уголки на поклейку обоев'
+    # 5. Поиск предложных конструкций в конце: 'уголки для ремонта', 'обои на заказ'
     if not category_hint:
         m_prep_end = re.search(r'\s+(?:на|для)\s+([а-яёa-z0-9\s\-]+)$', clean_item, flags=re.IGNORECASE)
         if m_prep_end:
@@ -146,7 +146,7 @@ def clean_fallback_item(user_text):
     norm_text = normalize_spoken_numbers(user_text)
     text = re.sub(r'\d+([.,]\d+)?', '', norm_text).strip()
     stop_words = [
-        "руб", "рублей", "р", "к", "k", "приход", "доход", "расход", "трата",
+        "руб", "рублей", "рубля", "рубль", "р", "к", "k", "приход", "доход", "расход", "трата",
         "купил", "оплатил", "исправь", "измени", "категорию", "подкатегорию",
         "сумма", "на", "покажи", "последнюю", "операцию", "операции"
     ]
@@ -157,12 +157,14 @@ def clean_fallback_item(user_text):
 def _try_fast_single_transaction_parse(user_text):
     """
     Детерминированный разбор простых фраз типа 'Шиномонтаж 2600', '1700 игрушка Марку',
-    '250 расход на самозанятость поклейка обоев уголки' без вызова ИИ.
+    'Обои на заказ 2000 рублей.' без вызова ИИ.
     Автоматически выделяет категорию/подсказку в category_hint и адресатов в comment.
     """
-    norm_text = normalize_spoken_numbers(user_text.strip())
-    match_end = re.search(r'^(.*?)\s+(\d+(?:[.,]\d+)?)\s*(?:руб|р)?$', norm_text, re.IGNORECASE)
-    match_start = re.search(r'^(\d+(?:[.,]\d+)?)\s*(?:руб|р)?\s+(.*?)$', norm_text, re.IGNORECASE)
+    norm_text = normalize_spoken_numbers(user_text.strip()).rstrip('.,;!? ')
+
+    # Поддержка всех вариантов окончаний валюты и знаков препинания в конце
+    match_end = re.search(r'^(.*?)\s+(\d+(?:[.,]\d+)?)\s*(?:руб(?:лей|ля|ль)?|р)?[\s.,;!?]*$', norm_text, re.IGNORECASE)
+    match_start = re.search(r'^(\d+(?:[.,]\d+)?)\s*(?:руб(?:лей|ля|ль)?|р)?[\s.,;!?]+\s*(.*?)$', norm_text, re.IGNORECASE)
 
     raw_item = None
     raw_amount = None
