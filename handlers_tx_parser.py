@@ -39,21 +39,71 @@ def normalize_spoken_numbers(text):
 
 def extract_recipient_and_clean_item(raw_text):
     """
-    Отсекает адресатов/имена во всех падежах (родительный, дательный, винительный)
-    (например, 'игрушка Марку' -> item='игрушка', comment='Марку';
-              'игрушка Кати' -> item='игрушка', comment='Кати')
-    для обеспечения чистого поиска по базе товаров и синонимов.
+    Интеллектуальный разбор текста операции:
+    1. Отсекает служебные слова типа ('расход', 'доход', 'трата', 'оплата').
+    2. Извлекает контекст/категорию из скобок или маркеров ('статья X', 'категория Y', 'в подкатегорию Z').
+    3. Распознает составные конструкции ('на самозанятость поклейка обоев уголки' -> item='уголки', hint='самозанятость поклейка обоев').
+    4. Отсекает адресатов/имена во всех падежах ('игрушка Марку' -> item='игрушка', comment='Марку').
+    Возвращает: clean_item, extracted_comment, category_hint
     """
     clean_item = raw_text.strip()
     extracted_comment = ""
+    category_hint = ""
 
-    # 1. Поиск предложных конструкций: 'для Марка', 'для Кати', 'на маму'
-    m_prep = re.search(r'\b(?:для|на)\s+([а-яёa-z0-9\-]+)\b', clean_item, flags=re.IGNORECASE)
-    if m_prep:
-        extracted_comment = m_prep.group(0).strip().capitalize()
-        clean_item = (clean_item[:m_prep.start()] + clean_item[m_prep.end():]).strip()
+    # 1. Отсекаем начальные служебные слова типа операции
 
-    # 2. Поиск имен и родственников во всех падежах (Кати/Кате/Катю, Марку/Марка, Роме/Ромы и т.д.)
+    clean_item = re.sub(r'^(?:расход|доход|трата|трату|оплата|купил|оплатил)\s+', '', clean_item, flags=re.IGNORECASE).strip()
+
+    # 2. Поиск подсказок категорий в круглых скобках: (поклейка обоев) или (самозанятость)
+    m_paren = re.search(r'\(([^)]+)\)', clean_item)
+    if m_paren:
+        category_hint = m_paren.group(1).strip()
+        clean_item = (clean_item[:m_paren.start()] + clean_item[m_paren.end():]).strip()
+
+    # 3. Поиск явных синтаксических маркеров: 'статья X', 'категория Y', 'подкатегория Z'
+    m_cat_marker = re.search(
+        r'(?:,?\s*(?:в\s+)?(?:стать[яюи]|категори[яюи]|подкатегори[яюи])\s*:?\s*)([а-яёa-z0-9\s\-]+)$',
+        clean_item,
+        flags=re.IGNORECASE
+    )
+    if m_cat_marker:
+        if not category_hint:
+            category_hint = m_cat_marker.group(1).strip()
+        clean_item = clean_item[:m_cat_marker.start()].strip()
+
+    # 4. Поиск составных конструкций с предлогом в начале: 'на самозанятость поклейка обоев уголки'
+    m_prep_start = re.match(r'^(?:на|для)\s+(.+?)\s+([а-яёa-z0-9\-]+)$', clean_item, flags=re.IGNORECASE)
+    if m_prep_start:
+        prep_body = m_prep_start.group(1).strip()
+        actual_item = m_prep_start.group(2).strip()
+        category_hint = prep_body
+        clean_item = actual_item
+
+    # 5. Поиск предложных конструкций в конце: 'уголки для ремонта', 'уголки на поклейку обоев'
+    if not category_hint:
+        m_prep_end = re.search(r'\s+(?:на|для)\s+([а-яёa-z0-9\s\-]+)$', clean_item, flags=re.IGNORECASE)
+        if m_prep_end:
+            prep_tail = m_prep_end.group(1).strip()
+            is_person = re.match(
+                r'^(?:марк[уаеом]|ром[еыуой]|кат[еиюей]|мам[еыуой]|пап[еыуой]|жен[еыуой]|муж[уаем]|сын[уаом]|дочк[еиюей]|дет[ям|ей|ьми])$',
+                prep_tail,
+                flags=re.IGNORECASE
+            )
+            if is_person:
+                extracted_comment = m_prep_end.group(0).strip().capitalize()
+            else:
+                category_hint = prep_tail
+                extracted_comment = prep_tail.capitalize()
+            clean_item = clean_item[:m_prep_end.start()].strip()
+
+    # 6. Поиск одиночных предлогов адресата: 'для Марка', 'на маму'
+    if not extracted_comment:
+        m_prep = re.search(r'\b(?:для|на)\s+([а-яёa-z0-9\-]+)\b', clean_item, flags=re.IGNORECASE)
+        if m_prep:
+            extracted_comment = m_prep.group(0).strip().capitalize()
+            clean_item = (clean_item[:m_prep.start()] + clean_item[m_prep.end():]).strip()
+
+    # 7. Поиск имен и родственников во всех падежах
     if not extracted_comment:
         m_name = re.search(
             r'\b('
@@ -75,7 +125,7 @@ def extract_recipient_and_clean_item(raw_text):
             clean_item = (clean_item[:m_name.start()] + clean_item[m_name.end():]).strip()
 
     clean_item = re.sub(r'\s+', ' ', clean_item).strip(' ,;:-')
-    return (clean_item if clean_item else raw_text), extracted_comment
+    return (clean_item if clean_item else raw_text), extracted_comment, category_hint
 
 def detect_operation_type(user_text="", raw_type="Расход", item_name="", comment=""):
     """
@@ -107,7 +157,8 @@ def clean_fallback_item(user_text):
 def _try_fast_single_transaction_parse(user_text):
     """
     Детерминированный разбор простых фраз типа 'Шиномонтаж 2600', '1700 игрушка Марку',
-    'Игрушка Кати Питот' без вызова ИИ. Автоматически выделяет адресатов в comment.
+    '250 расход на самозанятость поклейка обоев уголки' без вызова ИИ.
+    Автоматически выделяет категорию/подсказку в category_hint и адресатов в comment.
     """
     norm_text = normalize_spoken_numbers(user_text.strip())
     match_end = re.search(r'^(.*?)\s+(\d+(?:[.,]\d+)?)\s*(?:руб|р)?$', norm_text, re.IGNORECASE)
@@ -126,13 +177,15 @@ def _try_fast_single_transaction_parse(user_text):
     if raw_item and raw_amount:
         try:
             amt = float(raw_amount)
-            if amt > 0 and len(raw_item) >= 2 and not any(ch in raw_item for ch in [',', ';', '\n']):
-                clean_title, comment = extract_recipient_and_clean_item(raw_item)
+            # Разрешаем разбор одной операции, исключая явные списки через точку с запятой или переносы
+            if amt > 0 and len(raw_item) >= 2 and not any(ch in raw_item for ch in [';', '\n']):
+                clean_title, comment, category_hint = extract_recipient_and_clean_item(raw_item)
                 return {
                     "item": clean_title,
                     "raw_item": raw_item,
                     "amount": amt,
-                    "comment": comment
+                    "comment": comment,
+                    "category_hint": category_hint
                 }
         except ValueError:
             pass
@@ -269,3 +322,47 @@ def _match_category_tree(menu_full, op_type, text):
                             return cat, s
 
     return None, None
+
+def resolve_category_from_hint_or_menu(menu_full, op_type, item, hint=""):
+    """
+    Интеллектуальное сопоставление товара и/или подсказки с деревом меню:
+    1. Если передана подсказка hint, ищет её в дереве категорий/подкатегорий/статей.
+    2. Если в hint указаны и категория, и подкатегория (например, 'самозанятость поклейка обоев'),
+       точно находит нужный узел дерева.
+    3. Возвращает (cat, sub, article) или (None, None, None).
+    """
+    if not menu_full or not hint:
+        return None, None, None
+
+    type_menu = menu_full.get(op_type, {})
+    if not type_menu:
+        return None, None, None
+
+    h_clean = hint.lower().strip()
+
+    # Проверяем пары "категория подкатегория"
+    for c, subs in type_menu.items():
+        sub_names = list(subs.keys()) if isinstance(subs, dict) else subs
+        for s in sub_names:
+            if (c.lower() in h_clean and s.lower() in h_clean) or s.lower() == h_clean:
+                art = _find_best_matching_article_in_sub(menu_full, op_type, c, s, item)
+                return c, s, art
+
+    # Проверяем только категорию
+    for c, subs in type_menu.items():
+        if c.lower() == h_clean or c.lower() in h_clean:
+            sub_names = list(subs.keys()) if isinstance(subs, dict) else subs
+            target_sub = sub_names[0] if sub_names else "Разное"
+            art = _find_best_matching_article_in_sub(menu_full, op_type, c, target_sub, item)
+            return c, target_sub, art
+
+    # Проверяем по статьям
+    for c, subs in type_menu.items():
+        if isinstance(subs, dict):
+            for s, arts in subs.items():
+                if isinstance(arts, list):
+                    for a in arts:
+                        if a.lower() == h_clean or a.lower() in h_clean:
+                            return c, s, a
+
+    return None, None, None
