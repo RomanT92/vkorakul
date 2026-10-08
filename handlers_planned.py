@@ -44,7 +44,7 @@ def _init_planned_db():
         conn.close()
 
 # ====================================================================
-# КАРТА ПОРЯДКОВЫХ ЧИСЛИТЕЛЬНЫХ ДЛЯ ГОЛОСОВОГО УДАЛЕНИЯ
+# КАРТА ПОРЯДКОВЫХ ЧИСЛИТЕЛЬНЫХ ДЛЯ ГОЛОСОВОГО УПРАВЛЕНИЯ
 # ====================================================================
 ORDINAL_WORDS_MAP = {
     "перв": 1, "один": 1,
@@ -109,7 +109,6 @@ def _extract_delete_indices_or_names(text: str, items: list):
         else:
             unmatched_tokens.append(tok.lower())
 
-    # Если не нашли цифр/порядковых, ищем совпадения по названиям товаров
     if not matched_indices and unmatched_tokens:
         for idx, it in enumerate(items):
             it_name = it["item"].lower()
@@ -304,6 +303,10 @@ def handle_planned_purchases(user_id, internal_uid, user_text, user_text_lower, 
     """Автономный перехватчик голосового и текстового управления списком покупок."""
     clean_text = re.sub(r'[^\w\s]', '', user_text_lower).strip()
 
+    # 0. СТРОГАЯ ЗАЩИТА: ЕСЛИ ПОЛЬЗОВАТЕЛЬ ГОВОРИТ ПРО ОПЕРАЦИИ (ТРАНЗАКЦИИ) -> ПРОПУСКАЕМ!
+    if "операци" in clean_text:
+        return False
+
     # 1. Запрос отображения списка покупок
     view_triggers = [
         "что купить", "список покупок", "покажи список покупок", "показать список покупок",
@@ -343,12 +346,12 @@ def handle_planned_purchases(user_id, internal_uid, user_text, user_text_lower, 
         if has_sums and total_sum > 0:
             msg += f"\n💰 Ожидаемая сумма: ~{total_sum:g} ₽\n"
 
-        msg += "\n💡 Когда купишь, скажи:\n«Купил 1 за 250» или «Купил молоко 250».\n"
+        msg += "\n💡 Когда купишь, скажи:\n«Купил второе за 400» или «Купил 2 за 400».\n"
         msg += "💡 Для удаления: «Удали первое, четвертое и второе»."
         send_vk_message(user_id, msg, get_main_keyboard(user_id))
         return True
 
-    # 2. Фиксация факта покупки («Купил молоко 250», «Купил 1 за 300», «Купил болгарку»)
+    # 2. Фиксация факта покупки («Купил молоко 250», «Купил 1 за 300», «Купил второе за 400»)
     bought_m = re.match(r'^(?:купил|взял|оплатил)\s+(.+)$', user_text_lower)
     if bought_m:
         raw_cmd = bought_m.group(1).strip()
@@ -367,8 +370,10 @@ def handle_planned_purchases(user_id, internal_uid, user_text, user_text_lower, 
             except ValueError:
                 pass
 
-        if cmd_target.isdigit() and items:
-            idx = int(cmd_target) - 1
+        # 2.1 Проверка по номеру: цифрой (2) или словом ("второе", "первое")
+        parsed_target_num = _parse_ordinal_token(cmd_target) if cmd_target else None
+        if parsed_target_num is not None and items:
+            idx = (len(items) - 1) if parsed_target_num == -1 else (parsed_target_num - 1)
             if 0 <= idx < len(items):
                 target_item = items[idx]
         elif items:
@@ -389,7 +394,12 @@ def handle_planned_purchases(user_id, internal_uid, user_text, user_text_lower, 
                 return True
 
             mark_item_bought_by_id(internal_uid, target_item["id"])
-            search_res = smart_search_item(internal_uid, target_item["item"], op_type="Расход")
+            
+            clean_search_item = re.sub(r'^(?:ложечку|ложечка)\b', 'ложка', target_item["item"], flags=re.IGNORECASE)
+            search_res = smart_search_item(internal_uid, clean_search_item, op_type="Расход")
+            if search_res.get("status") != "FOUND":
+                search_res = smart_search_item(internal_uid, target_item["item"], op_type="Расход")
+
             if search_res.get("status") == "FOUND":
                 cat = search_res.get("category")
                 sub = search_res.get("subcategory")
@@ -420,13 +430,13 @@ def handle_planned_purchases(user_id, internal_uid, user_text, user_text_lower, 
             )
             return True
 
-    # 3. Полная очистка списка
+    # 3. Полная очистка списка покупок
     if clean_text in ["очисти список покупок", "очисти покупки", "удали все покупки", "удали весь список покупок"]:
         count = clear_all_planned_items(internal_uid)
         send_vk_message(user_id, f"🗑 Список покупок очищен (удалено позиций: {count}).", get_main_keyboard(user_id))
         return True
 
-    # 4. Удаление / вычеркивание одиночных или составных позиций голосом («Удали первое, четвертое и второе»)
+    # 4. Удаление / вычеркивание одиночных или составных позиций из списка покупок
     del_prefixes = ["вычеркни", "удали", "убери", "сотри", "исключи"]
     is_del_cmd = any(user_text_lower.startswith(pfx) for pfx in del_prefixes)
     if is_del_cmd:
@@ -447,7 +457,7 @@ def handle_planned_purchases(user_id, internal_uid, user_text, user_text_lower, 
                 )
                 return True
 
-    # 5. Добавление новых запланированных покупок голосом или текстом (одиночных или списком)
+    # 5. Добавление новых запланированных покупок голосом или текстом
     add_triggers = [
         "купить", "надо купить", "нужно купить", "не забыть купить",
         "можно купить", "надо бы купить", "хочу купить", "планирую купить",
