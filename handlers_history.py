@@ -105,110 +105,10 @@ def apply_edit_to_last_transaction(user_id, internal_uid, new_category_hint=None
 def handle_history_and_edits(user_id, internal_uid, user_text, user_text_lower, state, user_states):
     """
     Диспетчер истории операций и редактирования конкретных финансовых транзакций.
-    СТРОГОЕ ПРАВИЛО: НЕ перехватывает команды списка покупок и структуры каталога!
+    СТРОГОЕ ПРАВИЛО: Приоритет интерактивного выбора по списку истории!
     """
     # ==============================================================
-    # 0. ЗАЩИТА: ЕСЛИ ЭТО СПИСОК ПОКУПОК ИЛИ СТРУКТУРА -> ПРОПУСКАЕМ!
-    # ==============================================================
-    # 0.1 Список покупок отдаем строго в handlers_planned.py
-    if any(pk in user_text_lower for pk in ["список покупок", "план покупок", "что купить", "купить", "покупки"]):
-        if not any(past_kw in user_text_lower for past_kw in ["последние покупки", "прошлые покупки", "история покупок"]):
-            return False
-
-    # 0.2 Управление структурой
-    structure_entity_words = ["статью", "статья", "статье", "подкатегорию", "подкатегория", "подкатегории", "категорию", "категория", "категории"]
-    if any(re.search(r'\b' + re.escape(w) + r'\b', user_text_lower) for w in structure_entity_words):
-        if not any(tx_kw in user_text_lower for tx_kw in ["последн", "предпоследн", "этой операци", "эту операци", "данной операци"]):
-            return False
-
-    # ==============================================================
-    # 0.3 МАССОВОЕ УДАЛЕНИЕ ВСЕХ ОПЕРАЦИЙ («Удали все операции»)
-    # ==============================================================
-    delete_all_triggers = [
-        "удали все операции", "удалить все операции", "удали все транзакции", "удалить все транзакции",
-        "стереть все операции", "сотри все операции", "очисти историю", "очистить историю",
-        "удали все траты", "удалить все траты", "удали все расходы", "удалить все расходы"
-    ]
-    clean_no_punct = re.sub(r'[^\w\s]', '', user_text_lower).strip()
-    if any(trig in clean_no_punct for trig in delete_all_triggers):
-        deleted_count = delete_all_user_transactions(internal_uid)
-        send_vk_message(
-            user_id,
-            f"🗑 Все операции успешно удалены (всего очищено: {deleted_count} шт.)!\nЖурнал транзакций пуст.",
-            get_main_keyboard(user_id)
-        )
-        if user_id in user_states:
-            del user_states[user_id]
-        return True
-
-    # ==============================================================
-    # 1. ПРАВКА ПОСЛЕДНЕЙ ОПЕРАЦИИ (СТРОГО ПРИ НАЛИЧИИ СЛОВА "ПОСЛЕДН...")
-    # ==============================================================
-    is_last_tx_command = any(w in user_text_lower for w in ["последн", "предпоследн"])
-    
-    if is_last_tx_command:
-        # 1.1 Создание новой статьи для последней операции
-
-        new_art_m = re.search(r'(?:перенеси|создай|сделай)?\s*(?:в|на)?\s*нов(?:ую|ая|ой)\s*стать(?:ю|я|е)\s*(.+)$', user_text_lower)
-        if new_art_m:
-            val_art = new_art_m.group(1).strip()
-            val_art = re.sub(r'^(?:под\s*названием|с\s*названием|это|как)\s+', '', val_art).strip()
-            if val_art:
-                return apply_edit_to_last_transaction(user_id, internal_uid, new_article_name=val_art)
-
-        # 1.2 Изменение суммы последней операции
-        amt_match = re.search(r'(?:сумму|сумма|на сумму|поставь сумму)\s*(?:на|в|равна)?\s*(\d+(?:[.,]\d+)?)$', user_text_lower)
-        if amt_match:
-            try:
-                new_amt = float(amt_match.group(1).replace(',', '.'))
-                return apply_edit_to_last_transaction(user_id, internal_uid, new_amount=new_amt)
-            except ValueError:
-                pass
-
-        # 1.3 Перенос последней операции в другую категорию
-        cat_match = re.search(r'(?:перенеси|поменяй категорию|смени категорию|категорию|в категорию|в подкатегорию)\s*(?:на|в|как)?\s+(.+)$', user_text_lower)
-        if cat_match:
-            hint = cat_match.group(1).strip()
-            hint = re.sub(r'^(?:на|в|как|категорию|подкатегорию)\s+', '', hint).strip()
-            if hint and not any(sw in hint for sw in ["удали", "отмена", "назад", "сумма"]):
-                return apply_edit_to_last_transaction(user_id, internal_uid, new_category_hint=hint)
-
-        # 1.4 Удаление последней операции
-        if any(w in user_text_lower for w in ["удали последнюю", "отмени последнюю", "убери последнюю"]):
-            last_tx = get_last_transaction(internal_uid)
-            if not last_tx:
-                send_vk_message(user_id, "⚠️ У вас пока нет операций для удаления.", get_main_keyboard(user_id))
-                return True
-            if delete_transaction_by_id(internal_uid, last_tx["id"]):
-                send_vk_message(
-                    user_id,
-                    f"🗑 Последняя операция («{last_tx['original_text'] or last_tx['article']}» — {last_tx['amount']:g} ₽) успешно удалена!",
-                    get_main_keyboard(user_id)
-                )
-            else:
-                send_vk_message(user_id, "❌ Не удалось удалить операцию.", get_main_keyboard(user_id))
-            return True
-
-    # ==============================================================
-    # 2. ПРОСМОТР ИСТОРИИ ПРОШЛЫХ ОПЕРАЦИЙ (ВЫПИСКИ)
-    # ==============================================================
-    history_triggers = [
-        "история", "мои траты", "выписка", "покажи операции", "список операций",
-        "история операций", "последние операции", "последние покупки", "выведи последние покупки",
-        "выведи последние операции", "покажи последние траты", "мои расходы", "история трат"
-    ]
-    is_history_cmd = (
-        user_text_lower in history_triggers
-        or any(user_text_lower.startswith(tr) for tr in ["покажи историю", "показать историю", "покажи последние операции", "выведи последние"])
-    )
-    if is_history_cmd:
-        hist = get_user_history(internal_uid, limit=10)
-        user_states[user_id] = {"state": "history_view", "history_items": hist.get("items", [])}
-        _format_history_response(user_id, hist, "📜 Ваши последние 10 операций:")
-        return True
-
-    # ==============================================================
-    # 3. ИНТЕРАКТИВНОЕ РЕДАКТИРОВАНИЕ/УДАЛЕНИЕ ОПЕРАЦИИ ИЗ СПИСКА
+    # 0. ИНТЕРАКТИВНОЕ СОСТОЯНИЕ ПРОСМОТРА ИСТОРИИ (ВЫСШИЙ ПРИОРИТЕТ)
     # ==============================================================
     if state == "history_view":
         if any(w in user_text_lower for w in ["отмена", "назад"]):
@@ -218,19 +118,25 @@ def handle_history_and_edits(user_id, internal_uid, user_text, user_text_lower, 
 
         items = user_states[user_id].get("history_items", [])
         
-        # Извлекаем номер операции: цифрами ("10", "удали 10 операцию") или словами ("десятая", "первая")
-        from voice_parser import _parse_token_to_number
+        # 1. Поиск цифр во фразе (например: «удалить 10 операцию» -> 10)
         idx = None
-        for tok in user_text_lower.split():
-            num_val = _parse_ordinal_token_simple(tok) or _parse_token_to_number(tok)
-            if num_val is not None:
-                idx = (len(items) - 1) if num_val == -1 else (num_val - 1)
-                break
+        digits_found = re.findall(r'\b\d+\b', user_text)
+        if digits_found:
+            val_num = int(digits_found[0])
+            idx = val_num - 1
+        else:
+            # 2. Поиск порядковых слов («первая», «десятая», «последняя»)
+            from voice_parser import _parse_token_to_number
+            for tok in user_text_lower.split():
+                num_val = _parse_ordinal_token_simple(tok) or _parse_token_to_number(tok)
+                if num_val is not None:
+                    idx = (len(items) - 1) if num_val == -1 else (num_val - 1)
+                    break
 
         if idx is not None and 0 <= idx < len(items):
             sel_item = items[idx]
             
-            # Если команда была прямо на удаление («удали 10 операцию», «удалить десятую»)
+            # Если команда содержит указание на удаление:
             if any(w in user_text_lower for w in ["удали", "удалить", "стереть", "сотри", "вычеркни"]):
                 if delete_transaction_by_id(internal_uid, sel_item["id"]):
                     send_vk_message(
@@ -243,7 +149,7 @@ def handle_history_and_edits(user_id, internal_uid, user_text, user_text_lower, 
                 del user_states[user_id]
                 return True
 
-            # Иначе открываем выбор действия для этой операции
+            # Иначе открываем меню действий над этой операцией
             user_states[user_id]["state"] = "tx_action_select"
             user_states[user_id]["selected_tx"] = sel_item
             msg = (
@@ -312,6 +218,104 @@ def handle_history_and_edits(user_id, internal_uid, user_text, user_text_lower, 
         else:
             send_vk_message(user_id, "⚠️ Не удалось сопоставить с каталогом. Попробуйте еще раз:", get_cancel_keyboard(show_back=True))
             return True
+
+    # ==============================================================
+    # 1. ЗАЩИТА: ЕСЛИ ЭТО СПИСОК ПОКУПОК ИЛИ СТРУКТУРА -> ПРОПУСКАЕМ!
+    # ==============================================================
+    if any(pk in user_text_lower for pk in ["список покупок", "план покупок", "что купить", "купить", "покупки"]):
+        if not any(past_kw in user_text_lower for past_kw in ["последние покупки", "прошлые покупки", "история покупок"]):
+            return False
+
+    structure_entity_words = ["статью", "статья", "статье", "подкатегорию", "подкатегория", "подкатегории", "категорию", "категория", "категории"]
+    if any(re.search(r'\b' + re.escape(w) + r'\b', user_text_lower) for w in structure_entity_words):
+        if not any(tx_kw in user_text_lower for tx_kw in ["последн", "предпоследн", "этой операци", "эту операци", "данной операци"]):
+            return False
+
+    # ==============================================================
+    # 2. МАССОВОЕ УДАЛЕНИЕ ВСЕХ ОПЕРАЦИЙ («Удали все операции»)
+    # ==============================================================
+    delete_all_triggers = [
+        "удали все операции", "удалить все операции", "удали все транзакции", "удалить все транзакции",
+        "стереть все операции", "сотри все операции", "очисти историю", "очистить историю",
+        "удали все траты", "удалить все траты", "удали все расходы", "удалить все расходы"
+    ]
+    clean_no_punct = re.sub(r'[^\w\s]', '', user_text_lower).strip()
+    if any(trig in clean_no_punct for trig in delete_all_triggers):
+        deleted_count = delete_all_user_transactions(internal_uid)
+        send_vk_message(
+            user_id,
+            f"🗑 Все операции успешно удалены (всего очищено: {deleted_count} шт.)!\nЖурнал транзакций пуст.",
+            get_main_keyboard(user_id)
+        )
+        if user_id in user_states:
+            del user_states[user_id]
+        return True
+
+    # ==============================================================
+    # 3. ПРАВКА / УДАЛЕНИЕ ПОСЛЕДНЕЙ ОПЕРАЦИИ (СТРОГО "ПОСЛЕДН...")
+    # ==============================================================
+    is_last_tx_command = any(w in user_text_lower for w in ["последн", "предпоследн"])
+    
+    if is_last_tx_command:
+        # 3.1 Создание новой статьи для последней операции
+
+        new_art_m = re.search(r'(?:перенеси|создай|сделай)?\s*(?:в|на)?\s*нов(?:ую|ая|ой)\s*стать(?:ю|я|е)\s*(.+)$', user_text_lower)
+        if new_art_m:
+            val_art = new_art_m.group(1).strip()
+            val_art = re.sub(r'^(?:под\s*названием|с\s*названием|это|как)\s+', '', val_art).strip()
+            if val_art:
+                return apply_edit_to_last_transaction(user_id, internal_uid, new_article_name=val_art)
+
+        # 3.2 Изменение суммы последней операции
+        amt_match = re.search(r'(?:сумму|сумма|на сумму|поставь сумму)\s*(?:на|в|равна)?\s*(\d+(?:[.,]\d+)?)$', user_text_lower)
+        if amt_match:
+            try:
+                new_amt = float(amt_match.group(1).replace(',', '.'))
+                return apply_edit_to_last_transaction(user_id, internal_uid, new_amount=new_amt)
+            except ValueError:
+                pass
+
+        # 3.3 Перенос последней операции в другую категорию
+        cat_match = re.search(r'(?:перенеси|поменяй категорию|смени категорию|категорию|в категорию|в подкатегорию)\s*(?:на|в|как)?\s+(.+)$', user_text_lower)
+        if cat_match:
+            hint = cat_match.group(1).strip()
+            hint = re.sub(r'^(?:на|в|как|категорию|подкатегорию)\s+', '', hint).strip()
+            if hint and not any(sw in hint for sw in ["удали", "отмена", "назад", "сумма"]):
+                return apply_edit_to_last_transaction(user_id, internal_uid, new_category_hint=hint)
+
+        # 3.4 Удаление последней операции
+        if any(w in user_text_lower for w in ["удали последнюю", "отмени последнюю", "убери последнюю"]):
+            last_tx = get_last_transaction(internal_uid)
+            if not last_tx:
+                send_vk_message(user_id, "⚠️ У вас пока нет операций для удаления.", get_main_keyboard(user_id))
+                return True
+            if delete_transaction_by_id(internal_uid, last_tx["id"]):
+                send_vk_message(
+                    user_id,
+                    f"🗑 Последняя операция («{last_tx['original_text'] or last_tx['article']}» — {last_tx['amount']:g} ₽) успешно удалена!",
+                    get_main_keyboard(user_id)
+                )
+            else:
+                send_vk_message(user_id, "❌ Не удалось удалить операцию.", get_main_keyboard(user_id))
+            return True
+
+    # ==============================================================
+    # 4. ПРОСМОТР ИСТОРИИ ПРОШЛЫХ ОПЕРАЦИЙ (ВЫПИСКИ)
+    # ==============================================================
+    history_triggers = [
+        "история", "мои траты", "выписка", "покажи операции", "список операций",
+        "история операций", "последние операции", "последние покупки", "выведи последние покупки",
+        "выведи последние операции", "покажи последние траты", "мои расходы", "история трат"
+    ]
+    is_history_cmd = (
+        user_text_lower in history_triggers
+        or any(user_text_lower.startswith(tr) for tr in ["покажи историю", "показать историю", "покажи последние операции", "выведи последние"])
+    )
+    if is_history_cmd:
+        hist = get_user_history(internal_uid, limit=10)
+        user_states[user_id] = {"state": "history_view", "history_items": hist.get("items", [])}
+        _format_history_response(user_id, hist, "📜 Ваши последние 10 операций:")
+        return True
 
     return False
 
