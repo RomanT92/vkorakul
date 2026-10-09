@@ -34,6 +34,9 @@ from handlers_tx_parser import (
 )
 
 def _extract_json_data(text):
+    """
+    Извлекает JSON-объект или массив из ответа нейросети.
+    """
     if not text:
         return None
     match = re.search(r'(\{.*\}|\[.*\])', text, re.DOTALL)
@@ -45,6 +48,9 @@ def _extract_json_data(text):
     return None
 
 def _show_multi_tx_items(user_id, items, show_apply_all=False):
+    """
+    Отображает список распознанных операций в режиме множественного ввода.
+    """
     msg = f"📋 Распознанные операции (всего {len(items)}):\n\n"
     for i, item in enumerate(items):
         item_name = item.get("item", "Операция")
@@ -65,6 +71,9 @@ def _show_multi_tx_items(user_id, items, show_apply_all=False):
     send_vk_message(user_id, msg, get_multi_tx_review_keyboard(len(items), show_apply_all=show_apply_all, show_back=True))
 
 def _save_items_batch(internal_uid, items):
+    """
+    Пакетно сохраняет распознанные операции в базу данных.
+    """
     saved_count = 0
     needs_review_count = 0
     menu_full = get_full_menu(internal_uid)
@@ -94,29 +103,54 @@ def _try_parse_multiple_transactions(text):
     Быстрый детерминированный разбор строк с несколькими операциями.
     Пример: 'такси 350, кофе 180, аптека 900'
     Используется в test_runner.py (тест №8) и в fast-path обработке.
+    С защитой от ложного разделения адресов ('сгибнем А9, корпус 2') и изолированных сумм ('15000, поклейка...').
     """
     if not text:
         return []
-    parts = re.split(r'[,;\n]+', text.strip())
+
+    clean_strip = text.strip()
+
+    # 1. Защита: если первая часть фразы содержит ТОЛЬКО сумму (например: '15000, поклейка обоев...'),
+    # это одиночная операция с адресом/пояснением через запятую, а не список разных трат!
+    first_part = clean_strip.split(',')[0].strip()
+
+    first_only_num = re.match(r'^(?:доход|приход|расход|трата|оплата)?\s*(\d+(?:[.,]\d+)?)\s*(?:руб(?:лей|ля|ль)?|р)?$', first_part, re.IGNORECASE)
+    if first_only_num:
+        try:
+            cand_val = float(first_only_num.group(1).replace(',', '.'))
+            if cand_val >= 50:
+                return []
+        except ValueError:
+            pass
+
+    parts = re.split(r'[,;\n]+', clean_strip)
     if len(parts) < 2:
         return []
 
     parsed_items = []
+    ADDRESS_WORDS = ["корпус", "корп", "дом", "кв", "квартира", "стр", "строение", "этаж", "бокс", "подъезд", "литер"]
+
     for part in parts:
         part_clean = part.strip()
         if not part_clean:
             continue
         parsed_single = _try_fast_single_transaction_parse(part_clean)
         if parsed_single:
-            parsed_items.append(parsed_single)
+            # Защита: одиночная операция должна иметь сумму >= 50 либо прямое слово валюты
+            has_cur = any(c in part_clean.lower() for c in ["руб", "р"])
+            if parsed_single["amount"] >= 50 or has_cur:
+                parsed_items.append(parsed_single)
         else:
-            amt_match = re.search(r'(\d+(?:[.,]\d+)?)\s*(?:руб|р)?$', part_clean, re.IGNORECASE)
+            amt_match = re.search(r'(\d+(?:[.,]\d+)?)\s*(?:руб(?:лей|ля|ль)?|р)?$', part_clean, re.IGNORECASE)
             if amt_match:
                 raw_amt = amt_match.group(1).replace(',', '.')
                 raw_name = part_clean[:amt_match.start()].strip()
                 try:
                     amt_val = float(raw_amt)
-                    if amt_val > 0 and len(raw_name) >= 2:
+                    has_currency = any(c in part_clean.lower() for c in ["руб", "р"])
+                    is_address_word = any(aw in raw_name.lower().split() for aw in ADDRESS_WORDS)
+                    # Фильтр: исключаем адреса и числа < 50 без явной валюты
+                    if (amt_val >= 50 or has_currency) and len(raw_name) >= 2 and not is_address_word:
                         parsed_items.append({"item": raw_name, "amount": amt_val, "comment": ""})
                 except ValueError:
                     pass
@@ -124,6 +158,9 @@ def _try_parse_multiple_transactions(text):
     return parsed_items if len(parsed_items) >= 2 else []
 
 def handle_transaction(user_id, user_text, state, user_states):
+    """
+    Главный диспетчер обработки финансовых транзакций бота.
+    """
     user_text_lower = user_text.lower().strip()
     internal_uid = get_or_create_user(user_id)
 
@@ -213,7 +250,7 @@ def handle_transaction(user_id, user_text, state, user_states):
         _show_multi_tx_items(user_id, processed_items, show_apply_all=False)
         return True
 
-    # 4. FAST-PATH: Одиночная запись "Кофе 250", "250 расход на самозанятость поклейка обоев уголки" за 1 мс
+    # 4. FAST-PATH: Одиночная запись за 1 мс
     fast_parsed = _try_fast_single_transaction_parse(user_text)
     if fast_parsed:
         if user_id in user_states:
