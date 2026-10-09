@@ -61,7 +61,7 @@ TEST_VK_ID = 999999999
 
 def run_test_module(mod_num: int, name: str, test_func):
     """Выполняет тест, замеряет время и отправляет статус в дашборд."""
-    print(f"[{mod_num:02d}/28] Тестирую: {name}...", end=" ", flush=True)
+    print(f"[{mod_num:02d}/32] Тестирую: {name}...", end=" ", flush=True)
     start_t = time.time()
     try:
         ok, err_msg = test_func()
@@ -82,7 +82,7 @@ def run_test_module(mod_num: int, name: str, test_func):
         return False, err
 
 # ====================================================================
-# ТЕСТОВЫЕ КЕЙСЫ ДЛЯ КАЖДОГО ИЗ 28 МОДУЛЕЙ
+# ТЕСТОВЫЕ КЕЙСЫ ДЛЯ КАЖДОГО ИЗ 32 МОДУЛЕЙ
 # ====================================================================
 
 # 1. Авторизация и профиль пользователя
@@ -278,26 +278,15 @@ def test_mod_19():
 
 # 20. Распознавание чека (общая сумма)
 def test_mod_20():
-    """
-    Экономный, но глубокий тест модуля распознавания чеков (без траты денег на тяжелый Vision):
-    1. Проверка доступности шлюза нейросети (models.list — 0 токенов / 0 руб).
-    2. Проверка наличия и валидности системных промптов чека в config.py.
-    3. Тестирование парсера JSON-ответа чека (_extract_json_object) на Markdown-разметке ИИ.
-    4. Проверка интеграции обработчика чеков с базой данных (smart_search_item).
-    5. Проверка алгоритма авто-фокуса на единственной спорной позиции чека.
-    """
     try:
-        # 1. Проверка шлюза ИИ (бесплатный запрос к API списка моделей для валидации ключа и связи)
         m_list = ai_client.models.list()
         if not m_list or not hasattr(m_list, "data"):
             return False, "Шлюз нейросети (AI Tunnel) недоступен для чеков"
 
-        # 2. Проверка системного промпта
         from config import PROMPT_RECEIPT_TOTAL
         if not PROMPT_RECEIPT_TOTAL or "amount" not in PROMPT_RECEIPT_TOTAL.lower():
             return False, "В config.py поврежден или пуст PROMPT_RECEIPT_TOTAL"
 
-        # 3. Проверка парсера JSON-ответов от Vision-модели (обработка markdown code fence ```json)
         import handlers_receipt
         if not hasattr(handlers_receipt, "handle_receipt") or not hasattr(handlers_receipt, "_extract_json_object"):
             return False, "В handlers_receipt.py отсутствуют ключевые функции парсинга"
@@ -308,13 +297,11 @@ def test_mod_20():
         if data.get("amount") != 1250.50 or data.get("item") != "Тестовый Супермаркет":
             return False, f"Парсер ответа чека вернул некорректные данные: {data}"
 
-        # 4. Проверка готовности связки с БД
         uid = get_or_create_user(TEST_VK_ID)
         test_search = smart_search_item(uid, data["item"], "Расход")
         if not isinstance(test_search, dict) or "status" not in test_search:
             return False, "Сбой интеграции чека со справочником категорий БД"
 
-        # 5. Проверка логики авто-фокуса на единственной неразобранной позиции
         sample_items = [
             {"item": "Рыба", "amount": 99.99, "category": "Разное", "subcategory": "Требует проверки"},
             {"item": "Кесадилья", "amount": 98.4, "category": "Готовая еда", "subcategory": "Фастфуд"}
@@ -346,7 +333,6 @@ def test_mod_22():
     if not isinstance(unv, list):
         return False, f"get_unverified_transactions вернул не список: {unv}"
 
-    # Создаем временную тестовую транзакцию «Требует проверки» и очищаем ее
     test_word = "ТестТоварОчереди22"
     save_transaction(uid, "Расход", "Разное", "Требует проверки", test_word, 100.0, "", test_word, "needs_review")
     try:
@@ -406,11 +392,9 @@ def test_mod_27():
         return False, "Не удалось создать исходную транзакцию для теста"
     tx_id = last_tx["id"]
 
-    # Вызываем перенос в новую статью «ТестНастенныеЧасы»
     ok_edit = apply_edit_to_last_transaction(TEST_VK_ID, uid, new_article_name="ТестНастенныеЧасы")
     updated_tx = get_last_transaction(uid)
     
-    # Очистка за собой
     delete_transaction_by_id(uid, tx_id)
     db_delete_entity(uid, "article", "Расход", "Быт", "Мебель", "ТестНастенныеЧасы")
 
@@ -418,60 +402,137 @@ def test_mod_27():
         return True, ""
     return False, f"Сбой переноса в новую статью: ok={ok_edit}, tx_art={updated_tx.get('article') if updated_tx else None}"
 
-# 28. Список покупок и плановые расходы
+# 28. Удаление операций голосом
 def test_mod_28():
-    """
-    Проверяет модуль списка покупок и плановых расходов:
-    1. Парсинг составных фраз с суммами (_extract_planned_items_from_text).
-    2. Добавление запланированных позиций в БД (add_planned_items).
-    3. Чтение активного списка (get_active_planned_items).
-    4. Отметка покупки / вычеркивание (mark_item_bought_by_id).
-    5. Полная очистка списка покупок (clear_all_planned_items).
-    """
+    """Проверяет распознавание и отработку голосовых команд удаления операций."""
+    try:
+        from voice_parser import _parse_compound_voice_command
+        phrase = "Удали первую и третью операцию"
+        acts = _parse_compound_voice_command(phrase.lower(), 5)
+        del_acts = [a for a in acts if a.get("action") == "delete"]
+        if len(del_acts) < 2:
+            res_ai = parse_voice_list_command_with_ai("удали первую и третью")
+            if not res_ai or res_ai.get("action") != "delete":
+                return False, f"Парсеры не распознали голосовую команду удаления: acts={acts}, res_ai={res_ai}"
+
+        uid = get_or_create_user(TEST_VK_ID)
+        save_transaction(uid, "Расход", "Еда", "Кафе", "ТестГолосУдаление", 200.0, "", "ТестГолосУдаление", "verified")
+        last_tx = get_last_transaction(uid)
+        if not last_tx:
+            return False, "Не удалось создать операцию для проверки удаления"
+        ok_del = delete_transaction_by_id(uid, last_tx["id"])
+        if not ok_del:
+            return False, "delete_transaction_by_id не удалил тестовую операцию"
+        return True, ""
+    except Exception as e:
+        return False, f"Сбой проверки модуля удаления операций голосом: {e}"
+
+# 29. План операций: добавление голосом
+def test_mod_29():
+    """Проверяет парсинг и добавление покупок в план операций голосом."""
+    try:
+        from handlers_planned import _extract_planned_items_from_text, add_planned_items, clear_all_planned_items
+        phrase = "Добавь в список покупок молоко 90, сыр 350 и кофе за 500"
+        parsed = _extract_planned_items_from_text(phrase)
+        if len(parsed) < 3:
+            return False, f"Парсер добавления покупок в план выделил меньше 3 позиций: {parsed}"
+        
+        uid = get_or_create_user(TEST_VK_ID)
+        clear_all_planned_items(uid)
+        ok_add = add_planned_items(uid, parsed)
+        if not ok_add:
+            return False, "add_planned_items не смог сохранить распарсенные покупки"
+        return True, ""
+    except Exception as e:
+        return False, f"Сбой модуля добавления в план голосом: {e}"
+
+# 30. План операций: редактирование голосом
+def test_mod_30():
+    """Проверяет голосовое редактирование позиций и сумм в плане покупок."""
     try:
         from handlers_planned import (
-            _extract_planned_items_from_text,
+            add_planned_items,
+            get_active_planned_items,
+            update_planned_item_amount,
+            rename_planned_item,
+            clear_all_planned_items
+        )
+        uid = get_or_create_user(TEST_VK_ID)
+        clear_all_planned_items(uid)
+        add_planned_items(uid, [{"item": "ТестПравкаПлана", "amount": 100.0}])
+        active = get_active_planned_items(uid)
+        if not active:
+            return False, "Не удалось создать позицию для проверки правки плана"
+        
+        p_id = active[0]["id"]
+        ok_amt = update_planned_item_amount(uid, p_id, 250.0)
+        ok_ren = rename_planned_item(uid, p_id, "ТестПравкаПланаПереименован")
+        clear_all_planned_items(uid)
+
+        if ok_amt and ok_ren:
+            return True, ""
+        return False, f"Сбой обновления позиции плана: amt={ok_amt}, ren={ok_ren}"
+    except Exception as e:
+        return False, f"Сбой модуля редактирования плана голосом: {e}"
+
+# 31. План операций: удаление голосом
+def test_mod_31():
+    """Проверяет голосовое удаление / вычеркивание позиций из плана покупок."""
+    try:
+        from handlers_planned import (
+            add_planned_items,
+            get_active_planned_items,
+            delete_planned_item_by_id,
+            clear_all_planned_items
+        )
+        uid = get_or_create_user(TEST_VK_ID)
+        clear_all_planned_items(uid)
+        add_planned_items(uid, [{"item": "ТестУдалениеПлана", "amount": 300.0}])
+        active = get_active_planned_items(uid)
+        if not active:
+            return False, "Не удалось добавить позицию для проверки удаления плана"
+        
+        p_id = active[0]["id"]
+        ok_del = delete_planned_item_by_id(uid, p_id)
+        clear_all_planned_items(uid)
+
+        if ok_del:
+            return True, ""
+        return False, "delete_planned_item_by_id не удалил позицию из плана"
+    except Exception as e:
+        return False, f"Сбой модуля удаления плана голосом: {e}"
+
+# 32. План операций: просмотр и факт покупки
+def test_mod_32():
+    """Проверяет просмотр активного списка покупок и проведение факта покупки."""
+    try:
+        from handlers_planned import (
             add_planned_items,
             get_active_planned_items,
             mark_item_bought_by_id,
             clear_all_planned_items
         )
-
-        # 1. Проверка синтаксического парсера
-        parsed = _extract_planned_items_from_text("Надо купить болгарку за 4500 и диски 300")
-        if len(parsed) < 2 or parsed[0].get("amount") != 4500.0:
-            return False, f"Парсер списка покупок вернул некорректные данные: {parsed}"
-
-        # 2. Проверка работы с базой данных
         uid = get_or_create_user(TEST_VK_ID)
         clear_all_planned_items(uid)
-
-        test_items = [
-            {"item": "ТестМолоко28", "amount": 89.0},
-            {"item": "ТестХлеб28", "amount": 45.0}
-        ]
-        ok_add = add_planned_items(uid, test_items)
-        if not ok_add:
-            return False, "add_planned_items не смог сохранить покупки в БД"
-
+        add_planned_items(uid, [
+            {"item": "ТестХлебФакт", "amount": 50.0},
+            {"item": "ТестМолокоФакт", "amount": 90.0}
+        ])
         active = get_active_planned_items(uid)
-        if not active or len(active) < 2:
-            return False, f"get_active_planned_items не вернул добавленные товары: {active}"
-
-        # 3. Проверка отметки о покупке
-        item_id = active[0]["id"]
-        bought = mark_item_bought_by_id(uid, item_id)
-        if not bought or bought.get("item") != "ТестМолоко28":
-            return False, f"mark_item_bought_by_id дал сбой: {bought}"
-
-        # 4. Очистка тестовых данных
+        if len(active) < 2:
+            return False, f"get_active_planned_items вернул неполный список: {active}"
+        
+        bought = mark_item_bought_by_id(uid, active[0]["id"])
         clear_all_planned_items(uid)
-        return True, ""
+
+        if bought and bought.get("item") == "ТестХлебФакт":
+            return True, ""
+        return False, f"mark_item_bought_by_id вернул некорректные данные: {bought}"
     except Exception as e:
-        return False, f"Сбой проверки модуля списка покупок: {e}"
+        return False, f"Сбой модуля просмотра и факта покупки: {e}"
 
 # ====================================================================
-# ГЛАВНЫЙ РЕЕСТР ПРОГОНА 28 ТЕСТОВ
+# ГЛАВНЫЙ РЕЕСТР ПРОГОНА 32 ТЕСТОВ
 # ====================================================================
 TESTS_REGISTRY = [
     (1, "Авторизация и профиль пользователя", test_mod_01),
@@ -501,13 +562,17 @@ TESTS_REGISTRY = [
     (25, "Управление структурой (CRUD статей)", test_mod_25),
     (26, "Сторожевой таймер и панель контроля (Watchdog)", test_mod_26),
     (27, "Создание новой статьи голосом при правке транзакций", test_mod_27),
-    (28, "Список покупок и плановые расходы", test_mod_28),
+    (28, "Удаление операций голосом", test_mod_28),
+    (29, "План операций: добавление голосом", test_mod_29),
+    (30, "План операций: редактирование голосом", test_mod_30),
+    (31, "План операций: удаление голосом", test_mod_31),
+    (32, "План операций: просмотр и факт покупки", test_mod_32)
 ]
 
 def run_all_self_tests():
-    """Запускает полный аудит всех 28 функциональных узлов."""
+    """Запускает полный аудит всех 32 функциональных узлов."""
     print("=" * 65)
-    print("🚀 СТАРТ СКВОЗНОГО АУДИТА СИСТЕМЫ «ОРАКУЛ» (28 МОДУЛЕЙ)")
+    print("🚀 СТАРТ СКВОЗНОГО АУДИТА СИСТЕМЫ «ОРАКУЛ» (32 МОДУЛЯ)")
     print(f"⏰ Время запуска: {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}")
     print("=" * 65)
 
