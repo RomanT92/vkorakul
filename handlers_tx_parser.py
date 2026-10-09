@@ -17,6 +17,13 @@ SPOKEN_NUMBER_REPLACEMENTS = [
     (r'\b(полторы\s*тысячи|полторы\s*тыщи|полтора\s*косаря)\b', '1500'),
     (r'\b(две\s*тысячи|две\s*тыщи)\b', '2000'),
     (r'\b(три\s*тысячи|три\s*тыщи)\b', '3000'),
+    (r'\b(четыре\s*тысячи|четыре\s*тыщи)\b', '4000'),
+    (r'\b(пять\s*тысяч|пять\s*тыщ)\b', '5000'),
+    (r'\b(шесть\s*тысяч|шесть\s*тыщ)\b', '6000'),
+    (r'\b(семь\s*тысяч|семь\s*тыщ)\b', '7000'),
+    (r'\b(восемь\s*тысяч|восемь\s*тыщ)\b', '8000'),
+    (r'\b(девять\s*тысяч|девять\s*тыщ)\b', '9000'),
+    (r'\b(десять\s*тысяч|десять\s*тыщ)\b', '10000'),
     (r'\b(сто|сотка)\b', '100'),
     (r'\bдвести\b', '200'),
     (r'\bтриста\b', '300'),
@@ -29,10 +36,20 @@ SPOKEN_NUMBER_REPLACEMENTS = [
 
 def normalize_spoken_numbers(text):
     """
-    Нормализует разговорные числительные и оговорки Whisper в цифры
-    (например: 'питот' -> '500', 'тыща' -> '1000').
+    Нормализует разговорные числительные и оговорки Whisper в цифры:
+    - '15 тысяч' -> '15000'
+    - 'питот' -> '500'
+    - 'тыща' -> '1000'
     """
     res = text
+    # 1. Универсальное умножение цифр на 1000: '15 тысяч' -> '15000'
+    res = re.sub(
+        r'\b(\d+(?:[.,]\d+)?)\s*(?:тысяч[аеий]?|тыщ[аеий]?|к|k)\b',
+        lambda m: str(int(float(m.group(1).replace(',', '.')) * 1000)),
+        res,
+        flags=re.IGNORECASE
+    )
+
     for pattern, repl in SPOKEN_NUMBER_REPLACEMENTS:
         res = re.sub(pattern, repl, res, flags=re.IGNORECASE)
     return res
@@ -42,7 +59,7 @@ def extract_recipient_and_clean_item(raw_text):
     Интеллектуальный разбор текста операции:
     1. Отсекает служебные слова типа ('расход', 'доход', 'трата', 'оплата').
     2. Извлекает контекст/категорию из скобок или маркеров ('статья X', 'категория Y', 'в подкатегорию Z').
-    3. Распознает составные конструкции ('на самозанятость поклейка обоев уголки' -> item='уголки', hint='самозанятость поклейка обоев').
+    3. Распознает адреса и ориентиры ('сгибнего 9 корпус 2', 'ул ленина 15') и переносит их в комментарий.
     4. Отсекает адресатов/имена во всех падежах ('игрушка Марку' -> item='игрушка', comment='Марку').
     Возвращает: clean_item, extracted_comment, category_hint
     """
@@ -54,13 +71,29 @@ def extract_recipient_and_clean_item(raw_text):
 
     clean_item = re.sub(r'^(?:расход|доход|трата|трату|оплата|купил|оплатил)\s+', '', clean_item, flags=re.IGNORECASE).strip()
 
-    # 2. Поиск подсказок категорий в круглых скобках: (поклейка обоев) или (самозанятость)
+    # 2. Поиск адресов (улица, дом, корпус, строение): 'сгибнего 9 корпус 2', 'ленина дом 5 кв 12'
+    address_m = re.search(
+        r'\b(?:ул(?:ица)?\.?\s+|пер(?:еулок)?\.?\s+|просп(?:ект)?\.?\s+)?'
+        r'([а-яёa-z\-]+(?:\s+(?:ул|пер|проезд))?)\s+'
+        r'(\d+[\w\-/]*)(?:\s+(?:корп(?:ус)?\.?|к\.?|стр(?:оение)?\.?)\s*(\d+[\w\-]*))?'
+        r'(?:\s+(?:кв(?:артира)?\.?)\s*(\d+))?\b',
+        clean_item,
+        flags=re.IGNORECASE
+    )
+    if address_m:
+        addr_text = address_m.group(0).strip()
+        # Проверяем, что это не обычное слово с числом
+        if any(w in clean_item.lower() for w in ["корпус", "корп", "дом", "кв", "ул", "сгибне"]) or len(addr_text.split()) >= 2:
+            extracted_comment = addr_text.strip()
+            clean_item = (clean_item[:address_m.start()] + clean_item[address_m.end():]).strip()
+
+    # 3. Поиск подсказок категорий в круглых скобках: (поклейка обоев) или (самозанятость)
     m_paren = re.search(r'\(([^)]+)\)', clean_item)
     if m_paren:
         category_hint = m_paren.group(1).strip()
         clean_item = (clean_item[:m_paren.start()] + clean_item[m_paren.end():]).strip()
 
-    # 3. Поиск явных синтаксических маркеров: 'статья X', 'категория Y', 'подкатегория Z'
+    # 4. Поиск явных синтаксических маркеров: 'статья X', 'категория Y', 'подкатегория Z'
     m_cat_marker = re.search(
         r'(?:,?\s*(?:в\s+)?(?:стать[яюи]|категори[яюи]|подкатегори[яюи])\s*:?\s*)([а-яёa-z0-9\s\-]+)$',
         clean_item,
@@ -71,7 +104,7 @@ def extract_recipient_and_clean_item(raw_text):
             category_hint = m_cat_marker.group(1).strip()
         clean_item = clean_item[:m_cat_marker.start()].strip()
 
-    # 4. Поиск составных конструкций с предлогом в начале: 'на самозанятость поклейка обоев уголки'
+    # 5. Поиск составных конструкций с предлогом в начале: 'на самозанятость поклейка обоев уголки'
     m_prep_start = re.match(r'^(?:на|для)\s+(.+?)\s+([а-яёa-z0-9\-]+)$', clean_item, flags=re.IGNORECASE)
     if m_prep_start:
         prep_body = m_prep_start.group(1).strip()
@@ -79,7 +112,7 @@ def extract_recipient_and_clean_item(raw_text):
         category_hint = prep_body
         clean_item = actual_item
 
-    # 5. Поиск предложных конструкций в конце: 'уголки для ремонта', 'обои на заказ'
+    # 6. Поиск предложных конструкций в конце: 'уголки для ремонта', 'обои на заказ'
     if not category_hint:
         m_prep_end = re.search(r'\s+(?:на|для)\s+([а-яёa-z0-9\s\-]+)$', clean_item, flags=re.IGNORECASE)
         if m_prep_end:
@@ -96,14 +129,14 @@ def extract_recipient_and_clean_item(raw_text):
                 extracted_comment = prep_tail.capitalize()
             clean_item = clean_item[:m_prep_end.start()].strip()
 
-    # 6. Поиск одиночных предлогов адресата: 'для Марка', 'на маму'
+    # 7. Поиск одиночных предлогов адресата: 'для Марка', 'на маму'
     if not extracted_comment:
         m_prep = re.search(r'\b(?:для|на)\s+([а-яёa-z0-9\-]+)\b', clean_item, flags=re.IGNORECASE)
         if m_prep:
             extracted_comment = m_prep.group(0).strip().capitalize()
             clean_item = (clean_item[:m_prep.start()] + clean_item[m_prep.end():]).strip()
 
-    # 7. Поиск имен и родственников во всех падежах
+    # 8. Поиск имен и родственников во всех падежах
     if not extracted_comment:
         m_name = re.search(
             r'\b('
@@ -156,30 +189,56 @@ def clean_fallback_item(user_text):
 
 def _try_fast_single_transaction_parse(user_text):
     """
-    Детерминированный разбор простых фраз типа 'Шиномонтаж 2600', '1700 игрушка Марку',
-    'Обои на заказ 2000 рублей.' без вызова ИИ.
-    Автоматически выделяет категорию/подсказку в category_hint и адресатов в comment.
+    Детерминированный разбор простых фраз:
+    - 'доход 15 тысяч поклейка обоев сгибнего 9 корпус 2'
+    - 'Шиномонтаж 2600'
+    - 'Обои на заказ 2000 рублей.'
+    С защитой от ложного распознавания номеров корпусов/домов (< 50) как сумм.
     """
     norm_text = normalize_spoken_numbers(user_text.strip()).rstrip('.,;!? ')
-
-    # Поддержка всех вариантов окончаний валюты и знаков препинания в конце
-    match_end = re.search(r'^(.*?)\s+(\d+(?:[.,]\d+)?)\s*(?:руб(?:лей|ля|ль)?|р)?[\s.,;!?]*$', norm_text, re.IGNORECASE)
-    match_start = re.search(r'^(\d+(?:[.,]\d+)?)\s*(?:руб(?:лей|ля|ль)?|р)?[\s.,;!?]+\s*(.*?)$', norm_text, re.IGNORECASE)
 
     raw_item = None
     raw_amount = None
 
-    if match_end:
-        raw_item = match_end.group(1).strip()
-        raw_amount = match_end.group(2).replace(',', '.')
-    elif match_start:
-        raw_amount = match_start.group(1).replace(',', '.')
-        raw_item = match_start.group(2).strip()
+    # 1. Сначала проверяем сумму в начале строки: 'доход 15000 поклейка обоев сгибнего 9 корпус 2'
+    # Это предотвращает ложный захват числа '2' (корпус 2) в конце строки как суммы!
+    match_start_lead = re.search(
+        r'^(?:доход|приход|расход|трата|оплата)?\s*(\d+(?:[.,]\d+)?)\s*(?:руб(?:лей|ля|ль)?|р)?[\s.,;!?]+\s*(.*?)$',
+        norm_text,
+        re.IGNORECASE
+    )
+
+    if match_start_lead:
+        cand_amt = float(match_start_lead.group(1).replace(',', '.'))
+        cand_item = match_start_lead.group(2).strip()
+        # Если в начале найдена сумма >= 50, берем её в приоритете!
+        if cand_amt >= 50 and len(cand_item) >= 2:
+            raw_amount = cand_amt
+            raw_item = cand_item
+
+    # 2. Если в начале суммы не было — проверяем сумму в конце строки
+    if raw_amount is None:
+        match_end = re.search(r'^(.*?)\s+(\d+(?:[.,]\d+)?)\s*(?:руб(?:лей|ля|ль)?|р)?[\s.,;!?]*$', norm_text, re.IGNORECASE)
+        if match_end:
+            cand_item = match_end.group(1).strip()
+            cand_amt_val = float(match_end.group(2).replace(',', '.'))
+            
+            # Защита: число меньше 50 в конце строки не считается суммой, если перед ним идут слова адреса
+            is_address_tail = any(w in cand_item.lower() for w in ["корпус", "корп", "дом", "кв", "стр", "этаж", "бокс"])
+            if cand_amt_val >= 50 or (not is_address_tail and cand_amt_val > 0):
+                raw_item = cand_item
+                raw_amount = cand_amt_val
+
+    # 3. Общий fallback на сумму в начале без служебных слов
+    if raw_amount is None:
+        match_start = re.search(r'^(\d+(?:[.,]\d+)?)\s*(?:руб(?:лей|ля|ль)?|р)?[\s.,;!?]+\s*(.*?)$', norm_text, re.IGNORECASE)
+        if match_start:
+            raw_amount = float(match_start.group(1).replace(',', '.'))
+            raw_item = match_start.group(2).strip()
 
     if raw_item and raw_amount:
         try:
             amt = float(raw_amount)
-            # Разрешаем разбор одной операции, исключая явные списки через точку с запятой или переносы
             if amt > 0 and len(raw_item) >= 2 and not any(ch in raw_item for ch in [';', '\n']):
                 clean_title, comment, category_hint = extract_recipient_and_clean_item(raw_item)
                 return {
@@ -208,7 +267,6 @@ def _validate_ai_category_choice(menu_full, op_type, cat, sub):
     matched_cat = next((c for c in type_menu if c.lower() == cat_clean), None)
 
     if not matched_cat:
-        # Интеллектуальный поиск: возможно cat на самом деле является подкатегорией
         for real_cat, subs in type_menu.items():
             sub_names = list(subs.keys()) if isinstance(subs, dict) else subs
             for s in sub_names:
@@ -220,7 +278,6 @@ def _validate_ai_category_choice(menu_full, op_type, cat, sub):
                 break
 
     if not matched_cat:
-        # Поиск по подкатегории
         for real_cat, subs in type_menu.items():
             sub_names = list(subs.keys()) if isinstance(subs, dict) else subs
             for s in sub_names:
@@ -237,12 +294,10 @@ def _validate_ai_category_choice(menu_full, op_type, cat, sub):
     subs = type_menu[matched_cat]
     sub_list = list(subs.keys()) if isinstance(subs, dict) else subs
 
-    # Проверка и нормализация подкатегории внутри найденной категории
     matched_sub = next((s for s in sub_list if s.lower() == str(sub).lower().strip()), None)
     if matched_sub:
         return matched_cat, matched_sub
 
-    # Если подкатегория не совпала в точности, ищем резервную в этой категории
     default_sub = next((s for s in sub_list if "другое" in s.lower()), None)
     if default_sub:
         return matched_cat, default_sub
@@ -291,7 +346,6 @@ def _find_best_matching_article_in_sub(menu_full, op_type, cat, sub, user_word):
     if other_art:
         return other_art
 
-    # Первая каноническая статья подкатегории
     return sub_articles[0]
 
 def _match_category_tree(menu_full, op_type, text):
