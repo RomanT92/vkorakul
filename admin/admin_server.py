@@ -23,7 +23,7 @@ app.mount("/static", StaticFiles(directory=str(admin_dir)), name="static")
 templates = Jinja2Templates(directory=str(admin_dir))
 
 # ====================================================================
-# IN-MEMORY ХРАНИЛИЩЕ СОСТОЯНИЯ МОНИТОРИНГА (WATCHDOG & 28 МОДУЛЕЙ)
+# IN-MEMORY ХРАНИЛИЩЕ СОСТОЯНИЯ МОНИТОРИНГА (WATCHDOG & 32 МОДУЛЯ)
 # ====================================================================
 SYSTEM_HEALTH_STATE: Dict[str, Any] = {
     "last_heartbeat": 0.0,
@@ -74,9 +74,13 @@ MODULES_REGISTRY = [
 
     # СЛОЙ 7: Расширенное голосовое управление и Active Learning
     {"num": 27, "name": "Создание новой статьи голосом при правке транзакций", "files": "handlers_history.py, handlers_voice_commands.py, config.py, db/transactions.py", "test_cmd": "«У последней операции перенеси в новую статью настенные часы»", "layer": "Voice / Metadata CRUD", "default_status": "Не проверялся"},
+    {"num": 28, "name": "Удаление операций голосом", "files": "handlers_voice_commands.py, voice_parser.py, db/transactions.py", "test_cmd": "«Удали последнюю», «Удали первую и третью», «Удали операцию 2»", "layer": "Voice / Delete", "default_status": "Не проверялся"},
 
-    # СЛОЙ 8: Планирование и Списки покупок
-    {"num": 28, "name": "Список покупок и плановые расходы", "files": "handlers_planned.py, db/connection.py, db/transactions.py, main.py", "test_cmd": "Купить молоко и хлеб, Что купить, Купил 1 за 250", "layer": "Planning / Shopping List", "default_status": "Не проверялся"}
+    # СЛОЙ 8: Планирование и Списки покупок (План операций)
+    {"num": 29, "name": "План операций: добавление голосом", "files": "handlers_planned.py, voice_parser.py, services.py", "test_cmd": "«Купить молоко, хлеб и кофе», «Добавь в список покупок зубную пасту за 250»", "layer": "Planning / Voice Add", "default_status": "Не проверялся"},
+    {"num": 30, "name": "План операций: редактирование голосом", "files": "handlers_planned.py, voice_parser.py, db/transactions.py", "test_cmd": "«В плане покупок измени второе на сыр», «Поменяй сумму на 350»", "layer": "Planning / Voice Edit", "default_status": "Не проверялся"},
+    {"num": 31, "name": "План операций: удаление голосом", "files": "handlers_planned.py, voice_parser.py, db/transactions.py", "test_cmd": "«Вычеркни молоко из покупок», «Удали первое и третье»", "layer": "Planning / Voice Delete", "default_status": "Не проверялся"},
+    {"num": 32, "name": "План операций: просмотр и факт покупки", "files": "handlers_planned.py, db/connection.py, db/transactions.py, main.py", "test_cmd": "«Что купить», «Список покупок», «Купил второе за 400»", "layer": "Planning / Shopping List", "default_status": "Не проверялся"}
 ]
 
 @app.get("/", response_class=HTMLResponse)
@@ -172,7 +176,7 @@ class ModuleStatusPayload(BaseModel):
 
 @app.post("/api/module_status")
 async def update_module_status(p: ModuleStatusPayload):
-    """Обновление статуса конкретного модуля (1..28)."""
+    """Обновление статуса конкретного модуля (1..32)."""
     if 1 <= p.module_num <= len(MODULES_REGISTRY):
         SYSTEM_HEALTH_STATE["module_statuses"][str(p.module_num)] = {
             "status": p.status,
